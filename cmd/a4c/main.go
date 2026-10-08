@@ -115,7 +115,11 @@ func runInit(args []string) {
 
 	dotDir, storeDir, rosterDir, memDir, journalDir := getPaths(target)
 
-	dirs := []string{dotDir, storeDir, rosterDir, memDir, journalDir}
+	dirs := []string{
+		dotDir, storeDir, rosterDir, memDir, journalDir,
+		filepath.Join(dotDir, "worktrees"),
+		filepath.Join(dotDir, "structural"),
+	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to create directory %s: %v\n", d, err)
@@ -379,7 +383,7 @@ func runLoop(args []string) {
 	workDir := fs.String("dir", ".", "Workspace directory")
 	_ = fs.Parse(args)
 
-	_, storeDir, rosterDir, memDir, journalDir := getPaths(*workDir)
+	dotDir, storeDir, rosterDir, memDir, journalDir := getPaths(*workDir)
 
 	roster, err := a4c.DefaultTeamRoster(rosterDir)
 	if err != nil {
@@ -421,6 +425,12 @@ func runLoop(args []string) {
 	}
 
 	coord := a4c.NewTeamCoordinator(*workDir, store, roster, memory, gov, journal, runner, provider)
+	if wtMgr, err := a4c.NewWorktreeManager(*workDir, filepath.Join(dotDir, "worktrees")); err == nil {
+		coord.SetWorktreeManager(wtMgr)
+	}
+	if structStore, err := a4c.NewDurableStructuralStore(filepath.Join(dotDir, "structural")); err == nil {
+		coord.SetStructuralStore(structStore)
+	}
 
 	fmt.Printf("Starting governed team loop (max steps: %d)...\n", *maxSteps)
 	ctx := context.Background()

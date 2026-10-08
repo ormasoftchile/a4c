@@ -144,3 +144,17 @@ func (j *DurableIntentJournal) ReconcileUnfinished(ctx context.Context, reconcil
 
 	return resolved, nil
 }
+
+// FindIntentsForActivity returns all intent records associated with an activity ID.
+func (j *DurableIntentJournal) FindIntentsForActivity(activityID string) []IntentRecord {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	var list []IntentRecord
+	for _, in := range j.intents {
+		if in.ActivityID == activityID {
+			list = append(list, *in)
+		}
+	}
+	return list
+}

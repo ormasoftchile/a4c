@@ -29,6 +29,7 @@ func (r *LocalEffectReconciler) Reconcile(ctx context.Context, intent IntentReco
 type TeamCoordinator struct {
 	mu            sync.Mutex
 	WorkspaceDir  string
+	WorktreeMgr   *WorktreeManager
 	Store         *DurableActivityStore
 	Roster        *TeamRoster
 	Memory        *DurableMemoryStore
@@ -77,6 +78,38 @@ func NewTeamCoordinator(
 	}
 }
 
+// SetWorktreeManager sets the Git worktree manager for task isolation.
+func (c *TeamCoordinator) SetWorktreeManager(mgr *WorktreeManager) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.WorktreeMgr = mgr
+}
+
+func (c *TeamCoordinator) getRootTaskID(req *ActivityRequest) string {
+	rootID := req.ID
+	curr := req
+	for curr.ParentID != "" {
+		parentRec, err := c.Store.Get(curr.ParentID)
+		if err != nil {
+			break
+		}
+		curr = &parentRec.Request
+		rootID = curr.ID
+	}
+	return rootID
+}
+
+func (c *TeamCoordinator) resolveWorkspace(req *ActivityRequest) string {
+	if c.WorktreeMgr != nil {
+		rootID := c.getRootTaskID(req)
+		if wt, err := c.WorktreeMgr.GetWorktree(rootID); err == nil && wt.WorktreePath != "" {
+			return wt.WorktreePath
+		}
+	}
+	return c.WorkspaceDir
+}
+
+
 // SubmitTask allows the human engineer to assign a feature request to the persistent team.
 func (c *TeamCoordinator) SubmitTask(objective string, budget Budget, inputs map[string]any) (*ActivityRequest, error) {
 	req := ActivityRequest{
@@ -86,6 +119,10 @@ func (c *TeamCoordinator) SubmitTask(objective string, budget Budget, inputs map
 		Inputs:    inputs,
 		Budget:    budget,
 		CreatedAt: time.Now(),
+	}
+
+	if c.WorktreeMgr != nil {
+		_, _ = c.WorktreeMgr.AcquireWorktree(context.Background(), req.ID, "team")
 	}
 
 	if err := c.Store.Enqueue(req); err != nil {
@@ -134,10 +171,12 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	var decisionRequest *HumanDecisionRequest
 	var reviewResult *ReviewResult
 
+	activeWorkspace := c.resolveWorkspace(req)
+
 	config := AgentConfig{
 		AgentID:       ident.ID,
 		Charter:       ident.Charter,
-		WorkspaceDir:  c.WorkspaceDir,
+		WorkspaceDir:  activeWorkspace,
 		Budget:        req.Budget,
 		Governor:      c.Governor,
 		IntentJournal: c.Journal,
@@ -182,7 +221,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	} else if ident.ID == "coder" {
 		promptBuilder.WriteString("Instructions: You are the Senior Programmer. Read repository code using governed_read_file and apply code changes using governed_apply_patch.\n")
 	} else if ident.ID == "reviewer" {
-		diff, _ := c.getWorkspaceDiff(ctx)
+		diff, _ := c.getWorkspaceDiff(ctx, activeWorkspace)
 		evidenceID := "none"
 		if c.lastEvidence != nil {
 			evidenceID = c.lastEvidence.EvidenceID
@@ -263,19 +302,19 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 	case "coder":
 		// Deterministic native testing and evidence collection
-		beforeSnapshot, err := c.Snapshotter.ComputeSnapshot(c.WorkspaceDir)
+		beforeSnapshot, err := c.Snapshotter.ComputeSnapshot(activeWorkspace)
 		if err != nil {
 			_ = c.Store.Fail(req.ID, err)
 			return nil, err
 		}
 
-		exitCode, testOut, err := c.TestRunner.RunTests(ctx, c.WorkspaceDir)
+		exitCode, testOut, err := c.TestRunner.RunTests(ctx, activeWorkspace)
 		if err != nil {
 			_ = c.Store.Fail(req.ID, err)
 			return nil, err
 		}
 
-		afterSnapshot, err := c.Snapshotter.ComputeSnapshot(c.WorkspaceDir)
+		afterSnapshot, err := c.Snapshotter.ComputeSnapshot(activeWorkspace)
 		if err != nil {
 			_ = c.Store.Fail(req.ID, err)
 			return nil, err
@@ -298,9 +337,9 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 					break
 				}
 
-				preSnap, _ := c.Snapshotter.ComputeSnapshot(c.WorkspaceDir)
-				exitCode, testOut, _ = c.TestRunner.RunTests(ctx, c.WorkspaceDir)
-				postSnap, _ := c.Snapshotter.ComputeSnapshot(c.WorkspaceDir)
+				preSnap, _ := c.Snapshotter.ComputeSnapshot(activeWorkspace)
+				exitCode, testOut, _ = c.TestRunner.RunTests(ctx, activeWorkspace)
+				postSnap, _ := c.Snapshotter.ComputeSnapshot(activeWorkspace)
 				if err := c.Snapshotter.ValidateIntegrity(preSnap, postSnap); err != nil {
 					break
 				}
@@ -317,13 +356,17 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			if !repaired {
 				failErr := fmt.Errorf("tests failed with exit code %d after %d repairs: %s", exitCode, repairAttempts, testOut)
 				_ = c.Store.Fail(req.ID, failErr)
+				if c.WorktreeMgr != nil {
+					rootID := c.getRootTaskID(req)
+					_ = c.WorktreeMgr.ReleaseWorktree(rootID, false)
+				}
 				return nil, failErr
 			}
 		}
 
 		// Native tests verified! Create evidence and promote memories
 		evidence := ValidationEvidence{
-			EvidenceID:          fmt.Sprintf("evi-%s-%d", req.ID, time.Now().Unix()),
+			EvidenceID:          fmt.Sprintf("evi-%s-%d", req.ID, time.Now().UnixNano()),
 			WorkspaceSnapshotID: afterSnapshot,
 			Command:             []string{"go", "test", "./..."},
 			ExitCode:            0,
@@ -353,7 +396,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		if c.lastEvidence == nil || !c.lastEvidence.Valid {
 			approved = false
 			comments = "Rejected: no valid native test evidence exists for these changes."
-		} else if err := c.Snapshotter.ValidateAgainstEvidence(c.WorkspaceDir, *c.lastEvidence); err != nil {
+		} else if err := c.Snapshotter.ValidateAgainstEvidence(activeWorkspace, *c.lastEvidence); err != nil {
 			approved = false
 			comments = fmt.Sprintf("Rejected: workspace modified after validation (%v)", err)
 		}
@@ -363,9 +406,15 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 		if !approved && c.revisionCount < c.MaxRevisions {
 			c.revisionCount++
+			// Invalidate existing evidence to force coder to re-run native tests
+			c.lastEvidence = nil
+
+			revisionID := fmt.Sprintf("%s-revision-%d", req.ID, c.revisionCount)
+			reReviewID := fmt.Sprintf("%s-rereview-%d", req.ID, c.revisionCount)
+
 			// Dispatch revision subtask back to coder
 			repairReq := ActivityRequest{
-				ID:        fmt.Sprintf("%s-revision-%d", req.ID, c.revisionCount),
+				ID:        revisionID,
 				ParentID:  req.ID,
 				AgentID:   "coder",
 				Objective: fmt.Sprintf("Address review rejection: %s", comments),
@@ -373,10 +422,33 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 				CreatedAt: time.Now(),
 			}
 			_ = c.Store.Enqueue(repairReq)
+
+			// Re-enqueue reviewer with explicit DAG dependency on the revision subtask
+			reReviewReq := ActivityRequest{
+				ID:        reReviewID,
+				ParentID:  req.ID,
+				AgentID:   "reviewer",
+				Objective: fmt.Sprintf("Re-review revision for: %s", req.Objective),
+				Budget:    Budget{Allocated: req.Budget.Available() / 2},
+				DependsOn: []string{revisionID},
+				CreatedAt: time.Now(),
+			}
+			_ = c.Store.Enqueue(reReviewReq)
 		} else if approved {
 			// Promote memories reviewed by quality reviewer
 			for _, m := range proposedMemories {
 				_, _ = c.Memory.Promote(m.Key, fmt.Sprintf("reviewer:%s", ident.ID))
+			}
+			result.Outputs["proposed_commit"] = fmt.Sprintf("feat: %s (verified by A4C %s & native tests)", req.Objective, ident.ID)
+			if c.WorktreeMgr != nil {
+				rootID := c.getRootTaskID(req)
+				_ = c.WorktreeMgr.ReleaseWorktree(rootID, true)
+			}
+		} else {
+			// Not approved and maximum revisions exceeded
+			if c.WorktreeMgr != nil {
+				rootID := c.getRootTaskID(req)
+				_ = c.WorktreeMgr.ReleaseWorktree(rootID, false)
 			}
 		}
 
@@ -424,9 +496,12 @@ func (c *TeamCoordinator) ResolveDecision(decisionID string, resolution string, 
 	return c.Store.ResolveHumanDecision(decisionID, resolution, approve, reassignTo)
 }
 
-func (c *TeamCoordinator) getWorkspaceDiff(ctx context.Context) (string, error) {
+func (c *TeamCoordinator) getWorkspaceDiff(ctx context.Context, dir string) (string, error) {
+	if dir == "" {
+		dir = c.WorkspaceDir
+	}
 	cmd := exec.CommandContext(ctx, "git", "diff", "HEAD")
-	cmd.Dir = c.WorkspaceDir
+	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
 		return string(out), nil
@@ -434,13 +509,14 @@ func (c *TeamCoordinator) getWorkspaceDiff(ctx context.Context) (string, error) 
 
 	// Fallback status
 	cmdStat := exec.CommandContext(ctx, "git", "status", "--short")
-	cmdStat.Dir = c.WorkspaceDir
+	cmdStat.Dir = dir
 	outStat, _ := cmdStat.CombinedOutput()
 	if len(strings.TrimSpace(string(outStat))) > 0 {
 		return string(outStat), nil
 	}
 	return "No uncommitted git changes detected.", nil
 }
+
 
 // parseTextDirectives extracts structured directives from model text output as fallback.
 func (c *TeamCoordinator) parseTextDirectives(

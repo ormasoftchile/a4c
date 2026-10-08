@@ -375,3 +375,34 @@ func (s *DurableActivityStore) CompletedCount() int {
 	}
 	return count
 }
+
+// GetTaskTree returns the root activity and all descendant subtasks in DAG order.
+func (s *DurableActivityStore) GetTaskTree(rootID string) []*ActivityRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var list []*ActivityRecord
+	taskIDs := map[string]bool{rootID: true}
+
+	for _, id := range s.order {
+		rec := s.records[id]
+		if rec.Request.ID == rootID || taskIDs[rec.Request.ParentID] {
+			taskIDs[rec.Request.ID] = true
+			list = append(list, rec)
+		}
+	}
+	return list
+}
+
+// ListAllDecisions returns all decision records.
+func (s *DurableActivityStore) ListAllDecisions() []*HumanDecisionRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var list []*HumanDecisionRequest
+	for _, dec := range s.decisions {
+		cp := *dec
+		list = append(list, &cp)
+	}
+	return list
+}

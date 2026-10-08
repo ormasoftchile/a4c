@@ -27,7 +27,7 @@ Agents for Coding — Governed Local AI Engineering Team
 
 func printUsage() {
 	fmt.Print(banner)
-	fmt.Println(`Usage: a4c <command> [options]
+	fmt.Print(`Usage: a4c <command> [options]
 
 Commands:
   init [path]                           Initialize an a4c workspace (.a4c directory)

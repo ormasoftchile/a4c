@@ -1,11 +1,15 @@
 module github.com/ormasoftchile/a4c
 
-go 1.25.0
+go 1.25.7
+
+require (
+	github.com/github/copilot-sdk/go v1.0.17
+	github.com/ormasoftchile/yawr/runtime v0.0.0-00010101000000-000000000000
+)
 
 require (
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/ebitengine/purego v0.10.1 // indirect
-	github.com/github/copilot-sdk/go v1.0.17 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
@@ -15,3 +19,5 @@ require (
 	go.opentelemetry.io/otel/metric v1.35.0 // indirect
 	go.opentelemetry.io/otel/trace v1.35.0 // indirect
 )
+
+replace github.com/ormasoftchile/yawr/runtime => /Users/cristianormazabal/Projects/yawr/runtime

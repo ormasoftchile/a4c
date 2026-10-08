@@ -2,7 +2,10 @@ package a4c
 
 import (
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/ormasoftchile/yawr/runtime/pkg/evidence"
 )
 
 var (
@@ -141,4 +144,15 @@ type ValidationEvidence struct {
 	StartedAt           time.Time `json:"started_at"`
 	CompletedAt         time.Time `json:"completed_at"`
 	Valid               bool      `json:"valid"`
+}
+
+// ToYAWREvidence bridges a4c validation evidence into YAWR runtime's native EvidenceRecord.
+func (v ValidationEvidence) ToYAWREvidence() evidence.EvidenceRecord {
+	return evidence.EvidenceRecord{
+		Name:       "workspace_validation",
+		Kind:       evidence.EvidenceKindSnapshot,
+		SHA256:     v.WorkspaceSnapshotID,
+		CapturedAt: v.CompletedAt,
+		Value:      fmt.Sprintf("exit_code=%d", v.ExitCode),
+	}
 }

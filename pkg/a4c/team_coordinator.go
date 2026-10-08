@@ -42,10 +42,13 @@ type TeamCoordinator struct {
 	MaxRepair     int
 	MaxRevisions  int
 	revisionCount int
-	lastEvidence  *ValidationEvidence
-	sessions      map[string]AgentSession
-	Handoff       *HandoffBuilder
-	Structural    StructuralProvider
+	lastEvidence           *ValidationEvidence
+	sessions               map[string]AgentSession
+	Handoff                *HandoffBuilder
+	Structural             StructuralProvider
+	Capabilities           *CapabilityRegistry
+	StructuralStore        *DurableStructuralStore
+	lastStructuralArtifact *StructuralContextArtifact
 }
 
 func NewTeamCoordinator(
@@ -78,6 +81,7 @@ func NewTeamCoordinator(
 		MaxRevisions: 2,
 		sessions:     make(map[string]AgentSession),
 		Handoff:      NewHandoffBuilder(),
+		Capabilities: NewCapabilityRegistry(),
 	}
 }
 
@@ -94,6 +98,44 @@ func (c *TeamCoordinator) SetStructuralProvider(p StructuralProvider) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.Structural = p
+}
+
+// SetStructuralStore connects durable storage for shared structural context artifacts.
+func (c *TeamCoordinator) SetStructuralStore(s *DurableStructuralStore) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.StructuralStore = s
+}
+
+// SetStructuralArtifact caches and persists a shared structural artifact.
+func (c *TeamCoordinator) SetStructuralArtifact(art *StructuralContextArtifact) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.setStructuralArtifactLocked(art)
+}
+
+func (c *TeamCoordinator) setStructuralArtifactLocked(art *StructuralContextArtifact) {
+	c.lastStructuralArtifact = art
+	if c.StructuralStore != nil && art != nil {
+		_ = c.StructuralStore.Save(art)
+	}
+}
+
+// GetStructuralArtifact retrieves a structural artifact by ID.
+func (c *TeamCoordinator) GetStructuralArtifact(id string) (*StructuralContextArtifact, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.getStructuralArtifactLocked(id)
+}
+
+func (c *TeamCoordinator) getStructuralArtifactLocked(id string) (*StructuralContextArtifact, error) {
+	if c.lastStructuralArtifact != nil && c.lastStructuralArtifact.ID == id {
+		return c.lastStructuralArtifact, nil
+	}
+	if c.StructuralStore != nil {
+		return c.StructuralStore.Get(id)
+	}
+	return nil, fmt.Errorf("structural artifact %q not found", id)
 }
 
 func (c *TeamCoordinator) getRootTaskID(req *ActivityRequest) string {
@@ -255,6 +297,10 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	var structuralQueriesCount int
 	var fileReadsCount int
 
+	// Resolve capability profile for this activity
+	profile := c.Capabilities.ResolveProfile(ident.ID, ident.Role, req.Objective, req.CapabilityProfile, c.Governor)
+	req.CapabilityProfile = &profile
+
 	config := AgentConfig{
 		AgentID:       ident.ID,
 		Charter:       ident.Charter,
@@ -263,6 +309,8 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		Governor:      c.Governor,
 		IntentJournal: c.Journal,
 		Structural:    c.Structural,
+		Profile:       &profile,
+		AllowedTools:  profile.AllowedTools,
 		OnRecordMetric: func(metric string, delta int) {
 			if metric == "structural_queries" {
 				structuralQueriesCount += delta
@@ -304,15 +352,34 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		evidenceID = c.lastEvidence.EvidenceID
 	}
 
+	// Resolve shared structural projection if available
+	var structProj string
+	structArt := c.lastStructuralArtifact
+	if req.StructuralArtifactID != "" {
+		if loaded, err := c.getStructuralArtifactLocked(req.StructuralArtifactID); err == nil && loaded != nil {
+			structArt = loaded
+		}
+	}
+	if structArt != nil {
+		switch ident.ID {
+		case "coder":
+			structProj = structArt.ProjectForCoder(40)
+		case "reviewer":
+			structProj = structArt.ProjectForReviewer(35)
+		}
+	}
+
 	artifact := HandoffArtifact{
-		Objective:          req.Objective,
-		Role:               fmt.Sprintf("%s (%s)", ident.Name, ident.Role),
-		AgentID:            ident.ID,
-		ActiveWorkspace:    activeWorkspace,
-		Diff:               diff,
-		ValidationEvidence: evidenceID,
-		VerifiedMemories:   c.Memory.FormatContext(),
-		Inputs:             req.Inputs,
+		Objective:            req.Objective,
+		Role:                 fmt.Sprintf("%s (%s)", ident.Name, ident.Role),
+		AgentID:              ident.ID,
+		ActiveWorkspace:      activeWorkspace,
+		Diff:                 diff,
+		ValidationEvidence:   evidenceID,
+		VerifiedMemories:     c.Memory.FormatContext(),
+		Inputs:               req.Inputs,
+		StructuralProjection: structProj,
+		ProfileDescription:   profile.Format(),
 	}
 
 	prompt := c.Handoff.BuildPrompt(artifact)
@@ -370,19 +437,38 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 	// 10. Process role-specific authoritative lifecycle
 	result := &ActivityResult{
-		ID:       req.ID,
-		Status:   StatusCompleted,
-		Consumed: consumed,
-		Metrics:  metrics,
+		ID:                   req.ID,
+		Status:               StatusCompleted,
+		Consumed:             consumed,
+		Metrics:              metrics,
+		CapabilityProfile:    &profile,
+		StructuralArtifactID: req.StructuralArtifactID,
 		Outputs: map[string]any{
 			"summary":    resp.Content,
 			"session_id": session.SessionID(),
 		},
 	}
 
-
 	switch ident.ID {
 	case "lead":
+		// Auto-capture structural context artifact if structural provider is available
+		if c.Structural != nil && c.Structural.Available() {
+			freshness, _ := c.Structural.CheckFreshness(ctx, activeWorkspace)
+			snapSHA, _ := c.Snapshotter.ComputeSnapshot(activeWorkspace)
+			artID := fmt.Sprintf("struct-%s", req.ID)
+			art := &StructuralContextArtifact{
+				ID:                artID,
+				RepositoryID:      req.ID,
+				WorkspaceSnapshot: snapSHA,
+				IndexedSnapshot:   snapSHA,
+				Freshness:         freshness,
+				Completeness:      "complete",
+				CreatedAt:         time.Now(),
+			}
+			c.setStructuralArtifactLocked(art)
+			result.StructuralArtifactID = artID
+		}
+
 		// Authorize and enqueue delegated subtasks
 		proposalIDMap := make(map[string]string)
 		for idx, prop := range proposedActivities {
@@ -417,6 +503,16 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			if authErr != nil {
 				return nil, fmt.Errorf("coordinator: proposal rejected by governor: %w", authErr)
 			}
+
+			// Assign role-specific capability profile and structural artifact link
+			childProfile := c.Capabilities.ResolveProfile(prop.ProposedAgentID, "", prop.Objective, prop.RequestedProfile, c.Governor)
+			authReq.CapabilityProfile = &childProfile
+			if result.StructuralArtifactID != "" {
+				authReq.StructuralArtifactID = result.StructuralArtifactID
+			} else if c.lastStructuralArtifact != nil {
+				authReq.StructuralArtifactID = c.lastStructuralArtifact.ID
+			}
+
 			// Idempotency check: don't double enqueue if already exists
 			if c.Store.FindActivityByProposalID(req.ID, prop.Objective) == nil {
 				if err := c.Store.Enqueue(*authReq); err != nil {
@@ -550,25 +646,31 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			reReviewID := fmt.Sprintf("%s-rereview-%d", req.ID, c.revisionCount)
 
 			// Dispatch revision subtask back to coder
+			repairProfile := c.Capabilities.ResolveProfile("coder", "Senior Software Engineer", fmt.Sprintf("Address review rejection: %s", comments), nil, c.Governor)
 			repairReq := ActivityRequest{
-				ID:        revisionID,
-				ParentID:  req.ID,
-				AgentID:   "coder",
-				Objective: fmt.Sprintf("Address review rejection: %s", comments),
-				Budget:    Budget{Allocated: req.Budget.Available() / 2},
-				CreatedAt: time.Now(),
+				ID:                   revisionID,
+				ParentID:             req.ID,
+				AgentID:              "coder",
+				Objective:            fmt.Sprintf("Address review rejection: %s", comments),
+				Budget:               Budget{Allocated: req.Budget.Available() / 2},
+				CapabilityProfile:    &repairProfile,
+				StructuralArtifactID: req.StructuralArtifactID,
+				CreatedAt:            time.Now(),
 			}
 			_ = c.Store.Enqueue(repairReq)
 
 			// Re-enqueue reviewer with explicit DAG dependency on the revision subtask
+			reReviewProfile := c.Capabilities.ResolveProfile("reviewer", "Code Reviewer & Quality Engineer", fmt.Sprintf("Re-review revision for: %s", req.Objective), nil, c.Governor)
 			reReviewReq := ActivityRequest{
-				ID:        reReviewID,
-				ParentID:  req.ID,
-				AgentID:   "reviewer",
-				Objective: fmt.Sprintf("Re-review revision for: %s", req.Objective),
-				Budget:    Budget{Allocated: req.Budget.Available() / 2},
-				DependsOn: []string{revisionID},
-				CreatedAt: time.Now(),
+				ID:                   reReviewID,
+				ParentID:             req.ID,
+				AgentID:              "reviewer",
+				Objective:            fmt.Sprintf("Re-review revision for: %s", req.Objective),
+				Budget:               Budget{Allocated: req.Budget.Available() / 2},
+				DependsOn:            []string{revisionID},
+				CapabilityProfile:    &reReviewProfile,
+				StructuralArtifactID: req.StructuralArtifactID,
+				CreatedAt:            time.Now(),
 			}
 			_ = c.Store.Enqueue(reReviewReq)
 		} else if approved {

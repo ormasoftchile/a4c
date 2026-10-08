@@ -35,6 +35,8 @@ type AgentConfig struct {
 	OnProposeMemory        func(key, content string)   `json:"-"`
 	Structural             StructuralProvider          `json:"-"`
 	OnRecordMetric         func(metric string, delta int) `json:"-"`
+	Profile                *CapabilityProfile          `json:"profile,omitempty"`
+	AllowedTools           []string                    `json:"allowed_tools,omitempty"`
 }
 
 // AgentSession manages conversational continuity for an active agent.

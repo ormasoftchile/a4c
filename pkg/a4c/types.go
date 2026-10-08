@@ -70,39 +70,66 @@ type ActivityFilter struct {
 	HasErrors *bool          `json:"has_errors,omitempty"`
 }
 
+// CapabilityProfile models a declarative, activity-scoped permission set and budget.
+type CapabilityProfile struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name,omitempty"`
+	Description  string   `json:"description,omitempty"`
+	AllowedTools []string `json:"allowed_tools"`
+	Budget       Budget   `json:"budget,omitempty"`
+}
+
+// Clone returns an isolated copy of the capability profile.
+func (p CapabilityProfile) Clone() CapabilityProfile {
+	tools := make([]string, len(p.AllowedTools))
+	copy(tools, p.AllowedTools)
+	return CapabilityProfile{
+		ID:           p.ID,
+		Name:         p.Name,
+		Description:  p.Description,
+		AllowedTools: tools,
+		Budget:       p.Budget,
+	}
+}
+
 // ActivityRequest is a unit of work scheduled for an agent or tool.
 type ActivityRequest struct {
-	ID                  string            `json:"id"`
-	ParentID            string            `json:"parent_id,omitempty"`
-	AgentID             string            `json:"agent_id"`
-	Objective           string            `json:"objective"`
-	Inputs              map[string]any    `json:"inputs,omitempty"`
-	WorkspaceSnapshotID string            `json:"workspace_snapshot_id,omitempty"`
-	Budget              Budget            `json:"budget"`
-	Strategy            ExecutionStrategy `json:"strategy,omitempty"`
-	DependsOn           []string          `json:"depends_on,omitempty"`
-	CreatedAt           time.Time         `json:"created_at"`
+	ID                   string             `json:"id"`
+	ParentID             string             `json:"parent_id,omitempty"`
+	AgentID              string             `json:"agent_id"`
+	Objective            string             `json:"objective"`
+	Inputs               map[string]any     `json:"inputs,omitempty"`
+	WorkspaceSnapshotID  string             `json:"workspace_snapshot_id,omitempty"`
+	Budget               Budget             `json:"budget"`
+	Strategy             ExecutionStrategy  `json:"strategy,omitempty"`
+	DependsOn            []string           `json:"depends_on,omitempty"`
+	CapabilityProfile    *CapabilityProfile `json:"capability_profile,omitempty"`
+	StructuralArtifactID string             `json:"structural_artifact_id,omitempty"`
+	CreatedAt            time.Time          `json:"created_at"`
 }
 
 // ActivityProposal allows an agent to request dynamic subtasks without directly mutating the execution graph.
 type ActivityProposal struct {
-	ProposalID      string         `json:"proposal_id,omitempty"`
-	ProposedAgentID string         `json:"proposed_agent_id"`
-	Objective       string         `json:"objective"`
-	Inputs          map[string]any `json:"inputs,omitempty"`
-	RequestedBudget Budget         `json:"requested_budget"`
-	DependsOn       []string       `json:"depends_on,omitempty"`
+	ProposalID       string             `json:"proposal_id,omitempty"`
+	ProposedAgentID  string             `json:"proposed_agent_id"`
+	Objective        string             `json:"objective"`
+	Inputs           map[string]any     `json:"inputs,omitempty"`
+	RequestedBudget  Budget             `json:"requested_budget"`
+	RequestedProfile *CapabilityProfile `json:"requested_profile,omitempty"`
+	DependsOn        []string           `json:"depends_on,omitempty"`
 }
 
 // ActivityResult is the structured output produced by an activity.
 type ActivityResult struct {
-	ID          string             `json:"id"`
-	Status      ActivityStatus     `json:"status"`
-	Outputs     map[string]any     `json:"outputs,omitempty"`
-	EvidenceIDs []string           `json:"evidence_ids,omitempty"`
-	Proposals   []ActivityProposal `json:"proposals,omitempty"`
-	Consumed    Budget             `json:"consumed"`
-	Metrics     *ExecutionMetrics  `json:"metrics,omitempty"`
+	ID                   string             `json:"id"`
+	Status               ActivityStatus     `json:"status"`
+	Outputs              map[string]any     `json:"outputs,omitempty"`
+	EvidenceIDs          []string           `json:"evidence_ids,omitempty"`
+	Proposals            []ActivityProposal `json:"proposals,omitempty"`
+	Consumed             Budget             `json:"consumed"`
+	Metrics              *ExecutionMetrics  `json:"metrics,omitempty"`
+	CapabilityProfile    *CapabilityProfile `json:"capability_profile,omitempty"`
+	StructuralArtifactID string             `json:"structural_artifact_id,omitempty"`
 }
 
 

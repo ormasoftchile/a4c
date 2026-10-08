@@ -226,6 +226,35 @@ func (p *CopilotProvider) ResumeSession(ctx context.Context, sessionID string, c
 }
 
 func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, config AgentConfig) (AgentSession, error) {
+	// 0. Determine allowed tools for this activity session
+	allowedSet := make(map[string]bool)
+	if len(config.AllowedTools) > 0 {
+		for _, t := range config.AllowedTools {
+			allowedSet[t] = true
+		}
+	} else if config.Profile != nil && len(config.Profile.AllowedTools) > 0 {
+		for _, t := range config.Profile.AllowedTools {
+			allowedSet[t] = true
+		}
+	} else {
+		// Fallback: consult Governor or default set
+		for _, t := range []string{
+			"governed_read_file", "governed_apply_patch", "governed_propose_activity",
+			"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+		} {
+			if config.Governor == nil || config.Governor.AuthorizeToolInvocation(config.AgentID, t) == nil {
+				allowedSet[t] = true
+			}
+		}
+		if config.Structural != nil {
+			for _, st := range []string{"governed_structural_search_symbols", "governed_structural_context_for", "governed_structural_callers"} {
+				if config.Governor == nil || config.Governor.AuthorizeToolInvocation(config.AgentID, st) == nil {
+					allowedSet[st] = true
+				}
+			}
+		}
+	}
+
 	// 1. Build Governed Custom Tools
 	readFileTool := copilot.DefineTool("governed_read_file", "Read file content from workspace",
 		func(params ReadFileParams, inv copilot.ToolInvocation) (any, error) {
@@ -355,73 +384,6 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			return fmt.Sprintf("Convention proposed: [%s] %s", params.Key, params.Content), nil
 		})
 
-	tools := []copilot.Tool{
-		readFileTool,
-		applyPatchTool,
-		proposeActivityTool,
-		submitReviewTool,
-		requestHumanDecisionTool,
-		proposeMemoryTool,
-	}
-
-	if config.Structural != nil && config.Structural.Available() {
-		searchSymbolsTool := copilot.DefineTool("governed_structural_search_symbols", "Query code symbols matching search string via structural index",
-			func(params StructuralSearchParams, inv copilot.ToolInvocation) (any, error) {
-				if config.Governor != nil {
-					if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_search_symbols"); err != nil {
-						return nil, err
-					}
-				}
-				if config.OnRecordMetric != nil {
-					config.OnRecordMetric("structural_queries", 1)
-				}
-				packet, err := config.Structural.SearchSymbols(ctx, params.Query)
-				if err != nil {
-					return nil, err
-				}
-				data, _ := json.Marshal(packet)
-				return string(data), nil
-			})
-
-		contextForTool := copilot.DefineTool("governed_structural_context_for", "Get symbol definition, source snippet, container, and siblings via structural index",
-			func(params StructuralContextParams, inv copilot.ToolInvocation) (any, error) {
-				if config.Governor != nil {
-					if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_context_for"); err != nil {
-						return nil, err
-					}
-				}
-				if config.OnRecordMetric != nil {
-					config.OnRecordMetric("structural_queries", 1)
-				}
-				packet, err := config.Structural.GetContextFor(ctx, params.Name)
-				if err != nil {
-					return nil, err
-				}
-				data, _ := json.Marshal(packet)
-				return string(data), nil
-			})
-
-		callersTool := copilot.DefineTool("governed_structural_callers", "Get call sites and callers for a symbol node ID via structural index",
-			func(params StructuralCallersParams, inv copilot.ToolInvocation) (any, error) {
-				if config.Governor != nil {
-					if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_callers"); err != nil {
-						return nil, err
-					}
-				}
-				if config.OnRecordMetric != nil {
-					config.OnRecordMetric("structural_queries", 1)
-				}
-				packet, err := config.Structural.GetCallers(ctx, params.NodeID)
-				if err != nil {
-					return nil, err
-				}
-				data, _ := json.Marshal(packet)
-				return string(data), nil
-			})
-
-		tools = append(tools, searchSymbolsTool, contextForTool, callersTool)
-	}
-
 	// 2. Strict permission handler that fails closed
 	permHandler := func(request copilot.PermissionRequest, invocation copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
 		toolName := string(request.Kind())
@@ -430,6 +392,10 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			toolName = req.ToolName
 		case rpc.PermissionRequestCustomTool:
 			toolName = req.ToolName
+		}
+		if !allowedSet[toolName] {
+			feedback := fmt.Sprintf("Capability profile rejected tool: %q is not permitted in active profile", toolName)
+			return &rpc.PermissionDecisionReject{Feedback: &feedback}, nil
 		}
 		if config.Governor != nil {
 			if err := config.Governor.AuthorizeToolInvocation(config.AgentID, toolName); err != nil {
@@ -440,20 +406,101 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		return &rpc.PermissionDecisionApproveOnce{}, nil
 	}
 
-	availableTools := []string{
-		"governed_read_file",
-		"governed_apply_patch",
-		"governed_propose_activity",
-		"governed_submit_review",
-		"governed_request_human_decision",
-		"governed_propose_memory",
+	// 3. Assemble ONLY capability-scoped tools
+	var tools []copilot.Tool
+	var availableTools []string
+
+	if allowedSet["governed_read_file"] {
+		tools = append(tools, readFileTool)
+		availableTools = append(availableTools, "governed_read_file")
 	}
-	if config.Structural != nil {
-		availableTools = append(availableTools,
-			"governed_structural_search_symbols",
-			"governed_structural_context_for",
-			"governed_structural_callers",
-		)
+	if allowedSet["governed_apply_patch"] {
+		tools = append(tools, applyPatchTool)
+		availableTools = append(availableTools, "governed_apply_patch")
+	}
+	if allowedSet["governed_propose_activity"] {
+		tools = append(tools, proposeActivityTool)
+		availableTools = append(availableTools, "governed_propose_activity")
+	}
+	if allowedSet["governed_submit_review"] {
+		tools = append(tools, submitReviewTool)
+		availableTools = append(availableTools, "governed_submit_review")
+	}
+	if allowedSet["governed_request_human_decision"] {
+		tools = append(tools, requestHumanDecisionTool)
+		availableTools = append(availableTools, "governed_request_human_decision")
+	}
+	if allowedSet["governed_propose_memory"] {
+		tools = append(tools, proposeMemoryTool)
+		availableTools = append(availableTools, "governed_propose_memory")
+	}
+
+	if config.Structural != nil && config.Structural.Available() {
+		if allowedSet["governed_structural_search_symbols"] {
+			searchSymbolsTool := copilot.DefineTool("governed_structural_search_symbols", "Query code symbols matching search string via structural index",
+				func(params StructuralSearchParams, inv copilot.ToolInvocation) (any, error) {
+					if config.Governor != nil {
+						if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_search_symbols"); err != nil {
+							return nil, err
+						}
+					}
+					if config.OnRecordMetric != nil {
+						config.OnRecordMetric("structural_queries", 1)
+					}
+					packet, err := config.Structural.SearchSymbols(ctx, params.Query)
+					if err != nil {
+						return nil, err
+					}
+					data, _ := json.Marshal(packet)
+					return string(data), nil
+				})
+			tools = append(tools, searchSymbolsTool)
+			availableTools = append(availableTools, "governed_structural_search_symbols")
+		}
+
+		if allowedSet["governed_structural_context_for"] {
+			contextForTool := copilot.DefineTool("governed_structural_context_for", "Get symbol definition, source snippet, container, and siblings via structural index",
+				func(params StructuralContextParams, inv copilot.ToolInvocation) (any, error) {
+					if config.Governor != nil {
+						if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_context_for"); err != nil {
+							return nil, err
+						}
+					}
+					if config.OnRecordMetric != nil {
+						config.OnRecordMetric("structural_queries", 1)
+					}
+					packet, err := config.Structural.GetContextFor(ctx, params.Name)
+					if err != nil {
+						return nil, err
+					}
+					data, _ := json.Marshal(packet)
+					return string(data), nil
+				})
+			tools = append(tools, contextForTool)
+			availableTools = append(availableTools, "governed_structural_context_for")
+		}
+
+		if allowedSet["governed_structural_callers"] {
+			callersTool := copilot.DefineTool("governed_structural_callers", "Get call sites and callers for a symbol node ID via structural index",
+				func(params StructuralCallersParams, inv copilot.ToolInvocation) (any, error) {
+					if config.Governor != nil {
+						if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_callers"); err != nil {
+							return nil, err
+						}
+					}
+					if config.OnRecordMetric != nil {
+						config.OnRecordMetric("structural_queries", 1)
+					}
+					packet, err := config.Structural.GetCallers(ctx, params.NodeID)
+					if err != nil {
+						return nil, err
+					}
+					data, _ := json.Marshal(packet)
+					return string(data), nil
+				})
+			tools = append(tools, callersTool)
+			availableTools = append(availableTools, "governed_structural_callers")
+		}
 	}
 
 	disableGit := false

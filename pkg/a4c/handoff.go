@@ -7,14 +7,16 @@ import (
 
 // HandoffArtifact represents a structured, minimal context passed to an agent.
 type HandoffArtifact struct {
-	Objective          string
-	Role               string
-	AgentID            string
-	ActiveWorkspace    string
-	Diff               string
-	ValidationEvidence string
-	VerifiedMemories   string
-	Inputs             map[string]any
+	Objective            string
+	Role                 string
+	AgentID              string
+	ActiveWorkspace      string
+	Diff                 string
+	ValidationEvidence   string
+	VerifiedMemories     string
+	Inputs               map[string]any
+	StructuralProjection string
+	ProfileDescription   string
 }
 
 // HandoffBuilder builds concise, token-efficient prompt handoffs.
@@ -34,12 +36,20 @@ func (b *HandoffBuilder) BuildPrompt(artifact HandoffArtifact) string {
 	sb.WriteString(fmt.Sprintf("Objective: %s\n", artifact.Objective))
 	sb.WriteString(fmt.Sprintf("Role: %s\n", artifact.Role))
 
+	if artifact.ProfileDescription != "" {
+		sb.WriteString(fmt.Sprintf("Active Capability Profile: %s\n", artifact.ProfileDescription))
+	}
+
 	if len(artifact.Inputs) > 0 {
 		sb.WriteString(fmt.Sprintf("Inputs: %v\n", artifact.Inputs))
 	}
 
 	if artifact.VerifiedMemories != "" {
 		sb.WriteString(fmt.Sprintf("Team Conventions: %s\n", artifact.VerifiedMemories))
+	}
+
+	if artifact.StructuralProjection != "" {
+		sb.WriteString(fmt.Sprintf("Shared Structural Context:\n%s\n", artifact.StructuralProjection))
 	}
 
 	switch artifact.AgentID {

@@ -17,9 +17,11 @@ type ActivityHistoryEntry struct {
 	BudgetUsed   float64        `json:"budget_used"`
 	Error        string         `json:"error,omitempty"`
 	Outputs      map[string]any    `json:"outputs,omitempty"`
-	EvidenceIDs  []string          `json:"evidence_ids,omitempty"`
-	Metrics      *ExecutionMetrics `json:"metrics,omitempty"`
-	CreatedAt    time.Time         `json:"created_at"`
+	EvidenceIDs          []string           `json:"evidence_ids,omitempty"`
+	Metrics              *ExecutionMetrics  `json:"metrics,omitempty"`
+	CapabilityProfile    *CapabilityProfile `json:"capability_profile,omitempty"`
+	StructuralArtifactID string             `json:"structural_artifact_id,omitempty"`
+	CreatedAt            time.Time          `json:"created_at"`
 }
 
 // ReviewHistoryEntry captures reviewer evaluation details.
@@ -124,19 +126,32 @@ func BuildTaskHistory(
 			}
 		}
 
+		prof := rec.Request.CapabilityProfile
+		structID := rec.Request.StructuralArtifactID
+		if rec.Result != nil {
+			if rec.Result.CapabilityProfile != nil {
+				prof = rec.Result.CapabilityProfile
+			}
+			if rec.Result.StructuralArtifactID != "" {
+				structID = rec.Result.StructuralArtifactID
+			}
+		}
+
 		entry := ActivityHistoryEntry{
-			ActivityID:  rec.Request.ID,
-			ParentID:    rec.Request.ParentID,
-			AgentID:     rec.Request.AgentID,
-			Objective:   rec.Request.Objective,
-			DependsOn:   rec.Request.DependsOn,
-			Status:      rec.Status,
-			BudgetUsed:  consumed,
-			Error:       rec.Error,
-			Outputs:     outputs,
-			EvidenceIDs: evIDs,
-			Metrics:     metrics,
-			CreatedAt:   rec.Request.CreatedAt,
+			ActivityID:           rec.Request.ID,
+			ParentID:             rec.Request.ParentID,
+			AgentID:              rec.Request.AgentID,
+			Objective:            rec.Request.Objective,
+			DependsOn:            rec.Request.DependsOn,
+			Status:               rec.Status,
+			BudgetUsed:           consumed,
+			Error:                rec.Error,
+			Outputs:              outputs,
+			EvidenceIDs:          evIDs,
+			Metrics:              metrics,
+			CapabilityProfile:    prof,
+			StructuralArtifactID: structID,
+			CreatedAt:            rec.Request.CreatedAt,
 		}
 		report.Activities = append(report.Activities, entry)
 

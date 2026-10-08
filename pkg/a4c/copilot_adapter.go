@@ -440,19 +440,28 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		return &rpc.PermissionDecisionApproveOnce{}, nil
 	}
 
+	availableTools := []string{
+		"governed_read_file",
+		"governed_apply_patch",
+		"governed_propose_activity",
+		"governed_submit_review",
+		"governed_request_human_decision",
+		"governed_propose_memory",
+	}
+	if config.Structural != nil {
+		availableTools = append(availableTools,
+			"governed_structural_search_symbols",
+			"governed_structural_context_for",
+			"governed_structural_callers",
+		)
+	}
+
 	disableGit := false
 	sessionConfig := &copilot.SessionConfig{
-		SessionID: sessionID,
-		Model:     p.model,
-		Tools:     tools,
-		AvailableTools: []string{
-			"governed_read_file",
-			"governed_apply_patch",
-			"governed_propose_activity",
-			"governed_submit_review",
-			"governed_request_human_decision",
-			"governed_propose_memory",
-		},
+		SessionID:               sessionID,
+		Model:                   p.model,
+		Tools:                   tools,
+		AvailableTools:          availableTools,
 		EnableHostGitOperations: &disableGit,
 		OnPermissionRequest:     permHandler,
 		SystemMessage: &copilot.SystemMessageConfig{

@@ -19,25 +19,28 @@ type UsageInfo struct {
 	CompletionTokens  int     `json:"completion_tokens"`
 	TotalTokens       int     `json:"total_tokens"`
 	PeakContextTokens int     `json:"peak_context_tokens,omitempty"`
+	OverrunTokens     int     `json:"overrun_tokens,omitempty"`
 	EstimatedCostUSD  float64 `json:"estimated_cost_usd"`
 }
 
 // AgentConfig configures a governed session for an agent.
 type AgentConfig struct {
-	AgentID                string                      `json:"agent_id"`
-	Charter                string                      `json:"charter"`
-	WorkspaceDir           string                      `json:"workspace_dir"`
-	Budget                 Budget                      `json:"budget"`
-	Governor               *PolicyGovernor             `json:"-"`
-	IntentJournal          *DurableIntentJournal       `json:"-"`
-	OnProposeActivity      func(ActivityProposal)      `json:"-"`
-	OnSubmitReview         func(ReviewResult)          `json:"-"`
-	OnRequestHumanDecision func(HumanDecisionRequest)  `json:"-"`
-	OnProposeMemory        func(key, content string)   `json:"-"`
-	Structural             StructuralProvider          `json:"-"`
+	AgentID                string                         `json:"agent_id"`
+	Charter                string                         `json:"charter"`
+	WorkspaceDir           string                         `json:"workspace_dir"`
+	Budget                 Budget                         `json:"budget"`
+	Governor               *PolicyGovernor                `json:"-"`
+	IntentJournal          *DurableIntentJournal          `json:"-"`
+	OnProposeActivity      func(ActivityProposal)         `json:"-"`
+	OnSubmitReview         func(ReviewResult)             `json:"-"`
+	OnRequestHumanDecision func(HumanDecisionRequest)     `json:"-"`
+	OnProposeMemory        func(key, content string)      `json:"-"`
+	Structural             StructuralProvider             `json:"-"`
 	OnRecordMetric         func(metric string, delta int) `json:"-"`
-	Profile                *CapabilityProfile          `json:"profile,omitempty"`
-	AllowedTools           []string                    `json:"allowed_tools,omitempty"`
+	Profile                *CapabilityProfile             `json:"profile,omitempty"`
+	AllowedTools           []string                       `json:"allowed_tools,omitempty"`
+	MaxToolCalls           int                            `json:"max_tool_calls,omitempty"`
+	MaxReadFileLines       int                            `json:"max_read_file_lines,omitempty"`
 }
 
 // AgentSession manages conversational continuity for an active agent.
@@ -46,6 +49,7 @@ type AgentSession interface {
 	Send(ctx context.Context, prompt string) (*AgentMessage, error)
 	Cancel() error
 	Usage() UsageInfo
+	Durations() (modelDuration time.Duration, toolDuration time.Duration)
 	Close() error
 }
 

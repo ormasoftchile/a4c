@@ -38,6 +38,17 @@ func (b Budget) Available() float64 {
 	return b.Allocated - (b.Reserved + b.Consumed)
 }
 
+// BudgetRecord provides durable persistence for hierarchical budget allocations and reservations.
+type BudgetRecord struct {
+	ID        string    `json:"id"`
+	ParentID  string    `json:"parent_id,omitempty"`
+	Allocated float64   `json:"allocated"`
+	Reserved  float64   `json:"reserved"`
+	Consumed  float64   `json:"consumed"`
+	Status    string    `json:"status"` // "active", "settled", "released"
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // ExecutionStrategy defines how a submitted task is scheduled and executed.
 type ExecutionStrategy string
 
@@ -49,13 +60,16 @@ const (
 
 // ExecutionMetrics tracks detailed per-activity model, tool, and latency measurements.
 type ExecutionMetrics struct {
-	WallClockDuration time.Duration `json:"wall_clock_duration"`
-	ModelDuration     time.Duration `json:"model_duration"`
-	ToolDuration      time.Duration `json:"tool_duration"`
+	WallClockDuration      time.Duration `json:"wall_clock_duration"`
+	ModelDuration          time.Duration `json:"model_duration"`
+	ToolDuration           time.Duration `json:"tool_duration"`
+	ValidationDuration     time.Duration `json:"validation_duration,omitempty"`
+	StructuralDuration     time.Duration `json:"structural_duration,omitempty"`
 	PromptTokens           int           `json:"prompt_tokens"`
 	CompletionTokens       int           `json:"completion_tokens"`
 	TotalTokens            int           `json:"total_tokens"`
 	PeakContextTokens      int           `json:"peak_context_tokens,omitempty"`
+	OverrunTokens          int           `json:"overrun_tokens,omitempty"`
 	ModelInvocations       int           `json:"model_invocations"`
 	ToolCalls              int           `json:"tool_calls"`
 	StructuralQueriesCount int           `json:"structural_queries_count,omitempty"`
@@ -169,12 +183,13 @@ type HumanDecisionRequest struct {
 
 // ReviewResult encapsulates deterministic peer review artifacts.
 type ReviewResult struct {
-	ActivityID   string    `json:"activity_id"`
-	ReviewerID   string    `json:"reviewer_id"`
-	Approved     bool      `json:"approved"`
-	Comments     string    `json:"comments"`
-	EvidenceID   string    `json:"evidence_id,omitempty"`
-	Timestamp    time.Time `json:"timestamp"`
+	ActivityID string    `json:"activity_id"`
+	ReviewerID string    `json:"reviewer_id"`
+	Approved   bool      `json:"approved"`
+	Comments   string    `json:"comments"`
+	Blockers   []string  `json:"blockers,omitempty"`
+	EvidenceID string    `json:"evidence_id,omitempty"`
+	Timestamp  time.Time `json:"timestamp"`
 }
 
 type IntentStatus string
@@ -200,13 +215,16 @@ type IntentRecord struct {
 
 // ValidationEvidence represents verifiable proof that tests ran against a specific snapshot.
 type ValidationEvidence struct {
-	EvidenceID          string    `json:"evidence_id"`
-	WorkspaceSnapshotID string    `json:"workspace_snapshot_id"`
-	Command             []string  `json:"command"`
-	ExitCode            int       `json:"exit_code"`
-	StartedAt           time.Time `json:"started_at"`
-	CompletedAt         time.Time `json:"completed_at"`
-	Valid               bool      `json:"valid"`
+	EvidenceID          string        `json:"evidence_id"`
+	WorkspaceSnapshotID string        `json:"workspace_snapshot_id"`
+	Command             []string      `json:"command"`
+	ExitCode            int           `json:"exit_code"`
+	OutputSummary       string        `json:"output_summary,omitempty"`
+	Duration            time.Duration `json:"duration,omitempty"`
+	LogPath             string        `json:"log_path,omitempty"`
+	StartedAt           time.Time     `json:"started_at"`
+	CompletedAt         time.Time     `json:"completed_at"`
+	Valid               bool          `json:"valid"`
 }
 
 // ToYAWREvidence bridges a4c validation evidence into YAWR runtime's native EvidenceRecord.

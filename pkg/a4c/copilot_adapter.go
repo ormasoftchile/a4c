@@ -16,7 +16,9 @@ import (
 )
 
 type ReadFileParams struct {
-	Path string `json:"path" jsonschema:"relative file path to read"`
+	Path      string `json:"path" jsonschema:"relative file path to read"`
+	StartLine int    `json:"start_line,omitempty" jsonschema:"optional 1-based start line number to begin reading from"`
+	EndLine   int    `json:"end_line,omitempty" jsonschema:"optional 1-based end line number to stop reading at"`
 }
 
 type ApplyPatchParams struct {
@@ -25,15 +27,16 @@ type ApplyPatchParams struct {
 }
 
 type ProposeActivityParams struct {
-	ProposedAgentID string  `json:"proposed_agent_id" jsonschema:"the agent ID to delegate to: 'coder' or 'reviewer'"`
-	Objective       string  `json:"objective" jsonschema:"the specific objective of the subtask"`
-	BudgetTokens    float64 `json:"budget_tokens" jsonschema:"the requested budget allocation in tokens"`
+	ProposedAgentID string   `json:"proposed_agent_id" jsonschema:"the agent ID to delegate to: 'coder' or 'reviewer'"`
+	Objective       string   `json:"objective" jsonschema:"the specific objective of the subtask"`
+	BudgetTokens    float64  `json:"budget_tokens" jsonschema:"the requested budget allocation in tokens"`
 	DependsOn       []string `json:"depends_on,omitempty" jsonschema:"optional list of activity IDs that must complete first"`
 }
 
 type SubmitReviewParams struct {
-	Approved bool   `json:"approved" jsonschema:"true if changes are verified and satisfy the specification; false otherwise"`
-	Comments string `json:"comments" jsonschema:"detailed review comments, findings, or reasons for rejection"`
+	Approved bool     `json:"approved" jsonschema:"true if changes are verified and satisfy the specification; false otherwise"`
+	Comments string   `json:"comments" jsonschema:"detailed review comments, findings, or reasons for rejection"`
+	Blockers []string `json:"blockers,omitempty" jsonschema:"optional list of specific blocking defects found during review"`
 }
 
 type RequestHumanDecisionParams struct {
@@ -65,6 +68,9 @@ type CopilotSessionAdapter struct {
 	config         AgentConfig
 	usage          UsageInfo
 	budgetExceeded bool
+	modelDuration  time.Duration
+	toolDuration   time.Duration
+	toolCallCount  int
 }
 
 func (s *CopilotSessionAdapter) SessionID() string {
@@ -82,6 +88,18 @@ func (s *CopilotSessionAdapter) CheckBudget() error {
 	return nil
 }
 
+func (s *CopilotSessionAdapter) recordToolDuration(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.toolDuration += d
+}
+
+func (s *CopilotSessionAdapter) Durations() (time.Duration, time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.modelDuration, s.toolDuration
+}
+
 func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*AgentMessage, error) {
 	s.mu.Lock()
 	if s.config.Budget.Allocated > 0 && float64(s.usage.TotalTokens) >= s.config.Budget.Allocated {
@@ -89,12 +107,14 @@ func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*Agent
 		return nil, fmt.Errorf("%w: session budget exhausted before send", ErrBudgetExceeded)
 	}
 	session := s.session
+	toolBefore := s.toolDuration
 	s.mu.Unlock()
 
 	if session == nil {
 		return nil, fmt.Errorf("copilot: session is closed")
 	}
 
+	startSend := time.Now()
 	done := make(chan bool, 1)
 	errChan := make(chan error, 1)
 	var responseContent strings.Builder
@@ -119,6 +139,7 @@ func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*Agent
 			s.usage.TotalTokens = s.usage.PromptTokens + s.usage.CompletionTokens
 			if s.config.Budget.Allocated > 0 && float64(s.usage.TotalTokens) > s.config.Budget.Allocated {
 				s.budgetExceeded = true
+				s.usage.OverrunTokens = s.usage.TotalTokens - int(s.config.Budget.Allocated)
 			}
 			s.mu.Unlock()
 		case *copilot.SessionIdleData:
@@ -150,16 +171,23 @@ func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*Agent
 	case <-done:
 	}
 
-	content := responseContent.String()
-	if strings.TrimSpace(content) == "" {
-		return nil, ErrMalformedOutput
-	}
-
+	totalSend := time.Since(startSend)
 	s.mu.Lock()
+	toolDuringSend := s.toolDuration - toolBefore
+	modelSend := totalSend - toolDuringSend
+	if modelSend < 0 {
+		modelSend = 0
+	}
+	s.modelDuration += modelSend
 	exceeded := s.budgetExceeded
 	total := s.usage.TotalTokens
 	alloc := s.config.Budget.Allocated
 	s.mu.Unlock()
+
+	content := responseContent.String()
+	if strings.TrimSpace(content) == "" {
+		return nil, ErrMalformedOutput
+	}
 
 	msg := &AgentMessage{
 		Role:      "assistant",
@@ -290,18 +318,37 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		}
 	}
 
-	// 1. Build Governed Custom Tools with in-flight budget enforcement
+	// 1. Build Governed Custom Tools with in-flight budget enforcement and duration tracking
 	adapter := &CopilotSessionAdapter{
 		sessionID: sessionID,
 		config:    config,
 	}
-	checkBudget := func() error {
-		return adapter.CheckBudget()
+
+	maxToolCalls := config.MaxToolCalls
+	if maxToolCalls <= 0 {
+		maxToolCalls = 10
+	}
+
+	checkToolLimits := func() error {
+		if err := adapter.CheckBudget(); err != nil {
+			return err
+		}
+		adapter.mu.Lock()
+		adapter.toolCallCount++
+		calls := adapter.toolCallCount
+		adapter.mu.Unlock()
+		if calls > maxToolCalls {
+			return fmt.Errorf("tool call limit exceeded: maximum %d calls allowed per session", maxToolCalls)
+		}
+		return nil
 	}
 
 	readFileTool := copilot.DefineTool("governed_read_file", "Read file content from workspace",
 		func(params ReadFileParams, inv copilot.ToolInvocation) (any, error) {
-			if err := checkBudget(); err != nil {
+			tStart := time.Now()
+			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
+
+			if err := checkToolLimits(); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -321,12 +368,16 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			if err != nil {
 				return nil, err
 			}
-			return string(data), nil
+
+			return SliceFileLines(string(data), params.StartLine, params.EndLine, config.MaxReadFileLines), nil
 		})
 
 	applyPatchTool := copilot.DefineTool("governed_apply_patch", "Write or modify file in workspace",
 		func(params ApplyPatchParams, inv copilot.ToolInvocation) (any, error) {
-			if err := checkBudget(); err != nil {
+			tStart := time.Now()
+			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
+
+			if err := checkToolLimits(); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -361,7 +412,10 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 
 	proposeActivityTool := copilot.DefineTool("governed_propose_activity", "Propose a delegated subtask to another team member",
 		func(params ProposeActivityParams, inv copilot.ToolInvocation) (any, error) {
-			if err := checkBudget(); err != nil {
+			tStart := time.Now()
+			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
+
+			if err := checkToolLimits(); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -383,7 +437,10 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 
 	submitReviewTool := copilot.DefineTool("governed_submit_review", "Submit peer review evaluation on code changes",
 		func(params SubmitReviewParams, inv copilot.ToolInvocation) (any, error) {
-			if err := checkBudget(); err != nil {
+			tStart := time.Now()
+			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
+
+			if err := checkToolLimits(); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -395,6 +452,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 				ReviewerID: config.AgentID,
 				Approved:   params.Approved,
 				Comments:   params.Comments,
+				Blockers:   params.Blockers,
 				Timestamp:  time.Now(),
 			}
 			if config.OnSubmitReview != nil {
@@ -405,7 +463,10 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 
 	requestHumanDecisionTool := copilot.DefineTool("governed_request_human_decision", "Escalate a decision to the human engineer",
 		func(params RequestHumanDecisionParams, inv copilot.ToolInvocation) (any, error) {
-			if err := checkBudget(); err != nil {
+			tStart := time.Now()
+			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
+
+			if err := checkToolLimits(); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -431,7 +492,10 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 
 	proposeMemoryTool := copilot.DefineTool("governed_propose_memory", "Propose an architectural constraint or team convention",
 		func(params ProposeMemoryParams, inv copilot.ToolInvocation) (any, error) {
-			if err := checkBudget(); err != nil {
+			tStart := time.Now()
+			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
+
+			if err := checkToolLimits(); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -447,7 +511,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 
 	// 2. Strict permission handler that fails closed
 	permHandler := func(request copilot.PermissionRequest, invocation copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
-		if err := checkBudget(); err != nil {
+		if err := adapter.CheckBudget(); err != nil {
 			feedback := fmt.Sprintf("Budget exceeded: %v", err)
 			return &rpc.PermissionDecisionReject{Feedback: &feedback}, nil
 		}
@@ -504,7 +568,10 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		if allowedSet["governed_structural_search_symbols"] {
 			searchSymbolsTool := copilot.DefineTool("governed_structural_search_symbols", "Query code symbols matching search string via structural index",
 				func(params StructuralSearchParams, inv copilot.ToolInvocation) (any, error) {
-					if err := checkBudget(); err != nil {
+					tStart := time.Now()
+					defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
+
+					if err := checkToolLimits(); err != nil {
 						return nil, err
 					}
 					if config.Governor != nil {
@@ -529,7 +596,10 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		if allowedSet["governed_structural_context_for"] {
 			contextForTool := copilot.DefineTool("governed_structural_context_for", "Get symbol definition, source snippet, container, and siblings via structural index",
 				func(params StructuralContextParams, inv copilot.ToolInvocation) (any, error) {
-					if err := checkBudget(); err != nil {
+					tStart := time.Now()
+					defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
+
+					if err := checkToolLimits(); err != nil {
 						return nil, err
 					}
 					if config.Governor != nil {
@@ -554,7 +624,10 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		if allowedSet["governed_structural_callers"] {
 			callersTool := copilot.DefineTool("governed_structural_callers", "Get call sites and callers for a symbol node ID via structural index",
 				func(params StructuralCallersParams, inv copilot.ToolInvocation) (any, error) {
-					if err := checkBudget(); err != nil {
+					tStart := time.Now()
+					defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
+
+					if err := checkToolLimits(); err != nil {
 						return nil, err
 					}
 					if config.Governor != nil {
@@ -603,4 +676,37 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 	adapter.session = copilotSession
 	adapter.sessionID = actualID
 	return adapter, nil
+}
+
+// SliceFileLines applies line bounds and truncation protection to file content.
+func SliceFileLines(content string, startLine, endLine, maxLines int) string {
+	if maxLines <= 0 {
+		maxLines = 300
+	}
+	lines := strings.Split(content, "\n")
+	if startLine > 0 || endLine > 0 {
+		if startLine < 1 {
+			startLine = 1
+		}
+		if endLine < 1 || endLine > len(lines) {
+			endLine = len(lines)
+		}
+		if startLine > len(lines) {
+			return fmt.Sprintf("start_line %d exceeds total file lines (%d)", startLine, len(lines))
+		}
+		count := endLine - startLine + 1
+		if count > maxLines {
+			endLine = startLine + maxLines - 1
+			sub := lines[startLine-1 : endLine]
+			return strings.Join(sub, "\n") + fmt.Sprintf("\n... [Output truncated to %d lines. Total lines requested: %d. Total file lines: %d]", maxLines, count, len(lines))
+		}
+		sub := lines[startLine-1 : endLine]
+		return strings.Join(sub, "\n")
+	}
+
+	if len(lines) > maxLines {
+		sub := lines[:maxLines]
+		return strings.Join(sub, "\n") + fmt.Sprintf("\n... [File truncated: showing first %d lines of %d total lines. Specify start_line and end_line to inspect specific ranges]", maxLines, len(lines))
+	}
+	return content
 }

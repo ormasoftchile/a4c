@@ -39,9 +39,11 @@ type TeamCoordinator struct {
 	TestRunner    TestRunner
 	Provider      AgentProvider
 	Reconciler    EffectReconciler
-	MaxRepair     int
-	MaxRevisions  int
-	revisionCount int
+	MaxRepair              int
+	MaxRevisions           int
+	MaxToolCalls           int
+	MaxReadFileLines       int
+	revisionCount          int
 	lastEvidence           *ValidationEvidence
 	sessions               map[string]AgentSession
 	Handoff                *HandoffBuilder
@@ -66,22 +68,28 @@ func NewTeamCoordinator(
 		governor.SetAgentTools(member.ID, member.AllowedTools)
 	}
 
+	if workspaceDir != "" {
+		_ = governor.SetStorageDir(filepath.Join(workspaceDir, ".a4c", "budgets"))
+	}
+
 	return &TeamCoordinator{
-		WorkspaceDir: workspaceDir,
-		Store:        store,
-		Roster:       roster,
-		Memory:       memory,
-		Governor:     governor,
-		Journal:      journal,
-		Snapshotter:  NewWorkspaceSnapshotter(),
-		TestRunner:   runner,
-		Provider:     provider,
-		Reconciler:   &LocalEffectReconciler{WorkspaceDir: workspaceDir},
-		MaxRepair:    3,
-		MaxRevisions: 2,
-		sessions:     make(map[string]AgentSession),
-		Handoff:      NewHandoffBuilder(),
-		Capabilities: NewCapabilityRegistry(),
+		WorkspaceDir:     workspaceDir,
+		Store:            store,
+		Roster:           roster,
+		Memory:           memory,
+		Governor:         governor,
+		Journal:          journal,
+		Snapshotter:      NewWorkspaceSnapshotter(),
+		TestRunner:       runner,
+		Provider:         provider,
+		Reconciler:       &LocalEffectReconciler{WorkspaceDir: workspaceDir},
+		MaxRepair:        3,
+		MaxRevisions:     2,
+		MaxToolCalls:     10,
+		MaxReadFileLines: 300,
+		sessions:         make(map[string]AgentSession),
+		Handoff:          NewHandoffBuilder(),
+		Capabilities:     NewCapabilityRegistry(),
 	}
 }
 
@@ -362,15 +370,17 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	req.CapabilityProfile = &profile
 
 	config := AgentConfig{
-		AgentID:       ident.ID,
-		Charter:       ident.Charter,
-		WorkspaceDir:  activeWorkspace,
-		Budget:        req.Budget,
-		Governor:      c.Governor,
-		IntentJournal: c.Journal,
-		Structural:    c.Structural,
-		Profile:       &profile,
-		AllowedTools:  profile.AllowedTools,
+		AgentID:          ident.ID,
+		Charter:          ident.Charter,
+		WorkspaceDir:     activeWorkspace,
+		Budget:           req.Budget,
+		Governor:         c.Governor,
+		IntentJournal:    c.Journal,
+		Structural:       c.Structural,
+		Profile:          &profile,
+		AllowedTools:     profile.AllowedTools,
+		MaxToolCalls:     c.MaxToolCalls,
+		MaxReadFileLines: c.MaxReadFileLines,
 		OnRecordMetric: func(metric string, delta int) {
 			if metric == "structural_queries" {
 				structuralQueriesCount += delta
@@ -411,11 +421,13 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 				if depRec, err := c.Store.Get(depID); err == nil && depRec != nil && depRec.Result != nil {
 					if len(depRec.Result.EvidenceIDs) > 0 {
 						snapID, _ := depRec.Result.Outputs["snapshot_id"].(string)
+						outSum, _ := depRec.Result.Outputs["test_output_summary"].(string)
 						c.lastEvidence = &ValidationEvidence{
 							EvidenceID:          depRec.Result.EvidenceIDs[len(depRec.Result.EvidenceIDs)-1],
 							WorkspaceSnapshotID: snapID,
 							Command:             []string{"go", "test", "./..."},
 							ExitCode:            0,
+							OutputSummary:       outSum,
 							Valid:               true,
 						}
 						break
@@ -426,8 +438,9 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	}
 	evidenceSummary := "none"
 	if c.lastEvidence != nil {
-		evidenceSummary = fmt.Sprintf("ID: %s | Command: %s | ExitCode: %d | Verified: %t (YAWR native test evidence)",
-			c.lastEvidence.EvidenceID, strings.Join(c.lastEvidence.Command, " "), c.lastEvidence.ExitCode, c.lastEvidence.Valid)
+		evidenceSummary = fmt.Sprintf("Evidence ID: %s | Command: %s | ExitCode: %d | Duration: %v | Valid: %t\nTest Output:\n%s",
+			c.lastEvidence.EvidenceID, strings.Join(c.lastEvidence.Command, " "), c.lastEvidence.ExitCode,
+			c.lastEvidence.Duration.Round(time.Millisecond), c.lastEvidence.Valid, c.lastEvidence.OutputSummary)
 	}
 
 	// Resolve shared structural projection if available
@@ -468,16 +481,23 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	resp, err := session.Send(ctx, prompt)
 	modelDuration := time.Since(startModel)
 
+	modelDur, toolDur := session.Durations()
+	if modelDur == 0 && toolDur == 0 {
+		modelDur = modelDuration
+	}
+
 	usage := session.Usage()
 	consumed := Budget{Consumed: float64(usage.TotalTokens)}
 
 	metrics := &ExecutionMetrics{
 		WallClockDuration:      time.Since(startWall),
-		ModelDuration:          modelDuration,
+		ModelDuration:          modelDur,
+		ToolDuration:           toolDur,
 		PromptTokens:           usage.PromptTokens,
 		CompletionTokens:       usage.CompletionTokens,
 		TotalTokens:            usage.TotalTokens,
 		PeakContextTokens:      usage.PeakContextTokens,
+		OverrunTokens:          usage.OverrunTokens,
 		ModelInvocations:       1,
 		StructuralQueriesCount: structuralQueriesCount,
 		FileReadsCount:         fileReadsCount,
@@ -642,7 +662,9 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			return nil, err
 		}
 
+		valStart := time.Now()
 		exitCode, testOut, err := c.TestRunner.RunTests(ctx, activeWorkspace)
+		valDuration := time.Since(valStart)
 		if err != nil {
 			_ = c.Store.Fail(req.ID, err)
 			return nil, err
@@ -672,7 +694,9 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 				}
 
 				preSnap, _ := c.Snapshotter.ComputeSnapshot(activeWorkspace)
+				rValStart := time.Now()
 				exitCode, testOut, _ = c.TestRunner.RunTests(ctx, activeWorkspace)
+				valDuration += time.Since(rValStart)
 				postSnap, _ := c.Snapshotter.ComputeSnapshot(activeWorkspace)
 				if err := c.Snapshotter.ValidateIntegrity(preSnap, postSnap); err != nil {
 					break
@@ -699,16 +723,27 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		}
 
 		// Native tests verified! Create evidence and promote memories
+		metrics.ValidationDuration = valDuration
+		outSummary := testOut
+		if len(outSummary) > 500 {
+			outSummary = outSummary[:500] + "... [truncated]"
+		}
 		evidence := ValidationEvidence{
 			EvidenceID:          fmt.Sprintf("evi-%s-%d", req.ID, time.Now().UnixNano()),
 			WorkspaceSnapshotID: afterSnapshot,
 			Command:             []string{"go", "test", "./..."},
 			ExitCode:            0,
+			OutputSummary:       outSummary,
+			Duration:            valDuration,
 			Valid:               true,
+			StartedAt:           valStart,
+			CompletedAt:         time.Now(),
 		}
 		c.lastEvidence = &evidence
 		result.EvidenceIDs = append(result.EvidenceIDs, evidence.EvidenceID)
 		result.Outputs["snapshot_id"] = afterSnapshot
+		result.Outputs["test_output_summary"] = outSummary
+		result.Outputs["validation_duration_ms"] = valDuration.Milliseconds()
 
 		// Promote coder-proposed memories because native tests passed
 		for _, m := range proposedMemories {
@@ -741,11 +776,13 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 				if depRec, err := c.Store.Get(depID); err == nil && depRec != nil && depRec.Result != nil {
 					if len(depRec.Result.EvidenceIDs) > 0 {
 						snapID, _ := depRec.Result.Outputs["snapshot_id"].(string)
+						outSum, _ := depRec.Result.Outputs["test_output_summary"].(string)
 						c.lastEvidence = &ValidationEvidence{
 							EvidenceID:          depRec.Result.EvidenceIDs[len(depRec.Result.EvidenceIDs)-1],
 							WorkspaceSnapshotID: snapID,
 							Command:             []string{"go", "test", "./..."},
 							ExitCode:            0,
+							OutputSummary:       outSum,
 							Valid:               true,
 						}
 						break
@@ -765,6 +802,9 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 		result.Outputs["approved"] = approved
 		result.Outputs["review_comments"] = comments
+		if reviewResult != nil && len(reviewResult.Blockers) > 0 {
+			result.Outputs["blockers"] = reviewResult.Blockers
+		}
 
 		if !approved && c.revisionCount < c.MaxRevisions {
 			c.revisionCount++

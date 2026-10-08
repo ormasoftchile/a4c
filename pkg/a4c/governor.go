@@ -3,16 +3,22 @@ package a4c
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
 type PolicyGovernor struct {
 	mu                  sync.Mutex
+	storageDir          string
 	allowedTools        map[string]bool
 	agentTools          map[string]map[string]bool
 	activeBudgets       map[string]*Budget
+	budgetRecords       map[string]*BudgetRecord
 	authorizedProposals map[string]*ActivityRequest
 }
 
@@ -25,8 +31,104 @@ func NewPolicyGovernor(allowedTools []string) *PolicyGovernor {
 		allowedTools:        tools,
 		agentTools:          make(map[string]map[string]bool),
 		activeBudgets:       make(map[string]*Budget),
+		budgetRecords:       make(map[string]*BudgetRecord),
 		authorizedProposals: make(map[string]*ActivityRequest),
 	}
+}
+
+// SetStorageDir configures durable persistence directory for budget records and loads existing records.
+func (g *PolicyGovernor) SetStorageDir(dir string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if dir == "" {
+		g.storageDir = ""
+		return nil
+	}
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("governor: failed to create budget storage dir %s: %w", dir, err)
+	}
+	g.storageDir = dir
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("governor: failed to read budget storage dir: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || strings.HasSuffix(entry.Name(), ".tmp") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var rec BudgetRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			continue
+		}
+		g.budgetRecords[rec.ID] = &rec
+		g.activeBudgets[rec.ID] = &Budget{
+			Allocated: rec.Allocated,
+			Reserved:  rec.Reserved,
+			Consumed:  rec.Consumed,
+		}
+	}
+
+	// Persist any existing in-memory active budgets that were not on disk
+	for id, b := range g.activeBudgets {
+		if _, exists := g.budgetRecords[id]; !exists {
+			rec := &BudgetRecord{
+				ID:        id,
+				Allocated: b.Allocated,
+				Reserved:  b.Reserved,
+				Consumed:  b.Consumed,
+				Status:    "active",
+				UpdatedAt: time.Now(),
+			}
+			g.budgetRecords[id] = rec
+			_ = g.persistBudgetLocked(id)
+		}
+	}
+
+	return nil
+}
+
+func (g *PolicyGovernor) persistBudgetLocked(id string) error {
+	if g.storageDir == "" {
+		return nil
+	}
+	rec, ok := g.budgetRecords[id]
+	if !ok {
+		b, exists := g.activeBudgets[id]
+		if !exists {
+			return nil
+		}
+		rec = &BudgetRecord{
+			ID:        id,
+			Allocated: b.Allocated,
+			Reserved:  b.Reserved,
+			Consumed:  b.Consumed,
+			Status:    "active",
+			UpdatedAt: time.Now(),
+		}
+		g.budgetRecords[id] = rec
+	}
+
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	tmpFile := filepath.Join(g.storageDir, fmt.Sprintf("%s.tmp", id))
+	targetFile := filepath.Join(g.storageDir, fmt.Sprintf("%s.json", id))
+
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpFile, targetFile)
 }
 
 // SetAgentTools configures role-based tool capabilities for a specific agent identity.
@@ -76,6 +178,21 @@ func (g *PolicyGovernor) AuthorizeProposal(parent ActivityRequest, proposal Acti
 
 	// Deduct requested from parent reservation
 	budget.Reserved += requested
+	if parentRec, exists := g.budgetRecords[parent.ID]; exists {
+		parentRec.Reserved = budget.Reserved
+		parentRec.UpdatedAt = time.Now()
+		_ = g.persistBudgetLocked(parent.ID)
+	} else {
+		g.budgetRecords[parent.ID] = &BudgetRecord{
+			ID:        parent.ID,
+			Allocated: budget.Allocated,
+			Reserved:  budget.Reserved,
+			Consumed:  budget.Consumed,
+			Status:    "active",
+			UpdatedAt: time.Now(),
+		}
+		_ = g.persistBudgetLocked(parent.ID)
+	}
 
 	childBudget := Budget{
 		Allocated: requested,
@@ -96,6 +213,17 @@ func (g *PolicyGovernor) AuthorizeProposal(parent ActivityRequest, proposal Acti
 
 	childBudgetCopy := childBudget
 	g.activeBudgets[newID] = &childBudgetCopy
+	g.budgetRecords[newID] = &BudgetRecord{
+		ID:        newID,
+		ParentID:  parent.ID,
+		Allocated: requested,
+		Reserved:  0,
+		Consumed:  0,
+		Status:    "active",
+		UpdatedAt: time.Now(),
+	}
+	_ = g.persistBudgetLocked(newID)
+
 	g.authorizedProposals[dedupKey] = childReq
 	return childReq, nil
 }
@@ -107,6 +235,23 @@ func (g *PolicyGovernor) SetBudget(activityID string, b Budget) {
 
 	bCopy := b
 	g.activeBudgets[activityID] = &bCopy
+	if rec, ok := g.budgetRecords[activityID]; ok {
+		rec.Allocated = b.Allocated
+		rec.Reserved = b.Reserved
+		rec.Consumed = b.Consumed
+		rec.UpdatedAt = time.Now()
+		_ = g.persistBudgetLocked(activityID)
+	} else {
+		g.budgetRecords[activityID] = &BudgetRecord{
+			ID:        activityID,
+			Allocated: b.Allocated,
+			Reserved:  b.Reserved,
+			Consumed:  b.Consumed,
+			Status:    "active",
+			UpdatedAt: time.Now(),
+		}
+		_ = g.persistBudgetLocked(activityID)
+	}
 }
 
 // RecordConsumption updates the consumed tokens for an activity and settles reservations on parent.
@@ -123,6 +268,27 @@ func (g *PolicyGovernor) RecordConsumption(activityID, parentID string, tokens f
 		g.activeBudgets[activityID] = &Budget{Consumed: tokens}
 	}
 
+	// Update child budget record
+	if cRec, ok := g.budgetRecords[activityID]; ok {
+		cRec.Consumed = g.activeBudgets[activityID].Consumed
+		cRec.Reserved = 0
+		cRec.Status = "settled"
+		cRec.UpdatedAt = time.Now()
+		_ = g.persistBudgetLocked(activityID)
+	} else {
+		g.budgetRecords[activityID] = &BudgetRecord{
+			ID:        activityID,
+			ParentID:  parentID,
+			Allocated: allocated,
+			Reserved:  0,
+			Consumed:  tokens,
+			Status:    "settled",
+			UpdatedAt: time.Now(),
+		}
+		_ = g.persistBudgetLocked(activityID)
+	}
+
+	// Update parent budget and reservation
 	if parentID != "" && parentID != activityID {
 		if p, ok := g.activeBudgets[parentID]; ok {
 			p.Consumed += tokens
@@ -137,8 +303,64 @@ func (g *PolicyGovernor) RecordConsumption(activityID, parentID string, tokens f
 			} else {
 				p.Reserved = 0
 			}
+			if pRec, ok := g.budgetRecords[parentID]; ok {
+				pRec.Consumed = p.Consumed
+				pRec.Reserved = p.Reserved
+				pRec.UpdatedAt = time.Now()
+				_ = g.persistBudgetLocked(parentID)
+			}
 		}
 	}
+}
+
+// ExtendBudget increases the allocated tokens for an activity.
+func (g *PolicyGovernor) ExtendBudget(activityID string, additionalTokens float64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	b, ok := g.activeBudgets[activityID]
+	if !ok {
+		return fmt.Errorf("governor: budget for activity %q not found", activityID)
+	}
+	b.Allocated += additionalTokens
+	if rec, ok := g.budgetRecords[activityID]; ok {
+		rec.Allocated = b.Allocated
+		rec.UpdatedAt = time.Now()
+		_ = g.persistBudgetLocked(activityID)
+	}
+	return nil
+}
+
+// ReleaseReservation releases unused budget allocation from a child back to its parent reservation.
+func (g *PolicyGovernor) ReleaseReservation(activityID, parentID string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	b, ok := g.activeBudgets[activityID]
+	if ok {
+		unconsumed := b.Allocated - b.Consumed
+		if unconsumed > 0 && parentID != "" && parentID != activityID {
+			if p, ok := g.activeBudgets[parentID]; ok {
+				if p.Reserved >= unconsumed {
+					p.Reserved -= unconsumed
+				} else {
+					p.Reserved = 0
+				}
+				if pRec, ok := g.budgetRecords[parentID]; ok {
+					pRec.Reserved = p.Reserved
+					pRec.UpdatedAt = time.Now()
+					_ = g.persistBudgetLocked(parentID)
+				}
+			}
+		}
+		b.Reserved = 0
+		if rec, ok := g.budgetRecords[activityID]; ok {
+			rec.Status = "released"
+			rec.UpdatedAt = time.Now()
+			_ = g.persistBudgetLocked(activityID)
+		}
+	}
+	return nil
 }
 
 // CheckBudget verifies whether an activity has sufficient budget to proceed.
@@ -187,4 +409,17 @@ func (g *PolicyGovernor) GetBudget(activityID string) (Budget, bool) {
 		return Budget{}, false
 	}
 	return *b, true
+}
+
+// GetBudgetRecord returns the durable record for a given budget ID if tracked.
+func (g *PolicyGovernor) GetBudgetRecord(activityID string) (*BudgetRecord, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	rec, ok := g.budgetRecords[activityID]
+	if !ok {
+		return nil, false
+	}
+	recCopy := *rec
+	return &recCopy, true
 }

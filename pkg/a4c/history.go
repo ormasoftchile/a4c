@@ -117,9 +117,12 @@ func BuildTaskHistory(
 				metricsAgg.WallClockDuration += metrics.WallClockDuration
 				metricsAgg.ModelDuration += metrics.ModelDuration
 				metricsAgg.ToolDuration += metrics.ToolDuration
+				metricsAgg.ValidationDuration += metrics.ValidationDuration
+				metricsAgg.StructuralDuration += metrics.StructuralDuration
 				metricsAgg.PromptTokens += metrics.PromptTokens
 				metricsAgg.CompletionTokens += metrics.CompletionTokens
 				metricsAgg.TotalTokens += metrics.TotalTokens
+				metricsAgg.OverrunTokens += metrics.OverrunTokens
 				metricsAgg.ModelInvocations += metrics.ModelInvocations
 				metricsAgg.ToolCalls += metrics.ToolCalls
 				metricsAgg.StructuralQueriesCount += metrics.StructuralQueriesCount
@@ -263,12 +266,19 @@ func (r *TaskHistoryReport) FormatHumanReadable() string {
 			extra = fmt.Sprintf(" | Investigation: %d file reads, %d structural queries",
 				r.MetricsSummary.FileReadsCount, r.MetricsSummary.StructuralQueriesCount)
 		}
-		sb.WriteString(fmt.Sprintf("Execution Metrics:   Duration: %v (Model: %v) | Tokens: %d prompt, %d completion (%d total)%s\n",
+		overrunStr := ""
+		if r.MetricsSummary.OverrunTokens > 0 {
+			overrunStr = fmt.Sprintf(", %d overrun", r.MetricsSummary.OverrunTokens)
+		}
+		sb.WriteString(fmt.Sprintf("Execution Metrics:   Duration: wall-clock %v (model: %v, tools: %v, validation: %v) | Tokens: %d prompt, %d completion (%d total%s)%s\n",
 			r.MetricsSummary.WallClockDuration.Round(time.Millisecond),
 			r.MetricsSummary.ModelDuration.Round(time.Millisecond),
+			r.MetricsSummary.ToolDuration.Round(time.Millisecond),
+			r.MetricsSummary.ValidationDuration.Round(time.Millisecond),
 			r.MetricsSummary.PromptTokens,
 			r.MetricsSummary.CompletionTokens,
 			r.MetricsSummary.TotalTokens,
+			overrunStr,
 			extra,
 		))
 	}
@@ -362,8 +372,16 @@ func (r *TaskHistoryReport) FormatInspect(structStore *DurableStructuralStore, w
 	}
 	sb.WriteString(fmt.Sprintf("Tokens:     %.0f allocated, %.0f consumed\n", r.AllocatedBudget, r.ConsumedBudget))
 	if m := r.MetricsSummary; m != nil {
-		sb.WriteString(fmt.Sprintf("Durations:  wall-clock %v, model %v\n",
-			m.WallClockDuration.Round(time.Millisecond), m.ModelDuration.Round(time.Millisecond)))
+		overrun := ""
+		if m.OverrunTokens > 0 {
+			overrun = fmt.Sprintf(", %d overrun", m.OverrunTokens)
+		}
+		sb.WriteString(fmt.Sprintf("Durations:  wall-clock %v (model: %v, tools: %v, validation: %v)%s\n",
+			m.WallClockDuration.Round(time.Millisecond),
+			m.ModelDuration.Round(time.Millisecond),
+			m.ToolDuration.Round(time.Millisecond),
+			m.ValidationDuration.Round(time.Millisecond),
+			overrun))
 	} else {
 		sb.WriteString("Durations:  n/a\n")
 	}
@@ -423,8 +441,11 @@ func (r *TaskHistoryReport) FormatInspect(structStore *DurableStructuralStore, w
 		}
 		sb.WriteString(fmt.Sprintf("%s    Tokens consumed: %.0f\n", indent, a.BudgetUsed))
 		if m := a.Metrics; m != nil {
-			sb.WriteString(fmt.Sprintf("%s    Wall-clock: %v, model: %v\n", indent,
-				m.WallClockDuration.Round(time.Millisecond), m.ModelDuration.Round(time.Millisecond)))
+			sb.WriteString(fmt.Sprintf("%s    Durations: wall-clock %v (model: %v, tools: %v, validation: %v)\n", indent,
+				m.WallClockDuration.Round(time.Millisecond),
+				m.ModelDuration.Round(time.Millisecond),
+				m.ToolDuration.Round(time.Millisecond),
+				m.ValidationDuration.Round(time.Millisecond)))
 		}
 		if len(a.EvidenceIDs) > 0 {
 			sb.WriteString(fmt.Sprintf("%s    Validation evidence: %s\n", indent, strings.Join(a.EvidenceIDs, ", ")))

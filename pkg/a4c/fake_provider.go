@@ -25,6 +25,8 @@ type FakeSession struct {
 	canceled            bool
 	responseFunc        FakeResponseFunc
 	sessionResponseFunc FakeSessionResponseFunc
+	modelDuration       time.Duration
+	toolDuration        time.Duration
 	closed              bool
 }
 
@@ -106,6 +108,19 @@ func (s *FakeSession) SetUsage(usage UsageInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.usage = usage
+}
+
+func (s *FakeSession) Durations() (time.Duration, time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.modelDuration, s.toolDuration
+}
+
+func (s *FakeSession) SetDurations(model, tool time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modelDuration = model
+	s.toolDuration = tool
 }
 
 func (s *FakeSession) Close() error {

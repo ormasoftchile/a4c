@@ -19,6 +19,7 @@ func NewWorkspaceSnapshotter() *WorkspaceSnapshotter {
 			".git":         true,
 			"node_modules": true,
 			".squad":       true,
+			".a4c":         true,
 		},
 	}
 }

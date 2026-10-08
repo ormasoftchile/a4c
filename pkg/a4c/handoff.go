@@ -63,7 +63,7 @@ func (b *HandoffBuilder) BuildPrompt(artifact HandoffArtifact) string {
 		trimmedDiff := b.truncateDiff(artifact.Diff)
 		sb.WriteString(fmt.Sprintf("Changes Under Review:\n%s\n", trimmedDiff))
 		sb.WriteString(fmt.Sprintf("Native Evidence: %s\n", artifact.ValidationEvidence))
-		sb.WriteString("Instructions: Audit the diff against the objective and the verified native test evidence above. The YAWR runtime has independently compiled and run the native tests with exit code 0. If the changes satisfy the objective and meet code quality standards, submit approval using governed_submit_review.\n")
+		sb.WriteString("Instructions: Audit the diff against the objective and the verified native test evidence above. The YAWR runtime has independently compiled and executed the native test suite with exit code 0. Test verification is already established—do not reject for lack of test execution or missing test commands. If the changes satisfy the objective and meet code quality standards, submit approval using governed_submit_review.\n")
 
 	default:
 		sb.WriteString("Instructions: Execute the assigned objective using authorized governed tools.\n")

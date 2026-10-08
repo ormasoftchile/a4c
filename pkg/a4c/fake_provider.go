@@ -27,6 +27,7 @@ type FakeSession struct {
 	sessionResponseFunc FakeSessionResponseFunc
 	modelDuration       time.Duration
 	toolDuration        time.Duration
+	turnCount           int
 	closed              bool
 }
 
@@ -40,6 +41,13 @@ func (s *FakeSession) Config() AgentConfig {
 
 func (s *FakeSession) Send(ctx context.Context, prompt string) (*AgentMessage, error) {
 	s.mu.Lock()
+	s.turnCount++
+	if s.config.Limits != nil && s.config.Limits.MaxModelTurns > 0 && s.turnCount > s.config.Limits.MaxModelTurns {
+		turns := s.turnCount
+		maxTurns := s.config.Limits.MaxModelTurns
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: turn %d exceeds max model turns %d", ErrTurnLimitExceeded, turns, maxTurns)
+	}
 	if s.canceled {
 		s.mu.Unlock()
 		return nil, ErrSessionCanceled
@@ -143,6 +151,18 @@ func NewFakeProvider() *FakeProvider {
 	return &FakeProvider{
 		sessions: make(map[string]*FakeSession),
 	}
+}
+
+func (p *FakeProvider) SetSessionResponseFunc(fn FakeSessionResponseFunc) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.SessionResponseFunc = fn
+}
+
+func (p *FakeProvider) SetResponseFunc(fn FakeResponseFunc) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ResponseFunc = fn
 }
 
 func (p *FakeProvider) CreateSession(ctx context.Context, config AgentConfig) (AgentSession, error) {

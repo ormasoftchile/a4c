@@ -292,6 +292,9 @@ func TestMilestone7_02_ColdVsWarmIndexingAmortization(t *testing.T) {
 // TestMilestone7_03_BalancedThreeConfigurationTrials runs the full 3-way comparative matrix
 // across the 3 benchmark tasks (9 balanced trials) reporting tokens, latency, tool calls, and precision/recall.
 func TestMilestone7_03_BalancedThreeConfigurationTrials(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping milestone 7 comparative trials in -short mode")
+	}
 	yawrRoot := "/Users/cristianormazabal/Projects/yawr"
 	if _, err := os.Stat(yawrRoot); err != nil {
 		t.Skip("yawr repository root not found")

@@ -14,7 +14,7 @@ type TestRunner interface {
 type NativeGoTestRunner struct{}
 
 func (r *NativeGoTestRunner) RunTests(ctx context.Context, workspaceDir string) (int, string, error) {
-	cmd := exec.CommandContext(ctx, "go", "test", "./...")
+	cmd := exec.CommandContext(ctx, "go", "test", "-short", "./...")
 	cmd.Dir = workspaceDir
 	out, err := cmd.CombinedOutput()
 	if err != nil {

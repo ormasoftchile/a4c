@@ -41,6 +41,7 @@ type AgentConfig struct {
 	AllowedTools           []string                       `json:"allowed_tools,omitempty"`
 	MaxToolCalls           int                            `json:"max_tool_calls,omitempty"`
 	MaxReadFileLines       int                            `json:"max_read_file_lines,omitempty"`
+	Limits                 *ActivityLimits                `json:"limits,omitempty"`
 }
 
 // AgentSession manages conversational continuity for an active agent.

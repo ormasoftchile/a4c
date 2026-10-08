@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -280,11 +281,19 @@ func runTask(args []string) {
 		fmt.Print(report.FormatHumanReadable())
 
 	case "inspect":
-		if len(args) < 2 {
-			fmt.Println("Usage: a4c task inspect <task-id>")
+		jsonOutput := false
+		taskID := ""
+		for _, arg := range args[1:] {
+			if arg == "--json" {
+				jsonOutput = true
+			} else if !strings.HasPrefix(arg, "--") && taskID == "" {
+				taskID = arg
+			}
+		}
+		if taskID == "" {
+			fmt.Println("Usage: a4c task inspect <task-id> [--json]")
 			return
 		}
-		taskID := args[1]
 		journal, _ := a4c.NewDurableIntentJournal(journalDir)
 		memStore, _ := a4c.NewDurableMemoryStore(memDir)
 		wtMgr, _ := a4c.NewWorktreeManager(".", filepath.Join(dotDir, "worktrees"))
@@ -294,6 +303,16 @@ func runTask(args []string) {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error inspecting task: %v\n", err)
 			os.Exit(1)
+		}
+
+		if jsonOutput {
+			output, err := json.MarshalIndent(report, "", "  ")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error encoding task report as JSON: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(string(output))
+			return
 		}
 
 		fmt.Print(report.FormatInspect(structStore, "."))

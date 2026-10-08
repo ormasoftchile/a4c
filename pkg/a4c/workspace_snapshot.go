@@ -20,6 +20,8 @@ func NewWorkspaceSnapshotter() *WorkspaceSnapshotter {
 			"node_modules": true,
 			".squad":       true,
 			".a4c":         true,
+			"bin":          true,
+			".codetopo":    true,
 		},
 	}
 }

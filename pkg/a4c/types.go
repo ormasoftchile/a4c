@@ -14,6 +14,11 @@ var (
 	ErrUnfinishedIntentDetected = errors.New("reconciliation: unfinished external intent detected on restart")
 	ErrWorkspaceConcurrentEdit  = errors.New("evidence: workspace content modified concurrently during validation")
 	ErrActivityNotFound         = errors.New("store: activity not found")
+	ErrWorkspaceLocked          = errors.New("workspace: exclusive lock held by another coordinator process")
+	ErrTurnLimitExceeded        = errors.New("limits: max model turns exceeded for activity")
+	ErrToolCallLimitExceeded    = errors.New("limits: max tool calls exceeded for activity")
+	ErrRevisionLimitExceeded    = errors.New("limits: max revisions exceeded for activity")
+	ErrStaleValidationEvidence  = errors.New("evidence: validation evidence does not match workspace state")
 )
 
 type ActivityStatus string
@@ -61,7 +66,8 @@ const (
 // ExecutionMetrics tracks detailed per-activity model, tool, and latency measurements.
 type ExecutionMetrics struct {
 	WallClockDuration      time.Duration `json:"wall_clock_duration"`
-	ModelDuration          time.Duration `json:"model_duration"`
+	ProviderWaitDuration   time.Duration `json:"provider_wait_duration"`
+	ModelDuration          time.Duration `json:"model_duration,omitempty"` // legacy alias for backwards compatibility
 	ToolDuration           time.Duration `json:"tool_duration"`
 	ValidationDuration     time.Duration `json:"validation_duration,omitempty"`
 	StructuralDuration     time.Duration `json:"structural_duration,omitempty"`
@@ -76,6 +82,16 @@ type ExecutionMetrics struct {
 	FileReadsCount         int           `json:"file_reads_count,omitempty"`
 }
 
+// ActivityLimits sets bounded economic and turn constraints for an activity.
+type ActivityLimits struct {
+	MaxModelTurns        int `json:"max_model_turns,omitempty"`
+	MaxToolCalls         int `json:"max_tool_calls,omitempty"`
+	MaxReadFileLines     int `json:"max_read_file_lines,omitempty"`
+	MaxDiffLines         int `json:"max_diff_lines,omitempty"`
+	MaxValidationOutput  int `json:"max_validation_output,omitempty"`
+	MaxRevisions         int `json:"max_revisions,omitempty"`
+}
+
 // ActivityFilter specifies criteria for querying historical or active activities.
 type ActivityFilter struct {
 	Status    ActivityStatus `json:"status,omitempty"`
@@ -87,23 +103,30 @@ type ActivityFilter struct {
 
 // CapabilityProfile models a declarative, activity-scoped permission set and budget.
 type CapabilityProfile struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name,omitempty"`
-	Description  string   `json:"description,omitempty"`
-	AllowedTools []string `json:"allowed_tools"`
-	Budget       Budget   `json:"budget,omitempty"`
+	ID           string          `json:"id"`
+	Name         string          `json:"name,omitempty"`
+	Description  string          `json:"description,omitempty"`
+	AllowedTools []string        `json:"allowed_tools"`
+	Budget       Budget          `json:"budget,omitempty"`
+	Limits       *ActivityLimits `json:"limits,omitempty"`
 }
 
 // Clone returns an isolated copy of the capability profile.
 func (p CapabilityProfile) Clone() CapabilityProfile {
 	tools := make([]string, len(p.AllowedTools))
 	copy(tools, p.AllowedTools)
+	var limCopy *ActivityLimits
+	if p.Limits != nil {
+		lim := *p.Limits
+		limCopy = &lim
+	}
 	return CapabilityProfile{
 		ID:           p.ID,
 		Name:         p.Name,
 		Description:  p.Description,
 		AllowedTools: tools,
 		Budget:       p.Budget,
+		Limits:       limCopy,
 	}
 }
 
@@ -120,6 +143,7 @@ type ActivityRequest struct {
 	DependsOn            []string           `json:"depends_on,omitempty"`
 	CapabilityProfile    *CapabilityProfile `json:"capability_profile,omitempty"`
 	StructuralArtifactID string             `json:"structural_artifact_id,omitempty"`
+	Limits               *ActivityLimits    `json:"limits,omitempty"`
 	CreatedAt            time.Time          `json:"created_at"`
 }
 

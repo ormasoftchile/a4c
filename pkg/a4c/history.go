@@ -115,6 +115,7 @@ func BuildTaskHistory(
 					metricsAgg = &ExecutionMetrics{}
 				}
 				metricsAgg.WallClockDuration += metrics.WallClockDuration
+				metricsAgg.ProviderWaitDuration += metrics.ProviderWaitDuration
 				metricsAgg.ModelDuration += metrics.ModelDuration
 				metricsAgg.ToolDuration += metrics.ToolDuration
 				metricsAgg.ValidationDuration += metrics.ValidationDuration
@@ -270,8 +271,13 @@ func (r *TaskHistoryReport) FormatHumanReadable() string {
 		if r.MetricsSummary.OverrunTokens > 0 {
 			overrunStr = fmt.Sprintf(", %d overrun", r.MetricsSummary.OverrunTokens)
 		}
-		sb.WriteString(fmt.Sprintf("Execution Metrics:   Duration: wall-clock %v (model: %v, tools: %v, validation: %v) | Tokens: %d prompt, %d completion (%d total%s)%s\n",
+		provWait := r.MetricsSummary.ProviderWaitDuration
+		if provWait == 0 {
+			provWait = r.MetricsSummary.ModelDuration
+		}
+		sb.WriteString(fmt.Sprintf("Execution Metrics:   Duration: wall-clock %v (provider wait: %v, model: %v, tools: %v, validation: %v) | Tokens: %d prompt, %d completion (%d total%s)%s\n",
 			r.MetricsSummary.WallClockDuration.Round(time.Millisecond),
+			provWait.Round(time.Millisecond),
 			r.MetricsSummary.ModelDuration.Round(time.Millisecond),
 			r.MetricsSummary.ToolDuration.Round(time.Millisecond),
 			r.MetricsSummary.ValidationDuration.Round(time.Millisecond),
@@ -376,8 +382,13 @@ func (r *TaskHistoryReport) FormatInspect(structStore *DurableStructuralStore, w
 		if m.OverrunTokens > 0 {
 			overrun = fmt.Sprintf(", %d overrun", m.OverrunTokens)
 		}
-		sb.WriteString(fmt.Sprintf("Durations:  wall-clock %v (model: %v, tools: %v, validation: %v)%s\n",
+		provWait := m.ProviderWaitDuration
+		if provWait == 0 {
+			provWait = m.ModelDuration
+		}
+		sb.WriteString(fmt.Sprintf("Durations:  wall-clock %v (provider wait: %v, model: %v, tools: %v, validation: %v)%s\n",
 			m.WallClockDuration.Round(time.Millisecond),
+			provWait.Round(time.Millisecond),
 			m.ModelDuration.Round(time.Millisecond),
 			m.ToolDuration.Round(time.Millisecond),
 			m.ValidationDuration.Round(time.Millisecond),
@@ -441,9 +452,13 @@ func (r *TaskHistoryReport) FormatInspect(structStore *DurableStructuralStore, w
 		}
 		sb.WriteString(fmt.Sprintf("%s    Tokens consumed: %.0f\n", indent, a.BudgetUsed))
 		if m := a.Metrics; m != nil {
-			sb.WriteString(fmt.Sprintf("%s    Durations: wall-clock %v (model: %v, tools: %v, validation: %v)\n", indent,
+			provWait := m.ProviderWaitDuration
+			if provWait == 0 {
+				provWait = m.ModelDuration
+			}
+			sb.WriteString(fmt.Sprintf("%s    Durations: wall-clock %v (provider wait: %v, tools: %v, validation: %v)\n", indent,
 				m.WallClockDuration.Round(time.Millisecond),
-				m.ModelDuration.Round(time.Millisecond),
+				provWait.Round(time.Millisecond),
 				m.ToolDuration.Round(time.Millisecond),
 				m.ValidationDuration.Round(time.Millisecond)))
 		}

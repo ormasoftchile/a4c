@@ -71,6 +71,7 @@ type CopilotSessionAdapter struct {
 	modelDuration  time.Duration
 	toolDuration   time.Duration
 	toolCallCount  int
+	turnCount      int
 }
 
 func (s *CopilotSessionAdapter) SessionID() string {
@@ -102,6 +103,13 @@ func (s *CopilotSessionAdapter) Durations() (time.Duration, time.Duration) {
 
 func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*AgentMessage, error) {
 	s.mu.Lock()
+	s.turnCount++
+	if s.config.Limits != nil && s.config.Limits.MaxModelTurns > 0 && s.turnCount > s.config.Limits.MaxModelTurns {
+		turns := s.turnCount
+		maxTurns := s.config.Limits.MaxModelTurns
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: turn %d exceeds max model turns %d", ErrTurnLimitExceeded, turns, maxTurns)
+	}
 	if s.config.Budget.Allocated > 0 && float64(s.usage.TotalTokens) >= s.config.Budget.Allocated {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: session budget exhausted before send", ErrBudgetExceeded)
@@ -325,6 +333,9 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 	}
 
 	maxToolCalls := config.MaxToolCalls
+	if config.Limits != nil && config.Limits.MaxToolCalls > 0 {
+		maxToolCalls = config.Limits.MaxToolCalls
+	}
 	if maxToolCalls <= 0 {
 		maxToolCalls = 10
 	}
@@ -338,7 +349,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		calls := adapter.toolCallCount
 		adapter.mu.Unlock()
 		if calls > maxToolCalls {
-			return fmt.Errorf("tool call limit exceeded: maximum %d calls allowed per session", maxToolCalls)
+			return fmt.Errorf("%w: maximum %d calls allowed per session", ErrToolCallLimitExceeded, maxToolCalls)
 		}
 		return nil
 	}

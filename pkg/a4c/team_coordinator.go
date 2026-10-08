@@ -3,6 +3,7 @@ package a4c
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,6 +44,9 @@ type TeamCoordinator struct {
 	MaxRevisions           int
 	MaxToolCalls           int
 	MaxReadFileLines       int
+	Limits                 ActivityLimits
+	lock                   *WorkspaceLock
+	coordID                string
 	revisionCount          int
 	lastEvidence           *ValidationEvidence
 	sessions               map[string]AgentSession
@@ -72,7 +76,8 @@ func NewTeamCoordinator(
 		_ = governor.SetStorageDir(filepath.Join(workspaceDir, ".a4c", "budgets"))
 	}
 
-	return &TeamCoordinator{
+	coordID := fmt.Sprintf("coord-%d", time.Now().UnixNano())
+	coord := &TeamCoordinator{
 		WorkspaceDir:     workspaceDir,
 		Store:            store,
 		Roster:           roster,
@@ -87,10 +92,25 @@ func NewTeamCoordinator(
 		MaxRevisions:     2,
 		MaxToolCalls:     10,
 		MaxReadFileLines: 300,
-		sessions:         make(map[string]AgentSession),
-		Handoff:          NewHandoffBuilder(),
-		Capabilities:     NewCapabilityRegistry(),
+		coordID:          coordID,
+		Limits: ActivityLimits{
+			MaxModelTurns:       10,
+			MaxToolCalls:        10,
+			MaxReadFileLines:    300,
+			MaxDiffLines:        150,
+			MaxValidationOutput: 4096,
+			MaxRevisions:        2,
+		},
+		sessions:     make(map[string]AgentSession),
+		Handoff:      NewHandoffBuilder(),
+		Capabilities: NewCapabilityRegistry(),
 	}
+
+	if governor != nil && store != nil {
+		_ = governor.ReconcileWithStore(store)
+	}
+
+	return coord
 }
 
 
@@ -120,6 +140,40 @@ func (c *TeamCoordinator) SetStructuralArtifact(art *StructuralContextArtifact) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.setStructuralArtifactLocked(art)
+}
+
+// AcquireWorkspaceLock explicitly acquires the exclusive OS kernel lock on .a4c/workspace.lock.
+func (c *TeamCoordinator) AcquireWorkspaceLock() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.lock != nil && c.lock.IsLocked() {
+		return nil
+	}
+	lock, err := AcquireWorkspaceLock(c.WorkspaceDir, c.coordID, "")
+	if err != nil {
+		return err
+	}
+	c.lock = lock
+	return nil
+}
+
+// ReleaseWorkspaceLock explicitly releases the exclusive OS kernel lock.
+func (c *TeamCoordinator) ReleaseWorkspaceLock() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.lock == nil {
+		return nil
+	}
+	err := c.lock.Release()
+	c.lock = nil
+	return err
+}
+
+// Close releases any held workspace locks and resources.
+func (c *TeamCoordinator) Close() error {
+	return c.ReleaseWorkspaceLock()
 }
 
 func (c *TeamCoordinator) setStructuralArtifactLocked(art *StructuralContextArtifact) {
@@ -183,6 +237,17 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 	inputs map[string]any,
 	strategy ExecutionStrategy,
 ) (*ActivityRequest, error) {
+	c.mu.Lock()
+	alreadyLocked := c.lock != nil && c.lock.IsLocked()
+	c.mu.Unlock()
+
+	if !alreadyLocked {
+		if err := c.AcquireWorkspaceLock(); err != nil {
+			return nil, err
+		}
+		defer c.ReleaseWorkspaceLock()
+	}
+
 	if strategy == "" {
 		strategy = StrategyTeam
 	}
@@ -269,6 +334,10 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 
 // Step processes the next claimable activity whose dependencies are satisfied.
 func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
+	if err := c.AcquireWorkspaceLock(); err != nil {
+		return nil, err
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -369,6 +438,44 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	profile := c.Capabilities.ResolveProfile(ident.ID, ident.Role, req.Objective, req.CapabilityProfile, c.Governor)
 	req.CapabilityProfile = &profile
 
+	// Resolve effective economic and activity limits
+	effectiveLimits := ActivityLimits{
+		MaxModelTurns:       10,
+		MaxToolCalls:        c.MaxToolCalls,
+		MaxReadFileLines:    c.MaxReadFileLines,
+		MaxDiffLines:        150,
+		MaxValidationOutput: 4096,
+		MaxRevisions:        c.MaxRevisions,
+	}
+	if c.Limits.MaxModelTurns > 0 { effectiveLimits.MaxModelTurns = c.Limits.MaxModelTurns }
+	if c.Limits.MaxToolCalls > 0 { effectiveLimits.MaxToolCalls = c.Limits.MaxToolCalls }
+	if c.Limits.MaxReadFileLines > 0 { effectiveLimits.MaxReadFileLines = c.Limits.MaxReadFileLines }
+	if c.Limits.MaxDiffLines > 0 { effectiveLimits.MaxDiffLines = c.Limits.MaxDiffLines }
+	maxRevs := c.MaxRevisions
+	if c.Limits.MaxRevisions != 2 {
+		maxRevs = c.Limits.MaxRevisions
+	}
+	if profile.Limits != nil {
+		if profile.Limits.MaxModelTurns > 0 { effectiveLimits.MaxModelTurns = profile.Limits.MaxModelTurns }
+		if profile.Limits.MaxToolCalls > 0 { effectiveLimits.MaxToolCalls = profile.Limits.MaxToolCalls }
+		if profile.Limits.MaxReadFileLines > 0 { effectiveLimits.MaxReadFileLines = profile.Limits.MaxReadFileLines }
+		if profile.Limits.MaxDiffLines > 0 { effectiveLimits.MaxDiffLines = profile.Limits.MaxDiffLines }
+		if profile.Limits.MaxValidationOutput > 0 { effectiveLimits.MaxValidationOutput = profile.Limits.MaxValidationOutput }
+		maxRevs = profile.Limits.MaxRevisions
+	}
+
+	if req.Limits != nil {
+		if req.Limits.MaxModelTurns > 0 { effectiveLimits.MaxModelTurns = req.Limits.MaxModelTurns }
+		if req.Limits.MaxToolCalls > 0 { effectiveLimits.MaxToolCalls = req.Limits.MaxToolCalls }
+		if req.Limits.MaxReadFileLines > 0 { effectiveLimits.MaxReadFileLines = req.Limits.MaxReadFileLines }
+		if req.Limits.MaxDiffLines > 0 { effectiveLimits.MaxDiffLines = req.Limits.MaxDiffLines }
+		if req.Limits.MaxValidationOutput > 0 { effectiveLimits.MaxValidationOutput = req.Limits.MaxValidationOutput }
+		maxRevs = req.Limits.MaxRevisions
+	}
+
+	effectiveLimits.MaxRevisions = maxRevs
+	c.Handoff.MaxDiffLines = effectiveLimits.MaxDiffLines
+
 	config := AgentConfig{
 		AgentID:          ident.ID,
 		Charter:          ident.Charter,
@@ -379,8 +486,9 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		Structural:       c.Structural,
 		Profile:          &profile,
 		AllowedTools:     profile.AllowedTools,
-		MaxToolCalls:     c.MaxToolCalls,
-		MaxReadFileLines: c.MaxReadFileLines,
+		MaxToolCalls:     effectiveLimits.MaxToolCalls,
+		MaxReadFileLines: effectiveLimits.MaxReadFileLines,
+		Limits:           &effectiveLimits,
 		OnRecordMetric: func(metric string, delta int) {
 			if metric == "structural_queries" {
 				structuralQueriesCount += delta
@@ -491,6 +599,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 	metrics := &ExecutionMetrics{
 		WallClockDuration:      time.Since(startWall),
+		ProviderWaitDuration:   modelDur,
 		ModelDuration:          modelDur,
 		ToolDuration:           toolDur,
 		PromptTokens:           usage.PromptTokens,
@@ -516,6 +625,13 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			Outputs: map[string]any{
 				"error": err.Error(),
 			},
+		}
+		if errors.Is(err, ErrTurnLimitExceeded) {
+			failResult.Outputs["failure_reason"] = "turn_limit_exhausted"
+		} else if errors.Is(err, ErrToolCallLimitExceeded) {
+			failResult.Outputs["failure_reason"] = "tool_limit_exhausted"
+		} else if errors.Is(err, ErrBudgetExceeded) {
+			failResult.Outputs["failure_reason"] = "budget_exhausted"
 		}
 		_ = c.Store.FailWithResult(req.ID, failResult, err)
 		return nil, err
@@ -806,7 +922,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			result.Outputs["blockers"] = reviewResult.Blockers
 		}
 
-		if !approved && c.revisionCount < c.MaxRevisions {
+		if !approved && c.revisionCount < effectiveLimits.MaxRevisions {
 			c.revisionCount++
 			// Invalidate existing evidence to force coder to re-run native tests
 			c.lastEvidence = nil
@@ -931,6 +1047,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			}
 		} else {
 			// Not approved and maximum revisions exceeded
+			result.Outputs["failure_reason"] = "revision_limit_exhausted"
 			if c.WorktreeMgr != nil {
 				rootID := c.getRootTaskID(req)
 				_ = c.WorktreeMgr.ReleaseWorktree(rootID, false)
@@ -948,6 +1065,11 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 // RunLoop executes steps sequentially until no claimable activities remain or human escalation is needed.
 func (c *TeamCoordinator) RunLoop(ctx context.Context, maxSteps int) ([]*ActivityResult, error) {
+	if err := c.AcquireWorkspaceLock(); err != nil {
+		return nil, err
+	}
+	defer c.ReleaseWorkspaceLock()
+
 	var results []*ActivityResult
 	for i := 0; i < maxSteps; i++ {
 		if !c.Store.HasClaimable() {
@@ -1030,27 +1152,35 @@ func (c *TeamCoordinator) parseTextDirectives(
 		}
 	}
 
-	// Fallback text parsing for review: [REVIEW_APPROVED] or [REVIEW_REJECTED: reason]
-	if strings.Contains(content, "[REVIEW_APPROVED]") {
-		*rev = &ReviewResult{
-			ActivityID: activityID,
-			ReviewerID: agentID,
-			Approved:   true,
-			Comments:   "Approved via model directive",
-			Timestamp:  time.Now(),
-		}
-	} else if strings.Contains(content, "[REVIEW_REJECTED:") {
-		start := strings.Index(content, "[REVIEW_REJECTED:") + len("[REVIEW_REJECTED:")
-		end := strings.Index(content[start:], "]")
+	// Fallback text parsing for review: [REVIEW_APPROVED] or [REVIEW_REJECTED: reason] or [SUBMIT_REVIEW: ...]
+	if strings.Contains(content, "[REVIEW_REJECTED:") || (strings.Contains(content, "[SUBMIT_REVIEW:") && strings.Contains(content, "approved=false")) {
 		comments := "Rejected"
-		if end != -1 {
-			comments = strings.TrimSpace(content[start : start+end])
+		if strings.Contains(content, "[REVIEW_REJECTED:") {
+			start := strings.Index(content, "[REVIEW_REJECTED:") + len("[REVIEW_REJECTED:")
+			end := strings.Index(content[start:], "]")
+			if end != -1 {
+				comments = strings.TrimSpace(content[start : start+end])
+			}
+		} else if strings.Contains(content, "comments=") {
+			start := strings.Index(content, "comments=") + len("comments=")
+			end := strings.Index(content[start:], "]")
+			if end != -1 {
+				comments = strings.Trim(strings.TrimSpace(content[start:start+end]), "\"")
+			}
 		}
 		*rev = &ReviewResult{
 			ActivityID: activityID,
 			ReviewerID: agentID,
 			Approved:   false,
 			Comments:   comments,
+			Timestamp:  time.Now(),
+		}
+	} else if strings.Contains(content, "[REVIEW_APPROVED]") || (strings.Contains(content, "[SUBMIT_REVIEW:") && strings.Contains(content, "approved=true")) {
+		*rev = &ReviewResult{
+			ActivityID: activityID,
+			ReviewerID: agentID,
+			Approved:   true,
+			Comments:   "Approved via model directive",
 			Timestamp:  time.Now(),
 		}
 	}

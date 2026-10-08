@@ -12,6 +12,26 @@ import (
 	"time"
 )
 
+type BudgetTxType string
+
+const (
+	TxReserve BudgetTxType = "reserve"
+	TxSettle  BudgetTxType = "settle"
+	TxRelease BudgetTxType = "release"
+)
+
+// BudgetTx models a durable transaction journal entry for hierarchical multi-record budget operations.
+type BudgetTx struct {
+	TxID      string       `json:"tx_id"`
+	Type      BudgetTxType `json:"type"`
+	ParentID  string       `json:"parent_id"`
+	ChildID   string       `json:"child_id"`
+	Allocated float64      `json:"allocated,omitempty"`
+	Consumed  float64      `json:"consumed,omitempty"`
+	Status    string       `json:"status"` // "prepared", "committed"
+	Timestamp time.Time    `json:"timestamp"`
+}
+
 type PolicyGovernor struct {
 	mu                  sync.Mutex
 	storageDir          string
@@ -131,6 +151,23 @@ func (g *PolicyGovernor) persistBudgetLocked(id string) error {
 	return os.Rename(tmpFile, targetFile)
 }
 
+func (g *PolicyGovernor) logTxLocked(tx BudgetTx) {
+	if g.storageDir == "" {
+		return
+	}
+	path := filepath.Join(g.storageDir, "transactions.jsonl")
+	data, err := json.Marshal(tx)
+	if err != nil {
+		return
+	}
+	data = append(data, '\n')
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err == nil {
+		_, _ = f.Write(data)
+		_ = f.Close()
+	}
+}
+
 // SetAgentTools configures role-based tool capabilities for a specific agent identity.
 func (g *PolicyGovernor) SetAgentTools(agentID string, tools []string) {
 	g.mu.Lock()
@@ -177,6 +214,17 @@ func (g *PolicyGovernor) AuthorizeProposal(parent ActivityRequest, proposal Acti
 	}
 
 	// Deduct requested from parent reservation
+	txID := fmt.Sprintf("tx-res-%d-%s", time.Now().UnixNano(), newID)
+	g.logTxLocked(BudgetTx{
+		TxID:      txID,
+		Type:      TxReserve,
+		ParentID:  parent.ID,
+		ChildID:   newID,
+		Allocated: requested,
+		Status:    "prepared",
+		Timestamp: time.Now().UTC(),
+	})
+
 	budget.Reserved += requested
 	if parentRec, exists := g.budgetRecords[parent.ID]; exists {
 		parentRec.Reserved = budget.Reserved
@@ -224,6 +272,16 @@ func (g *PolicyGovernor) AuthorizeProposal(parent ActivityRequest, proposal Acti
 	}
 	_ = g.persistBudgetLocked(newID)
 
+	g.logTxLocked(BudgetTx{
+		TxID:      txID,
+		Type:      TxReserve,
+		ParentID:  parent.ID,
+		ChildID:   newID,
+		Allocated: requested,
+		Status:    "committed",
+		Timestamp: time.Now().UTC(),
+	})
+
 	g.authorizedProposals[dedupKey] = childReq
 	return childReq, nil
 }
@@ -258,6 +316,17 @@ func (g *PolicyGovernor) SetBudget(activityID string, b Budget) {
 func (g *PolicyGovernor) RecordConsumption(activityID, parentID string, tokens float64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	txID := fmt.Sprintf("tx-set-%d-%s", time.Now().UnixNano(), activityID)
+	g.logTxLocked(BudgetTx{
+		TxID:      txID,
+		Type:      TxSettle,
+		ParentID:  parentID,
+		ChildID:   activityID,
+		Consumed:  tokens,
+		Status:    "prepared",
+		Timestamp: time.Now().UTC(),
+	})
 
 	var allocated float64
 	if b, ok := g.activeBudgets[activityID]; ok {
@@ -311,6 +380,16 @@ func (g *PolicyGovernor) RecordConsumption(activityID, parentID string, tokens f
 			}
 		}
 	}
+
+	g.logTxLocked(BudgetTx{
+		TxID:      txID,
+		Type:      TxSettle,
+		ParentID:  parentID,
+		ChildID:   activityID,
+		Consumed:  tokens,
+		Status:    "committed",
+		Timestamp: time.Now().UTC(),
+	})
 }
 
 // ExtendBudget increases the allocated tokens for an activity.
@@ -339,6 +418,17 @@ func (g *PolicyGovernor) ReleaseReservation(activityID, parentID string) error {
 	b, ok := g.activeBudgets[activityID]
 	if ok {
 		unconsumed := b.Allocated - b.Consumed
+		txID := fmt.Sprintf("tx-rel-%d-%s", time.Now().UnixNano(), activityID)
+		g.logTxLocked(BudgetTx{
+			TxID:      txID,
+			Type:      TxRelease,
+			ParentID:  parentID,
+			ChildID:   activityID,
+			Allocated: unconsumed,
+			Status:    "prepared",
+			Timestamp: time.Now().UTC(),
+		})
+
 		if unconsumed > 0 && parentID != "" && parentID != activityID {
 			if p, ok := g.activeBudgets[parentID]; ok {
 				if p.Reserved >= unconsumed {
@@ -359,7 +449,131 @@ func (g *PolicyGovernor) ReleaseReservation(activityID, parentID string) error {
 			rec.UpdatedAt = time.Now()
 			_ = g.persistBudgetLocked(activityID)
 		}
+
+		g.logTxLocked(BudgetTx{
+			TxID:      txID,
+			Type:      TxRelease,
+			ParentID:  parentID,
+			ChildID:   activityID,
+			Allocated: unconsumed,
+			Status:    "committed",
+			Timestamp: time.Now().UTC(),
+		})
 	}
+	return nil
+}
+
+// ReconcileWithStore audits budget state against durable activity store records to resolve crash inconsistencies.
+func (g *PolicyGovernor) ReconcileWithStore(store *DurableActivityStore) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	for id, rec := range g.budgetRecords {
+		if rec.ParentID == "" {
+			continue
+		}
+
+		parentRec, parentExists := g.budgetRecords[rec.ParentID]
+		pBudget, pActive := g.activeBudgets[rec.ParentID]
+
+		actRec, err := store.Get(id)
+		if err != nil || actRec == nil {
+			// Scenario A: Child was reserved but activity was never created/started before crash
+			if rec.Status == "active" {
+				unconsumed := rec.Allocated - rec.Consumed
+				if unconsumed > 0 && parentExists {
+					if parentRec.Reserved >= unconsumed {
+						parentRec.Reserved -= unconsumed
+					} else {
+						parentRec.Reserved = 0
+					}
+					if pActive {
+						pBudget.Reserved = parentRec.Reserved
+					}
+					parentRec.UpdatedAt = time.Now()
+					_ = g.persistBudgetLocked(rec.ParentID)
+				}
+				rec.Status = "released"
+				rec.UpdatedAt = time.Now()
+				_ = g.persistBudgetLocked(id)
+			}
+			continue
+		}
+
+		switch actRec.Status {
+		case StatusCompleted:
+			// Scenario C: Child completed in store, ensure settlement is completed on parent
+			if rec.Status != "settled" {
+				rec.Status = "settled"
+				rec.UpdatedAt = time.Now()
+				_ = g.persistBudgetLocked(id)
+			}
+			if parentExists {
+				if parentRec.Reserved >= rec.Allocated {
+					parentRec.Reserved -= rec.Allocated
+				}
+				if pActive {
+					pBudget.Reserved = parentRec.Reserved
+				}
+				parentRec.UpdatedAt = time.Now()
+				_ = g.persistBudgetLocked(rec.ParentID)
+			}
+
+		case StatusClaimed:
+			// Scenario B: Child was running when crash terminated process
+			failErr := fmt.Errorf("process terminated during execution (recovered on startup)")
+			failResult := ActivityResult{
+				ID:       id,
+				Status:   StatusFailed,
+				Consumed: Budget{Consumed: rec.Consumed},
+				Outputs: map[string]any{
+					"error":     failErr.Error(),
+					"recovered": true,
+				},
+			}
+			_ = store.FailWithResult(id, failResult, failErr)
+
+			if parentExists {
+				parentRec.Consumed += rec.Consumed
+				if parentRec.Reserved >= rec.Allocated {
+					parentRec.Reserved -= rec.Allocated
+				} else {
+					parentRec.Reserved = 0
+				}
+				if pActive {
+					pBudget.Consumed = parentRec.Consumed
+					pBudget.Reserved = parentRec.Reserved
+				}
+				parentRec.UpdatedAt = time.Now()
+				_ = g.persistBudgetLocked(rec.ParentID)
+			}
+			rec.Status = "released"
+			rec.UpdatedAt = time.Now()
+			_ = g.persistBudgetLocked(id)
+
+		case StatusFailed, StatusIndeterminate:
+			// Failed child: release unconsumed reservation back to parent
+			if rec.Status == "active" {
+				unconsumed := rec.Allocated - rec.Consumed
+				if unconsumed > 0 && parentExists {
+					if parentRec.Reserved >= unconsumed {
+						parentRec.Reserved -= unconsumed
+					} else {
+						parentRec.Reserved = 0
+					}
+					if pActive {
+						pBudget.Reserved = parentRec.Reserved
+					}
+					parentRec.UpdatedAt = time.Now()
+					_ = g.persistBudgetLocked(rec.ParentID)
+				}
+				rec.Status = "released"
+				rec.UpdatedAt = time.Now()
+				_ = g.persistBudgetLocked(id)
+			}
+		}
+	}
+
 	return nil
 }
 

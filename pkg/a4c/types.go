@@ -76,6 +76,9 @@ type ExecutionMetrics struct {
 	TotalTokens            int           `json:"total_tokens"`
 	PeakContextTokens      int           `json:"peak_context_tokens,omitempty"`
 	OverrunTokens          int           `json:"overrun_tokens,omitempty"`
+	ReasoningTokens        int           `json:"reasoning_tokens,omitempty"`
+	CachedTokens           int           `json:"cached_tokens,omitempty"`
+	ReportedCostUSD        float64       `json:"reported_cost_usd,omitempty"`
 	ModelInvocations       int           `json:"model_invocations"`
 	ToolCalls              int           `json:"tool_calls"`
 	StructuralQueriesCount int           `json:"structural_queries_count,omitempty"`
@@ -144,6 +147,8 @@ type ActivityRequest struct {
 	CapabilityProfile    *CapabilityProfile `json:"capability_profile,omitempty"`
 	StructuralArtifactID string             `json:"structural_artifact_id,omitempty"`
 	Limits               *ActivityLimits    `json:"limits,omitempty"`
+	Runtime              string             `json:"runtime,omitempty"`
+	Model                string             `json:"model,omitempty"`
 	CreatedAt            time.Time          `json:"created_at"`
 }
 

@@ -33,13 +33,12 @@ func printUsage() {
 Commands:
   init [path]                           Initialize an a4c workspace (.a4c directory)
   team list                             List persistent team members and permissions
-  team add <id> <name> <role> <charter> Register a new persistent team member
-  task submit <obj> [budget] [--strategy s] Submit a task (strategy: direct|reviewed|team)
+  task submit <obj> [budget] [--strategy s] [--runtime r] [--model m] Submit a task (strategy: direct|reviewed|team)
   task list [--status s] [--agent a]    Query activities matching filter criteria
   task history <task-id>                Display full audit history and DAG for a task
-  task inspect <task-id>                Inspect task agents, activity tree, profiles, tokens, evidence, context, decisions
+  task inspect <task-id> [--json]       Inspect a task; output machine-readable JSON with --json
   status                                Display active activities and evidence
-  run [--real-copilot] [--steps N]      Run governed collaboration loop
+  run [--runtime r] [--model m] [--real-copilot] [--steps N] Run governed collaboration loop
   decisions list                        List questions awaiting human engineer guidance
   decisions resolve <id> <resolution>   Resolve decision and resume paused task
   memory list                           List verified architectural conventions
@@ -208,16 +207,24 @@ func runTask(args []string) {
 	switch subCmd {
 	case "submit":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task submit <objective> [budget_tokens] [--strategy direct|reviewed|team]")
+			fmt.Println("Usage: a4c task submit <objective> [budget_tokens] [--strategy direct|reviewed|team] [--runtime copilot|opencode] [--model <model>]")
 			return
 		}
 		objective := args[1]
 		budgetTokens := 50000.0
 		strategy := a4c.StrategyTeam
+		runtime := ""
+		model := ""
 
 		for i := 2; i < len(args); i++ {
 			if args[i] == "--strategy" && i+1 < len(args) {
 				strategy = a4c.ExecutionStrategy(args[i+1])
+				i++
+			} else if args[i] == "--runtime" && i+1 < len(args) {
+				runtime = args[i+1]
+				i++
+			} else if args[i] == "--model" && i+1 < len(args) {
+				model = args[i+1]
 				i++
 			} else if b, err := strconv.ParseFloat(args[i], 64); err == nil {
 				budgetTokens = b
@@ -236,13 +243,21 @@ func runTask(args []string) {
 		coord := a4c.NewTeamCoordinator(".", store, roster, memStore, gov, journal, &a4c.NativeGoTestRunner{}, nil)
 		coord.SetWorktreeManager(wtMgr)
 
-		req, err := coord.SubmitTaskWithStrategy(objective, a4c.Budget{Allocated: budgetTokens}, nil, strategy)
+		inputs := make(map[string]any)
+		if runtime != "" {
+			inputs["runtime"] = runtime
+		}
+		if model != "" {
+			inputs["model"] = model
+		}
+
+		req, err := coord.SubmitTaskWithStrategy(objective, a4c.Budget{Allocated: budgetTokens}, inputs, strategy)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to enqueue task: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Task enqueued: %s\nStrategy: %s\nAssigned to: %s\nObjective: %s\nBudget: %.0f tokens\n",
-			req.ID, strategy, req.AgentID, req.Objective, req.Budget.Allocated)
+		fmt.Printf("Task enqueued: %s\nStrategy: %s\nRuntime: %s\nModel: %s\nAssigned to: %s\nObjective: %s\nBudget: %.0f tokens\n",
+			req.ID, strategy, req.Runtime, req.Model, req.AgentID, req.Objective, req.Budget.Allocated)
 
 	case "list":
 		var filter a4c.ActivityFilter
@@ -418,6 +433,9 @@ func runMemory(args []string) {
 func runLoop(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	realCopilot := fs.Bool("real-copilot", false, "Use official GitHub Copilot CLI")
+	runtimeFlag := fs.String("runtime", "", "Agent execution runtime (copilot, opencode, fake)")
+	modelFlag := fs.String("model", "", "Model identifier (e.g. opencode-go/mimo-v2.5, gpt-4o)")
+	opencodeEndpoint := fs.String("opencode-endpoint", "", "OpenCode daemon HTTP endpoint (default auto-spawn or http://127.0.0.1:4096)")
 	maxSteps := fs.Int("steps", 10, "Maximum sequential steps")
 	workDir := fs.String("dir", ".", "Workspace directory")
 	_ = fs.Parse(args)
@@ -449,7 +467,10 @@ func runLoop(args []string) {
 	}
 
 	var provider a4c.AgentProvider
-	if *realCopilot {
+	var opProvider *a4c.OpenCodeProvider
+	var cpProvider *a4c.CopilotProvider
+
+	if *realCopilot || *runtimeFlag == "copilot" {
 		fmt.Println("Connecting to REAL GitHub Copilot via official Go SDK...")
 		cp, err := a4c.NewCopilotProvider("")
 		if err != nil {
@@ -458,12 +479,37 @@ func runLoop(args []string) {
 		}
 		defer cp.Close()
 		provider = cp
+		cpProvider = cp
+	} else if *runtimeFlag == "opencode" {
+		fmt.Println("Connecting to OpenCode runtime...")
+		var mgr *a4c.OpenCodeServerManager
+		endpoint := *opencodeEndpoint
+		if endpoint == "" {
+			var err error
+			mgr, err = a4c.NewManagedOpenCodeServer(context.Background(), 0)
+			if err != nil {
+				endpoint = "http://127.0.0.1:4096"
+			} else {
+				endpoint = mgr.Endpoint()
+				defer mgr.Stop()
+			}
+		}
+		op := a4c.NewOpenCodeProvider(endpoint, *modelFlag, mgr)
+		defer op.Close()
+		provider = op
+		opProvider = op
 	} else {
 		fmt.Println("Running with simulated test provider...")
 		provider = a4c.NewFakeProvider()
 	}
 
 	coord := a4c.NewTeamCoordinator(*workDir, store, roster, memory, gov, journal, runner, provider)
+	if opProvider != nil {
+		coord.RegisterProvider("opencode", opProvider)
+	}
+	if cpProvider != nil {
+		coord.RegisterProvider("copilot", cpProvider)
+	}
 	if wtMgr, err := a4c.NewWorktreeManager(*workDir, filepath.Join(dotDir, "worktrees")); err == nil {
 		coord.SetWorktreeManager(wtMgr)
 	}

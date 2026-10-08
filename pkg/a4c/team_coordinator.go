@@ -38,8 +38,9 @@ type TeamCoordinator struct {
 	Journal       *DurableIntentJournal
 	Snapshotter   *WorkspaceSnapshotter
 	TestRunner    TestRunner
-	Provider      AgentProvider
-	Reconciler    EffectReconciler
+	Provider               AgentProvider
+	Providers              map[string]AgentProvider
+	Reconciler             EffectReconciler
 	MaxRepair              int
 	MaxRevisions           int
 	MaxToolCalls           int
@@ -101,9 +102,15 @@ func NewTeamCoordinator(
 			MaxValidationOutput: 4096,
 			MaxRevisions:        2,
 		},
+		Providers:    make(map[string]AgentProvider),
 		sessions:     make(map[string]AgentSession),
 		Handoff:      NewHandoffBuilder(),
 		Capabilities: NewCapabilityRegistry(),
+	}
+
+	if provider != nil {
+		coord.Providers["default"] = provider
+		coord.Providers["copilot"] = provider
 	}
 
 	if governor != nil && store != nil {
@@ -111,6 +118,31 @@ func NewTeamCoordinator(
 	}
 
 	return coord
+}
+
+// RegisterProvider registers an agent execution runtime by name (e.g. "copilot", "opencode").
+func (c *TeamCoordinator) RegisterProvider(name string, p AgentProvider) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.Providers == nil {
+		c.Providers = make(map[string]AgentProvider)
+	}
+	c.Providers[name] = p
+}
+
+func (c *TeamCoordinator) resolveProvider(req *ActivityRequest) AgentProvider {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resolveProviderLocked(req)
+}
+
+func (c *TeamCoordinator) resolveProviderLocked(req *ActivityRequest) AgentProvider {
+	if req != nil && req.Runtime != "" && c.Providers != nil {
+		if p, ok := c.Providers[req.Runtime]; ok {
+			return p
+		}
+	}
+	return c.Provider
 }
 
 
@@ -262,6 +294,16 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 		_, _ = c.WorktreeMgr.AcquireWorktree(context.Background(), taskID, "team")
 	}
 
+	var runtime, model string
+	if inputs != nil {
+		if r, ok := inputs["runtime"].(string); ok {
+			runtime = r
+		}
+		if m, ok := inputs["model"].(string); ok {
+			model = m
+		}
+	}
+
 	switch strategy {
 	case StrategyDirect:
 		// Mode B / Direct: Single programmer handles the task directly under governance & native tests
@@ -272,6 +314,8 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 			Inputs:    inputs,
 			Budget:    budget,
 			Strategy:  StrategyDirect,
+			Runtime:   runtime,
+			Model:     model,
 			CreatedAt: time.Now(),
 		}
 		if err := c.Store.Enqueue(req); err != nil {
@@ -288,6 +332,8 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 			Inputs:    inputs,
 			Budget:    Budget{Allocated: budget.Allocated * 0.7},
 			Strategy:  StrategyReviewed,
+			Runtime:   runtime,
+			Model:     model,
 			CreatedAt: time.Now(),
 		}
 		reviewerReq := ActivityRequest{
@@ -298,6 +344,8 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 			Budget:    Budget{Allocated: budget.Allocated * 0.3},
 			DependsOn: []string{taskID},
 			Strategy:  StrategyReviewed,
+			Runtime:   runtime,
+			Model:     model,
 			CreatedAt: time.Now(),
 		}
 		if c.Governor != nil {
@@ -322,6 +370,8 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 			Inputs:    inputs,
 			Budget:    budget,
 			Strategy:  StrategyTeam,
+			Runtime:   runtime,
+			Model:     model,
 			CreatedAt: time.Now(),
 		}
 		if err := c.Store.Enqueue(req); err != nil {
@@ -489,6 +539,8 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		MaxToolCalls:     effectiveLimits.MaxToolCalls,
 		MaxReadFileLines: effectiveLimits.MaxReadFileLines,
 		Limits:           &effectiveLimits,
+		Runtime:          req.Runtime,
+		Model:            req.Model,
 		OnRecordMetric: func(metric string, delta int) {
 			if metric == "structural_queries" {
 				structuralQueriesCount += delta
@@ -513,7 +565,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	}
 
 	// 5. Initialize or resume independent agent session
-	session, err := c.Provider.CreateSession(ctx, config)
+	session, err := c.resolveProviderLocked(req).CreateSession(ctx, config)
 	if err != nil {
 		_ = c.Store.Fail(req.ID, err)
 		return nil, fmt.Errorf("coordinator: failed to initialize session for %s: %w", ident.ID, err)
@@ -604,6 +656,9 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		ToolDuration:           toolDur,
 		PromptTokens:           usage.PromptTokens,
 		CompletionTokens:       usage.CompletionTokens,
+		ReasoningTokens:        usage.ReasoningTokens,
+		CachedTokens:           usage.CachedTokens,
+		ReportedCostUSD:        usage.ReportedCostUSD,
 		TotalTokens:            usage.TotalTokens,
 		PeakContextTokens:      usage.PeakContextTokens,
 		OverrunTokens:          usage.OverrunTokens,
@@ -753,6 +808,8 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			// Assign role-specific capability profile and structural artifact link
 			childProfile := c.Capabilities.ResolveProfile(prop.ProposedAgentID, "", prop.Objective, prop.RequestedProfile, c.Governor)
 			authReq.CapabilityProfile = &childProfile
+			authReq.Runtime = req.Runtime
+			authReq.Model = req.Model
 			if result.StructuralArtifactID != "" {
 				authReq.StructuralArtifactID = result.StructuralArtifactID
 			} else if c.lastStructuralArtifact != nil {

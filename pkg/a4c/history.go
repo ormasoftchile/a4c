@@ -119,6 +119,8 @@ func BuildTaskHistory(
 				metricsAgg.TotalTokens += metrics.TotalTokens
 				metricsAgg.ModelInvocations += metrics.ModelInvocations
 				metricsAgg.ToolCalls += metrics.ToolCalls
+				metricsAgg.StructuralQueriesCount += metrics.StructuralQueriesCount
+				metricsAgg.FileReadsCount += metrics.FileReadsCount
 			}
 		}
 
@@ -240,12 +242,18 @@ func (r *TaskHistoryReport) FormatHumanReadable() string {
 	sb.WriteString(fmt.Sprintf("Participating Agents: %s\n", strings.Join(r.ParticipatingAgents, ", ")))
 	sb.WriteString(fmt.Sprintf("Budget:              %.0f allocated (%.0f tokens consumed)\n", r.AllocatedBudget, r.ConsumedBudget))
 	if r.MetricsSummary != nil {
-		sb.WriteString(fmt.Sprintf("Execution Metrics:   Duration: %v (Model: %v) | Tokens: %d prompt, %d completion (%d total)\n",
+		extra := ""
+		if r.MetricsSummary.StructuralQueriesCount > 0 || r.MetricsSummary.FileReadsCount > 0 {
+			extra = fmt.Sprintf(" | Investigation: %d file reads, %d structural queries",
+				r.MetricsSummary.FileReadsCount, r.MetricsSummary.StructuralQueriesCount)
+		}
+		sb.WriteString(fmt.Sprintf("Execution Metrics:   Duration: %v (Model: %v) | Tokens: %d prompt, %d completion (%d total)%s\n",
 			r.MetricsSummary.WallClockDuration.Round(time.Millisecond),
 			r.MetricsSummary.ModelDuration.Round(time.Millisecond),
 			r.MetricsSummary.PromptTokens,
 			r.MetricsSummary.CompletionTokens,
 			r.MetricsSummary.TotalTokens,
+			extra,
 		))
 	}
 	sb.WriteString(fmt.Sprintf("Created At:          %s\n\n", r.CreatedAt.Format(time.RFC3339)))

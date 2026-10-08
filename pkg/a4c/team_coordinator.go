@@ -45,6 +45,7 @@ type TeamCoordinator struct {
 	lastEvidence  *ValidationEvidence
 	sessions      map[string]AgentSession
 	Handoff       *HandoffBuilder
+	Structural    StructuralProvider
 }
 
 func NewTeamCoordinator(
@@ -86,6 +87,13 @@ func (c *TeamCoordinator) SetWorktreeManager(mgr *WorktreeManager) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.WorktreeMgr = mgr
+}
+
+// SetStructuralProvider sets the optional code graph intelligence provider (CodeTopo).
+func (c *TeamCoordinator) SetStructuralProvider(p StructuralProvider) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Structural = p
 }
 
 func (c *TeamCoordinator) getRootTaskID(req *ActivityRequest) string {
@@ -244,6 +252,9 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 	activeWorkspace := c.resolveWorkspace(req)
 
+	var structuralQueriesCount int
+	var fileReadsCount int
+
 	config := AgentConfig{
 		AgentID:       ident.ID,
 		Charter:       ident.Charter,
@@ -251,6 +262,14 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		Budget:        req.Budget,
 		Governor:      c.Governor,
 		IntentJournal: c.Journal,
+		Structural:    c.Structural,
+		OnRecordMetric: func(metric string, delta int) {
+			if metric == "structural_queries" {
+				structuralQueriesCount += delta
+			} else if metric == "file_reads" {
+				fileReadsCount += delta
+			}
+		},
 		OnProposeActivity: func(prop ActivityProposal) {
 			proposedActivities = append(proposedActivities, prop)
 		},
@@ -312,12 +331,14 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	consumed := Budget{Consumed: float64(usage.TotalTokens)}
 
 	metrics := &ExecutionMetrics{
-		WallClockDuration: time.Since(startWall),
-		ModelDuration:     modelDuration,
-		PromptTokens:      usage.PromptTokens,
-		CompletionTokens:  usage.CompletionTokens,
-		TotalTokens:       usage.TotalTokens,
-		ModelInvocations:  1,
+		WallClockDuration:      time.Since(startWall),
+		ModelDuration:          modelDuration,
+		PromptTokens:           usage.PromptTokens,
+		CompletionTokens:       usage.CompletionTokens,
+		TotalTokens:            usage.TotalTokens,
+		ModelInvocations:       1,
+		StructuralQueriesCount: structuralQueriesCount,
+		FileReadsCount:         fileReadsCount,
 	}
 
 	// Parse fallback proposals from response text if tools were not invoked directly

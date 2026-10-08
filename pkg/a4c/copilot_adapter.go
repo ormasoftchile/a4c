@@ -2,6 +2,7 @@ package a4c
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,6 +44,18 @@ type RequestHumanDecisionParams struct {
 type ProposeMemoryParams struct {
 	Key     string `json:"key" jsonschema:"unique key for the convention or architectural constraint"`
 	Content string `json:"content" jsonschema:"the constraint or convention description"`
+}
+
+type StructuralSearchParams struct {
+	Query string `json:"query" jsonschema:"search pattern or symbol name to find in the code graph"`
+}
+
+type StructuralContextParams struct {
+	Name string `json:"name" jsonschema:"exact symbol name to inspect definition, signature, and context"`
+}
+
+type StructuralCallersParams struct {
+	NodeID int `json:"node_id" jsonschema:"node ID of the symbol to find callers and call sites for"`
 }
 
 type CopilotSessionAdapter struct {
@@ -226,6 +239,9 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 				return nil, fmt.Errorf("access denied: path outside workspace")
 			}
 			target := filepath.Join(config.WorkspaceDir, cleanPath)
+			if config.OnRecordMetric != nil {
+				config.OnRecordMetric("file_reads", 1)
+			}
 			data, err := os.ReadFile(target)
 			if err != nil {
 				return nil, err
@@ -346,6 +362,64 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		submitReviewTool,
 		requestHumanDecisionTool,
 		proposeMemoryTool,
+	}
+
+	if config.Structural != nil && config.Structural.Available() {
+		searchSymbolsTool := copilot.DefineTool("governed_structural_search_symbols", "Query code symbols matching search string via structural index",
+			func(params StructuralSearchParams, inv copilot.ToolInvocation) (any, error) {
+				if config.Governor != nil {
+					if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_search_symbols"); err != nil {
+						return nil, err
+					}
+				}
+				if config.OnRecordMetric != nil {
+					config.OnRecordMetric("structural_queries", 1)
+				}
+				packet, err := config.Structural.SearchSymbols(ctx, params.Query)
+				if err != nil {
+					return nil, err
+				}
+				data, _ := json.Marshal(packet)
+				return string(data), nil
+			})
+
+		contextForTool := copilot.DefineTool("governed_structural_context_for", "Get symbol definition, source snippet, container, and siblings via structural index",
+			func(params StructuralContextParams, inv copilot.ToolInvocation) (any, error) {
+				if config.Governor != nil {
+					if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_context_for"); err != nil {
+						return nil, err
+					}
+				}
+				if config.OnRecordMetric != nil {
+					config.OnRecordMetric("structural_queries", 1)
+				}
+				packet, err := config.Structural.GetContextFor(ctx, params.Name)
+				if err != nil {
+					return nil, err
+				}
+				data, _ := json.Marshal(packet)
+				return string(data), nil
+			})
+
+		callersTool := copilot.DefineTool("governed_structural_callers", "Get call sites and callers for a symbol node ID via structural index",
+			func(params StructuralCallersParams, inv copilot.ToolInvocation) (any, error) {
+				if config.Governor != nil {
+					if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_callers"); err != nil {
+						return nil, err
+					}
+				}
+				if config.OnRecordMetric != nil {
+					config.OnRecordMetric("structural_queries", 1)
+				}
+				packet, err := config.Structural.GetCallers(ctx, params.NodeID)
+				if err != nil {
+					return nil, err
+				}
+				data, _ := json.Marshal(packet)
+				return string(data), nil
+			})
+
+		tools = append(tools, searchSymbolsTool, contextForTool, callersTool)
 	}
 
 	// 2. Strict permission handler that fails closed

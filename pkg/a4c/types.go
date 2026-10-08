@@ -55,8 +55,10 @@ type ExecutionMetrics struct {
 	PromptTokens      int           `json:"prompt_tokens"`
 	CompletionTokens  int           `json:"completion_tokens"`
 	TotalTokens       int           `json:"total_tokens"`
-	ModelInvocations  int           `json:"model_invocations"`
-	ToolCalls         int           `json:"tool_calls"`
+	ModelInvocations       int           `json:"model_invocations"`
+	ToolCalls              int           `json:"tool_calls"`
+	StructuralQueriesCount int           `json:"structural_queries_count,omitempty"`
+	FileReadsCount         int           `json:"file_reads_count,omitempty"`
 }
 
 // ActivityFilter specifies criteria for querying historical or active activities.

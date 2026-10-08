@@ -36,6 +36,7 @@ Commands:
   task submit <obj> [budget] [--strategy s] Submit a task (strategy: direct|reviewed|team)
   task list [--status s] [--agent a]    Query activities matching filter criteria
   task history <task-id>                Display full audit history and DAG for a task
+  task inspect <task-id>                Inspect task agents, activity tree, profiles, tokens, evidence, context, decisions
   status                                Display active activities and evidence
   run [--real-copilot] [--steps N]      Run governed collaboration loop
   decisions list                        List questions awaiting human engineer guidance
@@ -191,7 +192,7 @@ func runTeam(args []string) {
 
 func runTask(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: a4c task <submit|list|history> [options]")
+		fmt.Println("Usage: a4c task <submit|list|history|inspect> [options]")
 		return
 	}
 
@@ -278,8 +279,27 @@ func runTask(args []string) {
 
 		fmt.Print(report.FormatHumanReadable())
 
+	case "inspect":
+		if len(args) < 2 {
+			fmt.Println("Usage: a4c task inspect <task-id>")
+			return
+		}
+		taskID := args[1]
+		journal, _ := a4c.NewDurableIntentJournal(journalDir)
+		memStore, _ := a4c.NewDurableMemoryStore(memDir)
+		wtMgr, _ := a4c.NewWorktreeManager(".", filepath.Join(dotDir, "worktrees"))
+		structStore, _ := a4c.NewDurableStructuralStore(filepath.Join(dotDir, "structural"))
+
+		report, err := a4c.BuildTaskHistory(taskID, store, journal, wtMgr, memStore)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error inspecting task: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Print(report.FormatInspect(structStore, "."))
+
 	default:
-		fmt.Printf("Unknown task command %q. Usage: a4c task <submit|list|history>\n", subCmd)
+		fmt.Printf("Unknown task command %q. Usage: a4c task <submit|list|history|inspect>\n", subCmd)
 	}
 }
 

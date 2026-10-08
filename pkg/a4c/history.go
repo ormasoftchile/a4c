@@ -2,6 +2,7 @@ package a4c
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -328,4 +329,170 @@ func (r *TaskHistoryReport) FormatHumanReadable() string {
 	sb.WriteString(fmt.Sprintf("%s\n", r.FinalOutcome))
 	sb.WriteString("================================================================================\n")
 	return sb.String()
+}
+
+// FormatInspect renders a compact inspection view of a task. structStore and workDir
+// are optional; they are used to resolve structural artifact freshness. The workspace
+// snapshot is computed at most once per call.
+func (r *TaskHistoryReport) FormatInspect(structStore *DurableStructuralStore, workDir string) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Task:       %s\n", r.TaskID))
+	sb.WriteString(fmt.Sprintf("Objective:  %s\n", r.OriginalObjective))
+	sb.WriteString(fmt.Sprintf("Status:     %s\n", strings.ToUpper(string(r.Status))))
+	if r.Strategy != "" {
+		sb.WriteString(fmt.Sprintf("Strategy:   %s\n", r.Strategy))
+	}
+	if r.Branch != "" {
+		sb.WriteString(fmt.Sprintf("Branch:     %s\n", r.Branch))
+	}
+	rootAgent := ""
+	for _, a := range r.Activities {
+		if a.ActivityID == r.TaskID {
+			rootAgent = a.AgentID
+		}
+	}
+	if rootAgent == "" {
+		rootAgent = "unassigned"
+	}
+	sb.WriteString(fmt.Sprintf("Assigned:   %s\n", rootAgent))
+	if len(r.ParticipatingAgents) > 0 {
+		agents := append([]string(nil), r.ParticipatingAgents...)
+		sort.Strings(agents)
+		sb.WriteString(fmt.Sprintf("Agents:     %s\n", strings.Join(agents, ", ")))
+	}
+	sb.WriteString(fmt.Sprintf("Tokens:     %.0f allocated, %.0f consumed\n", r.AllocatedBudget, r.ConsumedBudget))
+	if m := r.MetricsSummary; m != nil {
+		sb.WriteString(fmt.Sprintf("Durations:  wall-clock %v, model %v\n",
+			m.WallClockDuration.Round(time.Millisecond), m.ModelDuration.Round(time.Millisecond)))
+	} else {
+		sb.WriteString("Durations:  n/a\n")
+	}
+
+	var snap string
+	snapDone := false
+	currentSnapshot := func() string {
+		if !snapDone {
+			snapDone = true
+			if workDir != "" {
+				if s, err := NewWorkspaceSnapshotter().ComputeSnapshot(workDir); err == nil {
+					snap = s
+				}
+			}
+		}
+		return snap
+	}
+
+	byParent := make(map[string][]ActivityHistoryEntry)
+	known := make(map[string]bool)
+	for _, a := range r.Activities {
+		known[a.ActivityID] = true
+	}
+	var roots []ActivityHistoryEntry
+	for _, a := range r.Activities {
+		if a.ActivityID == r.TaskID || a.ParentID == "" || !known[a.ParentID] {
+			roots = append(roots, a)
+		} else {
+			byParent[a.ParentID] = append(byParent[a.ParentID], a)
+		}
+	}
+
+	sb.WriteString("\n--- Activity Tree ---\n")
+	visited := make(map[string]bool)
+	var render func(a ActivityHistoryEntry, depth int)
+	render = func(a ActivityHistoryEntry, depth int) {
+		if visited[a.ActivityID] {
+			return
+		}
+		visited[a.ActivityID] = true
+		indent := strings.Repeat("  ", depth)
+		sb.WriteString(fmt.Sprintf("%s- %s [%s] agent=%s\n", indent, a.ActivityID, a.Status, a.AgentID))
+		sb.WriteString(fmt.Sprintf("%s    Objective: %s\n", indent, a.Objective))
+		if len(a.DependsOn) > 0 {
+			sb.WriteString(fmt.Sprintf("%s    Depends on: %s\n", indent, strings.Join(a.DependsOn, ", ")))
+		}
+		if p := a.CapabilityProfile; p != nil {
+			name := p.Name
+			if name == "" {
+				name = p.ID
+			}
+			sb.WriteString(fmt.Sprintf("%s    Capability profile: %s\n", indent, name))
+			if p.Description != "" {
+				sb.WriteString(fmt.Sprintf("%s      Description: %s\n", indent, p.Description))
+			}
+			sb.WriteString(fmt.Sprintf("%s      Allowed tools: %s\n", indent, strings.Join(p.AllowedTools, ", ")))
+		}
+		sb.WriteString(fmt.Sprintf("%s    Tokens consumed: %.0f\n", indent, a.BudgetUsed))
+		if m := a.Metrics; m != nil {
+			sb.WriteString(fmt.Sprintf("%s    Wall-clock: %v, model: %v\n", indent,
+				m.WallClockDuration.Round(time.Millisecond), m.ModelDuration.Round(time.Millisecond)))
+		}
+		if len(a.EvidenceIDs) > 0 {
+			sb.WriteString(fmt.Sprintf("%s    Validation evidence: %s\n", indent, strings.Join(a.EvidenceIDs, ", ")))
+		}
+		if a.StructuralArtifactID != "" {
+			sb.WriteString(fmt.Sprintf("%s    Structural context: %s (%s)\n", indent, a.StructuralArtifactID,
+				structuralFreshness(structStore, a.StructuralArtifactID, currentSnapshot)))
+		}
+		if a.Error != "" {
+			sb.WriteString(fmt.Sprintf("%s    Error: %s\n", indent, a.Error))
+		}
+		for _, c := range byParent[a.ActivityID] {
+			render(c, depth+1)
+		}
+	}
+	for _, a := range roots {
+		render(a, 0)
+	}
+
+	if len(r.ReviewDecisions) > 0 {
+		sb.WriteString("\n--- Review Decisions ---\n")
+		for _, rev := range r.ReviewDecisions {
+			status := "APPROVED"
+			if !rev.Approved {
+				status = "REJECTED"
+			}
+			sb.WriteString(fmt.Sprintf("- %s on %s: %s\n", rev.ReviewerID, rev.ActivityID, status))
+			if rev.Comments != "" {
+				sb.WriteString(fmt.Sprintf("  Comments: %s\n", rev.Comments))
+			}
+		}
+	}
+
+	sb.WriteString("\n--- Human Decisions ---\n")
+	if len(r.HumanInterventions) == 0 {
+		sb.WriteString("None\n")
+	}
+	for _, d := range r.HumanInterventions {
+		sb.WriteString(fmt.Sprintf("- %s [%s] proposed by %s: %s\n", d.DecisionID, d.Status, d.ProposedBy, d.Question))
+		if d.Resolution != "" {
+			sb.WriteString(fmt.Sprintf("  Resolution: %s\n", d.Resolution))
+		}
+	}
+	return sb.String()
+}
+
+// structuralFreshness resolves CURRENT/STALE/UNKNOWN for an artifact. It compares the
+// artifact's indexed snapshot with the current workspace snapshot when available and
+// otherwise falls back to the recorded freshness.
+func structuralFreshness(store *DurableStructuralStore, id string, currentSnapshot func() string) IndexFreshness {
+	if store == nil {
+		return FreshnessUnknown
+	}
+	art, err := store.Get(id)
+	if err != nil || art == nil {
+		return FreshnessUnknown
+	}
+	if art.IndexedSnapshot != "" {
+		if cur := currentSnapshot(); cur != "" {
+			if cur == art.IndexedSnapshot {
+				return FreshnessCurrent
+			}
+			return FreshnessStale
+		}
+	}
+	switch art.Freshness {
+	case FreshnessCurrent, FreshnessStale:
+		return art.Freshness
+	}
+	return FreshnessUnknown
 }

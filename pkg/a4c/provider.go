@@ -15,10 +15,11 @@ type AgentMessage struct {
 
 // UsageInfo reports token and cost metrics for a session or invocation.
 type UsageInfo struct {
-	PromptTokens     int     `json:"prompt_tokens"`
-	CompletionTokens int     `json:"completion_tokens"`
-	TotalTokens      int     `json:"total_tokens"`
-	EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+	PromptTokens      int     `json:"prompt_tokens"`
+	CompletionTokens  int     `json:"completion_tokens"`
+	TotalTokens       int     `json:"total_tokens"`
+	PeakContextTokens int     `json:"peak_context_tokens,omitempty"`
+	EstimatedCostUSD  float64 `json:"estimated_cost_usd"`
 }
 
 // AgentConfig configures a governed session for an agent.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -239,6 +240,23 @@ func (s *DurableActivityStore) Fail(id string, failureErr error) error {
 	return s.persist(rec)
 }
 
+func (s *DurableActivityStore) FailWithResult(id string, result ActivityResult, failureErr error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, exists := s.records[id]
+	if !exists {
+		return ErrActivityNotFound
+	}
+
+	rec.Status = StatusFailed
+	rec.Result = &result
+	if failureErr != nil {
+		rec.Error = failureErr.Error()
+	}
+	return s.persist(rec)
+}
+
 // MarkAwaitingHuman pauses an activity pending a decision from the human engineer.
 func (s *DurableActivityStore) MarkAwaitingHuman(activityID string, dec HumanDecisionRequest) error {
 	s.mu.Lock()
@@ -403,21 +421,49 @@ func (s *DurableActivityStore) CompletedCount() int {
 	return count
 }
 
+func (s *DurableActivityStore) getDescendantIDsLocked(rootID string) map[string]bool {
+	descendants := map[string]bool{rootID: true}
+	for {
+		added := false
+		for _, rec := range s.records {
+			if !descendants[rec.Request.ID] && descendants[rec.Request.ParentID] {
+				descendants[rec.Request.ID] = true
+				added = true
+			}
+		}
+		if !added {
+			break
+		}
+	}
+	return descendants
+}
+
 // GetTaskTree returns the root activity and all descendant subtasks in DAG order.
 func (s *DurableActivityStore) GetTaskTree(rootID string) []*ActivityRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	descendants := s.getDescendantIDsLocked(rootID)
 	var list []*ActivityRecord
-	taskIDs := map[string]bool{rootID: true}
-
-	for _, id := range s.order {
-		rec := s.records[id]
-		if rec.Request.ID == rootID || taskIDs[rec.Request.ParentID] {
-			taskIDs[rec.Request.ID] = true
+	for _, rec := range s.records {
+		if descendants[rec.Request.ID] {
 			list = append(list, rec)
 		}
 	}
+
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].Request.ID == rootID {
+			return true
+		}
+		if list[j].Request.ID == rootID {
+			return false
+		}
+		if list[i].Request.CreatedAt.Equal(list[j].Request.CreatedAt) {
+			return list[i].Request.ID < list[j].Request.ID
+		}
+		return list[i].Request.CreatedAt.Before(list[j].Request.CreatedAt)
+	})
+
 	return list
 }
 
@@ -442,14 +488,7 @@ func (s *DurableActivityStore) QueryActivities(filter ActivityFilter) []*Activit
 	var list []*ActivityRecord
 	var rootSubtasks map[string]bool
 	if filter.RootID != "" {
-		rootSubtasks = make(map[string]bool)
-		rootSubtasks[filter.RootID] = true
-		for _, id := range s.order {
-			rec := s.records[id]
-			if rootSubtasks[rec.Request.ParentID] {
-				rootSubtasks[rec.Request.ID] = true
-			}
-		}
+		rootSubtasks = s.getDescendantIDsLocked(filter.RootID)
 	}
 
 	for _, id := range s.order {

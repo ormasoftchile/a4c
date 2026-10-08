@@ -181,6 +181,10 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 
 	taskID := fmt.Sprintf("task-%d", time.Now().UnixNano())
 
+	if c.Governor != nil {
+		c.Governor.SetBudget(taskID, budget)
+	}
+
 	if c.WorktreeMgr != nil {
 		_, _ = c.WorktreeMgr.AcquireWorktree(context.Background(), taskID, "team")
 	}
@@ -222,6 +226,9 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 			DependsOn: []string{taskID},
 			Strategy:  StrategyReviewed,
 			CreatedAt: time.Now(),
+		}
+		if c.Governor != nil {
+			c.Governor.SetBudget(reviewerReq.ID, reviewerReq.Budget)
 		}
 		if err := c.Store.Enqueue(coderReq); err != nil {
 			return nil, err
@@ -271,6 +278,59 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	}
 	if req == nil {
 		return nil, nil // No ready pending work
+	}
+
+	// Pre-flight hierarchical budget verification across task tree
+	rootID := c.getRootTaskID(req)
+	tree := c.Store.GetTaskTree(rootID)
+	var rootTotalConsumed float64
+	for _, r := range tree {
+		if r.Result != nil {
+			rootTotalConsumed += r.Result.Consumed.Consumed
+		}
+	}
+
+	rootRec, _ := c.Store.Get(rootID)
+	if rootRec != nil && rootRec.Request.Budget.Allocated > 0 {
+		rootAlloc := rootRec.Request.Budget.Allocated
+		if rootTotalConsumed >= rootAlloc {
+			// Root budget exhausted! Escalate to human engineer.
+			decReq := HumanDecisionRequest{
+				DecisionID: fmt.Sprintf("dec-budget-%d", time.Now().UnixNano()),
+				ActivityID: req.ID,
+				ProposedBy: "coordinator",
+				Question:   fmt.Sprintf("Task tree %s budget exhausted (consumed %.0f >= allocated %.0f). Human authorization required.", rootID, rootTotalConsumed, rootAlloc),
+				Context: map[string]any{
+					"root_id":          rootID,
+					"total_consumed":   rootTotalConsumed,
+					"allocated_budget": rootAlloc,
+					"activity_id":      req.ID,
+				},
+				Status:    HumanDecisionPending,
+				CreatedAt: time.Now(),
+			}
+			if err := c.Store.MarkAwaitingHuman(req.ID, decReq); err != nil {
+				return nil, err
+			}
+			return &ActivityResult{
+				ID:       req.ID,
+				Status:   StatusAwaitingHuman,
+				Consumed: Budget{Consumed: 0},
+				Outputs: map[string]any{
+					"decision_id": decReq.DecisionID,
+					"question":    decReq.Question,
+					"reason":      "root_budget_exhausted",
+				},
+			}, nil
+		}
+	}
+
+	// Activity pre-flight check
+	if req.Budget.Allocated > 0 && req.Budget.Consumed >= req.Budget.Allocated {
+		failErr := fmt.Errorf("%w: activity %s budget already exhausted (consumed %.0f >= allocated %.0f)",
+			ErrBudgetExceeded, req.ID, req.Budget.Consumed, req.Budget.Allocated)
+		_ = c.Store.Fail(req.ID, failErr)
+		return nil, failErr
 	}
 
 	// 3. Resolve agent identity
@@ -407,10 +467,6 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	startModel := time.Now()
 	resp, err := session.Send(ctx, prompt)
 	modelDuration := time.Since(startModel)
-	if err != nil {
-		_ = c.Store.Fail(req.ID, err)
-		return nil, err
-	}
 
 	usage := session.Usage()
 	consumed := Budget{Consumed: float64(usage.TotalTokens)}
@@ -421,9 +477,45 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		PromptTokens:           usage.PromptTokens,
 		CompletionTokens:       usage.CompletionTokens,
 		TotalTokens:            usage.TotalTokens,
+		PeakContextTokens:      usage.PeakContextTokens,
 		ModelInvocations:       1,
 		StructuralQueriesCount: structuralQueriesCount,
 		FileReadsCount:         fileReadsCount,
+	}
+
+	if c.Governor != nil {
+		c.Governor.RecordConsumption(req.ID, rootID, consumed.Consumed)
+	}
+
+	if err != nil {
+		failResult := ActivityResult{
+			ID:       req.ID,
+			Status:   StatusFailed,
+			Consumed: consumed,
+			Metrics:  metrics,
+			Outputs: map[string]any{
+				"error": err.Error(),
+			},
+		}
+		_ = c.Store.FailWithResult(req.ID, failResult, err)
+		return nil, err
+	}
+
+	// Post-flight budget check: verify activity didn't exceed allocated budget
+	if req.Budget.Allocated > 0 && consumed.Consumed > req.Budget.Allocated {
+		overrunErr := fmt.Errorf("%w: activity %s consumed %.0f tokens exceeds allocated %.0f",
+			ErrBudgetExceeded, req.ID, consumed.Consumed, req.Budget.Allocated)
+		failResult := ActivityResult{
+			ID:       req.ID,
+			Status:   StatusFailed,
+			Consumed: consumed,
+			Metrics:  metrics,
+			Outputs: map[string]any{
+				"error": overrunErr.Error(),
+			},
+		}
+		_ = c.Store.FailWithResult(req.ID, failResult, overrunErr)
+		return nil, overrunErr
 	}
 
 	// Parse fallback proposals from response text if tools were not invoked directly
@@ -679,37 +771,114 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			// Invalidate existing evidence to force coder to re-run native tests
 			c.lastEvidence = nil
 
+			// Check remaining root budget before authorizing revisions
+			tree := c.Store.GetTaskTree(rootID)
+			var currentTotalConsumed float64
+			for _, r := range tree {
+				if r.Result != nil {
+					currentTotalConsumed += r.Result.Consumed.Consumed
+				}
+			}
+
+			rootRec, _ := c.Store.Get(rootID)
+			rootAlloc := float64(0)
+			if rootRec != nil {
+				rootAlloc = rootRec.Request.Budget.Allocated
+			}
+			remainingRootBudget := float64(0)
+			if rootAlloc > 0 {
+				remainingRootBudget = rootAlloc - currentTotalConsumed
+			}
+
+			if rootAlloc > 0 && remainingRootBudget <= 0 {
+				decReq := HumanDecisionRequest{
+					DecisionID: fmt.Sprintf("dec-revision-budget-%d", time.Now().UnixNano()),
+					ActivityID: req.ID,
+					ProposedBy: "reviewer",
+					Question:   fmt.Sprintf("Code rejected by reviewer (%s), but root task budget is exhausted (consumed %.0f >= allocated %.0f). Human authorization required to extend budget.", comments, currentTotalConsumed, rootAlloc),
+					Context: map[string]any{
+						"root_id":          rootID,
+						"total_consumed":   currentTotalConsumed,
+						"allocated_budget": rootAlloc,
+						"review_comments":  comments,
+					},
+					Status:    HumanDecisionPending,
+					CreatedAt: time.Now(),
+				}
+				_ = c.Store.MarkAwaitingHuman(req.ID, decReq)
+				result.Status = StatusAwaitingHuman
+				result.Outputs["decision_id"] = decReq.DecisionID
+				result.Outputs["question"] = decReq.Question
+				return result, nil
+			}
+
 			revisionID := fmt.Sprintf("%s-revision-%d", req.ID, c.revisionCount)
 			reReviewID := fmt.Sprintf("%s-rereview-%d", req.ID, c.revisionCount)
 
-			// Dispatch revision subtask back to coder
-			repairProfile := c.Capabilities.ResolveProfile("coder", "Senior Software Engineer", fmt.Sprintf("Address review rejection: %s", comments), nil, c.Governor)
-			repairReq := ActivityRequest{
-				ID:                   revisionID,
-				ParentID:             req.ID,
-				AgentID:              "coder",
-				Objective:            fmt.Sprintf("Address review rejection: %s", comments),
-				Budget:               Budget{Allocated: req.Budget.Available() / 2},
-				CapabilityProfile:    &repairProfile,
-				StructuralArtifactID: req.StructuralArtifactID,
-				CreatedAt:            time.Now(),
+			revisionPool := remainingRootBudget * 0.5
+			if rootAlloc == 0 {
+				revisionPool = 20000
 			}
-			_ = c.Store.Enqueue(repairReq)
+			coderRevisionBudget := revisionPool * 0.7
+			reviewerRevisionBudget := revisionPool * 0.3
 
-			// Re-enqueue reviewer with explicit DAG dependency on the revision subtask
-			reReviewProfile := c.Capabilities.ResolveProfile("reviewer", "Code Reviewer & Quality Engineer", fmt.Sprintf("Re-review revision for: %s", req.Objective), nil, c.Governor)
-			reReviewReq := ActivityRequest{
-				ID:                   reReviewID,
-				ParentID:             req.ID,
-				AgentID:              "reviewer",
-				Objective:            fmt.Sprintf("Re-review revision for: %s", req.Objective),
-				Budget:               Budget{Allocated: req.Budget.Available() / 2},
-				DependsOn:            []string{revisionID},
-				CapabilityProfile:    &reReviewProfile,
-				StructuralArtifactID: req.StructuralArtifactID,
-				CreatedAt:            time.Now(),
+			parentReq := *req
+			if rootRec != nil {
+				parentReq = rootRec.Request
 			}
-			_ = c.Store.Enqueue(reReviewReq)
+
+			// Authorize revision subtask via Governor
+			coderProposal := ActivityProposal{
+				ProposalID:      revisionID,
+				ProposedAgentID: "coder",
+				Objective:       fmt.Sprintf("Address review rejection: %s", comments),
+				RequestedBudget: Budget{Allocated: coderRevisionBudget},
+			}
+			authCoderReq, authCoderErr := c.Governor.AuthorizeProposal(parentReq, coderProposal, revisionID)
+			if authCoderErr != nil {
+				decReq := HumanDecisionRequest{
+					DecisionID: fmt.Sprintf("dec-auth-rejected-%d", time.Now().UnixNano()),
+					ActivityID: req.ID,
+					ProposedBy: "governor",
+					Question:   fmt.Sprintf("Governor rejected revision proposal: %v. Human decision required.", authCoderErr),
+					Context: map[string]any{
+						"reason": authCoderErr.Error(),
+					},
+					Status:    HumanDecisionPending,
+					CreatedAt: time.Now(),
+				}
+				_ = c.Store.MarkAwaitingHuman(req.ID, decReq)
+				result.Status = StatusAwaitingHuman
+				result.Outputs["decision_id"] = decReq.DecisionID
+				result.Outputs["question"] = decReq.Question
+				return result, nil
+			}
+
+			authCoderReq.ParentID = req.ID
+			repairProfile := c.Capabilities.ResolveProfile("coder", "Senior Software Engineer", authCoderReq.Objective, nil, c.Governor)
+			authCoderReq.CapabilityProfile = &repairProfile
+			authCoderReq.StructuralArtifactID = req.StructuralArtifactID
+			if err := c.Store.Enqueue(*authCoderReq); err != nil {
+				return nil, err
+			}
+
+			// Authorize re-review subtask via Governor
+			reReviewProposal := ActivityProposal{
+				ProposalID:      reReviewID,
+				ProposedAgentID: "reviewer",
+				Objective:       fmt.Sprintf("Re-review revision for: %s", req.Objective),
+				RequestedBudget: Budget{Allocated: reviewerRevisionBudget},
+				DependsOn:       []string{revisionID},
+			}
+			authReviewReq, authReviewErr := c.Governor.AuthorizeProposal(parentReq, reReviewProposal, reReviewID)
+			if authReviewErr == nil {
+				authReviewReq.ParentID = req.ID
+				reReviewProfile := c.Capabilities.ResolveProfile("reviewer", "Code Reviewer & Quality Engineer", authReviewReq.Objective, nil, c.Governor)
+				authReviewReq.CapabilityProfile = &reReviewProfile
+				authReviewReq.StructuralArtifactID = req.StructuralArtifactID
+				authReviewReq.DependsOn = []string{revisionID}
+				_ = c.Store.Enqueue(*authReviewReq)
+			}
 		} else if approved {
 			// Promote memories reviewed by quality reviewer
 			for _, m := range proposedMemories {

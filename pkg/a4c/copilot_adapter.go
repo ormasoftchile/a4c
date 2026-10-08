@@ -59,19 +59,35 @@ type StructuralCallersParams struct {
 }
 
 type CopilotSessionAdapter struct {
-	mu        sync.Mutex
-	session   *copilot.Session
-	sessionID string
-	config    AgentConfig
-	usage     UsageInfo
+	mu             sync.Mutex
+	session        *copilot.Session
+	sessionID      string
+	config         AgentConfig
+	usage          UsageInfo
+	budgetExceeded bool
 }
 
 func (s *CopilotSessionAdapter) SessionID() string {
 	return s.sessionID
 }
 
+func (s *CopilotSessionAdapter) CheckBudget() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.config.Budget.Allocated > 0 && float64(s.usage.TotalTokens) >= s.config.Budget.Allocated {
+		return fmt.Errorf("%w: session consumed %d tokens exceeds allocated %.0f",
+			ErrBudgetExceeded, s.usage.TotalTokens, s.config.Budget.Allocated)
+	}
+	return nil
+}
+
 func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*AgentMessage, error) {
 	s.mu.Lock()
+	if s.config.Budget.Allocated > 0 && float64(s.usage.TotalTokens) >= s.config.Budget.Allocated {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: session budget exhausted before send", ErrBudgetExceeded)
+	}
 	session := s.session
 	s.mu.Unlock()
 
@@ -91,12 +107,19 @@ func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*Agent
 		case *copilot.AssistantUsageData:
 			s.mu.Lock()
 			if data.InputTokens != nil {
-				s.usage.PromptTokens += int(*data.InputTokens)
+				inTok := int(*data.InputTokens)
+				s.usage.PromptTokens += inTok
+				if inTok > s.usage.PeakContextTokens {
+					s.usage.PeakContextTokens = inTok
+				}
 			}
 			if data.OutputTokens != nil {
 				s.usage.CompletionTokens += int(*data.OutputTokens)
 			}
 			s.usage.TotalTokens = s.usage.PromptTokens + s.usage.CompletionTokens
+			if s.config.Budget.Allocated > 0 && float64(s.usage.TotalTokens) > s.config.Budget.Allocated {
+				s.budgetExceeded = true
+			}
 			s.mu.Unlock()
 		case *copilot.SessionIdleData:
 			select {
@@ -132,11 +155,23 @@ func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*Agent
 		return nil, ErrMalformedOutput
 	}
 
-	return &AgentMessage{
+	s.mu.Lock()
+	exceeded := s.budgetExceeded
+	total := s.usage.TotalTokens
+	alloc := s.config.Budget.Allocated
+	s.mu.Unlock()
+
+	msg := &AgentMessage{
 		Role:      "assistant",
 		Content:   content,
 		Timestamp: time.Now(),
-	}, nil
+	}
+
+	if alloc > 0 && (exceeded || float64(total) > alloc) {
+		return msg, fmt.Errorf("%w: session consumed %d tokens exceeds allocated %.0f", ErrBudgetExceeded, total, alloc)
+	}
+
+	return msg, nil
 }
 
 func (s *CopilotSessionAdapter) Cancel() error {
@@ -255,9 +290,20 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		}
 	}
 
-	// 1. Build Governed Custom Tools
+	// 1. Build Governed Custom Tools with in-flight budget enforcement
+	adapter := &CopilotSessionAdapter{
+		sessionID: sessionID,
+		config:    config,
+	}
+	checkBudget := func() error {
+		return adapter.CheckBudget()
+	}
+
 	readFileTool := copilot.DefineTool("governed_read_file", "Read file content from workspace",
 		func(params ReadFileParams, inv copilot.ToolInvocation) (any, error) {
+			if err := checkBudget(); err != nil {
+				return nil, err
+			}
 			if config.Governor != nil {
 				if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_read_file"); err != nil {
 					return nil, err
@@ -280,6 +326,9 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 
 	applyPatchTool := copilot.DefineTool("governed_apply_patch", "Write or modify file in workspace",
 		func(params ApplyPatchParams, inv copilot.ToolInvocation) (any, error) {
+			if err := checkBudget(); err != nil {
+				return nil, err
+			}
 			if config.Governor != nil {
 				if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_apply_patch"); err != nil {
 					return nil, err
@@ -312,6 +361,9 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 
 	proposeActivityTool := copilot.DefineTool("governed_propose_activity", "Propose a delegated subtask to another team member",
 		func(params ProposeActivityParams, inv copilot.ToolInvocation) (any, error) {
+			if err := checkBudget(); err != nil {
+				return nil, err
+			}
 			if config.Governor != nil {
 				if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_propose_activity"); err != nil {
 					return nil, err
@@ -331,6 +383,9 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 
 	submitReviewTool := copilot.DefineTool("governed_submit_review", "Submit peer review evaluation on code changes",
 		func(params SubmitReviewParams, inv copilot.ToolInvocation) (any, error) {
+			if err := checkBudget(); err != nil {
+				return nil, err
+			}
 			if config.Governor != nil {
 				if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_submit_review"); err != nil {
 					return nil, err
@@ -350,6 +405,9 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 
 	requestHumanDecisionTool := copilot.DefineTool("governed_request_human_decision", "Escalate a decision to the human engineer",
 		func(params RequestHumanDecisionParams, inv copilot.ToolInvocation) (any, error) {
+			if err := checkBudget(); err != nil {
+				return nil, err
+			}
 			if config.Governor != nil {
 				if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_request_human_decision"); err != nil {
 					return nil, err
@@ -373,6 +431,9 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 
 	proposeMemoryTool := copilot.DefineTool("governed_propose_memory", "Propose an architectural constraint or team convention",
 		func(params ProposeMemoryParams, inv copilot.ToolInvocation) (any, error) {
+			if err := checkBudget(); err != nil {
+				return nil, err
+			}
 			if config.Governor != nil {
 				if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_propose_memory"); err != nil {
 					return nil, err
@@ -386,6 +447,10 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 
 	// 2. Strict permission handler that fails closed
 	permHandler := func(request copilot.PermissionRequest, invocation copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
+		if err := checkBudget(); err != nil {
+			feedback := fmt.Sprintf("Budget exceeded: %v", err)
+			return &rpc.PermissionDecisionReject{Feedback: &feedback}, nil
+		}
 		toolName := string(request.Kind())
 		switch req := request.(type) {
 		case *rpc.PermissionRequestCustomTool:
@@ -439,6 +504,9 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		if allowedSet["governed_structural_search_symbols"] {
 			searchSymbolsTool := copilot.DefineTool("governed_structural_search_symbols", "Query code symbols matching search string via structural index",
 				func(params StructuralSearchParams, inv copilot.ToolInvocation) (any, error) {
+					if err := checkBudget(); err != nil {
+						return nil, err
+					}
 					if config.Governor != nil {
 						if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_search_symbols"); err != nil {
 							return nil, err
@@ -461,6 +529,9 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		if allowedSet["governed_structural_context_for"] {
 			contextForTool := copilot.DefineTool("governed_structural_context_for", "Get symbol definition, source snippet, container, and siblings via structural index",
 				func(params StructuralContextParams, inv copilot.ToolInvocation) (any, error) {
+					if err := checkBudget(); err != nil {
+						return nil, err
+					}
 					if config.Governor != nil {
 						if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_context_for"); err != nil {
 							return nil, err
@@ -483,6 +554,9 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		if allowedSet["governed_structural_callers"] {
 			callersTool := copilot.DefineTool("governed_structural_callers", "Get call sites and callers for a symbol node ID via structural index",
 				func(params StructuralCallersParams, inv copilot.ToolInvocation) (any, error) {
+					if err := checkBudget(); err != nil {
+						return nil, err
+					}
 					if config.Governor != nil {
 						if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_callers"); err != nil {
 							return nil, err
@@ -526,9 +600,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		actualID = copilotSession.SessionID
 	}
 
-	return &CopilotSessionAdapter{
-		session:   copilotSession,
-		sessionID: actualID,
-		config:    config,
-	}, nil
+	adapter.session = copilotSession
+	adapter.sessionID = actualID
+	return adapter, nil
 }

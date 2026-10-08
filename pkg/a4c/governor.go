@@ -69,13 +69,19 @@ func (g *PolicyGovernor) AuthorizeProposal(parent ActivityRequest, proposal Acti
 	}
 
 	requested := proposal.RequestedBudget.Allocated
-	if requested > budget.Available() {
+	if budget.Allocated > 0 && requested > budget.Available() {
 		return nil, fmt.Errorf("%w: requested %.2f exceeds parent available %.2f",
 			ErrBudgetExceeded, requested, budget.Available())
 	}
 
 	// Deduct requested from parent reservation
 	budget.Reserved += requested
+
+	childBudget := Budget{
+		Allocated: requested,
+		Reserved:  0,
+		Consumed:  0,
+	}
 
 	childReq := &ActivityRequest{
 		ID:        newID,
@@ -84,16 +90,71 @@ func (g *PolicyGovernor) AuthorizeProposal(parent ActivityRequest, proposal Acti
 		Objective: proposal.Objective,
 		Inputs:    proposal.Inputs,
 		DependsOn: proposal.DependsOn,
-		Budget: Budget{
-			Allocated: requested,
-			Reserved:  0,
-			Consumed:  0,
-		},
+		Budget:    childBudget,
 		CreatedAt: time.Now(),
 	}
 
+	childBudgetCopy := childBudget
+	g.activeBudgets[newID] = &childBudgetCopy
 	g.authorizedProposals[dedupKey] = childReq
 	return childReq, nil
+}
+
+// SetBudget sets or updates the budget record for an activity or root task.
+func (g *PolicyGovernor) SetBudget(activityID string, b Budget) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	bCopy := b
+	g.activeBudgets[activityID] = &bCopy
+}
+
+// RecordConsumption updates the consumed tokens for an activity and settles reservations on parent.
+func (g *PolicyGovernor) RecordConsumption(activityID, parentID string, tokens float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	var allocated float64
+	if b, ok := g.activeBudgets[activityID]; ok {
+		b.Consumed += tokens
+		allocated = b.Allocated
+		b.Reserved = 0
+	} else {
+		g.activeBudgets[activityID] = &Budget{Consumed: tokens}
+	}
+
+	if parentID != "" && parentID != activityID {
+		if p, ok := g.activeBudgets[parentID]; ok {
+			p.Consumed += tokens
+			if allocated > 0 {
+				if p.Reserved >= allocated {
+					p.Reserved -= allocated
+				} else {
+					p.Reserved = 0
+				}
+			} else if p.Reserved >= tokens {
+				p.Reserved -= tokens
+			} else {
+				p.Reserved = 0
+			}
+		}
+	}
+}
+
+// CheckBudget verifies whether an activity has sufficient budget to proceed.
+func (g *PolicyGovernor) CheckBudget(activityID string, additionalTokens float64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	b, ok := g.activeBudgets[activityID]
+	if !ok || b.Allocated <= 0 {
+		return nil // Unconstrained or unrecorded
+	}
+	if b.Consumed+additionalTokens > b.Allocated {
+		return fmt.Errorf("%w: consumption %.0f exceeds allocation %.0f for activity %s",
+			ErrBudgetExceeded, b.Consumed+additionalTokens, b.Allocated, activityID)
+	}
+	return nil
 }
 
 // AuthorizeToolInvocation gates direct tool calls from agent sessions, rejecting ambient unmediated bypasses.

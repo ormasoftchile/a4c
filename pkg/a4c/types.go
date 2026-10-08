@@ -52,9 +52,10 @@ type ExecutionMetrics struct {
 	WallClockDuration time.Duration `json:"wall_clock_duration"`
 	ModelDuration     time.Duration `json:"model_duration"`
 	ToolDuration      time.Duration `json:"tool_duration"`
-	PromptTokens      int           `json:"prompt_tokens"`
-	CompletionTokens  int           `json:"completion_tokens"`
-	TotalTokens       int           `json:"total_tokens"`
+	PromptTokens           int           `json:"prompt_tokens"`
+	CompletionTokens       int           `json:"completion_tokens"`
+	TotalTokens            int           `json:"total_tokens"`
+	PeakContextTokens      int           `json:"peak_context_tokens,omitempty"`
 	ModelInvocations       int           `json:"model_invocations"`
 	ToolCalls              int           `json:"tool_calls"`
 	StructuralQueriesCount int           `json:"structural_queries_count,omitempty"`

@@ -42,6 +42,10 @@ func (s *FakeSession) Send(ctx context.Context, prompt string) (*AgentMessage, e
 		s.mu.Unlock()
 		return nil, ErrSessionCanceled
 	}
+	if s.config.Budget.Allocated > 0 && float64(s.usage.TotalTokens) >= s.config.Budget.Allocated {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: fake session budget exhausted before send", ErrBudgetExceeded)
+	}
 	s.mu.Unlock()
 
 	select {
@@ -50,26 +54,39 @@ func (s *FakeSession) Send(ctx context.Context, prompt string) (*AgentMessage, e
 	default:
 	}
 
+	var msg *AgentMessage
+	var err error
 	if s.sessionResponseFunc != nil {
-		return s.sessionResponseFunc(ctx, s, prompt)
+		msg, err = s.sessionResponseFunc(ctx, s, prompt)
+	} else if s.responseFunc != nil {
+		msg, err = s.responseFunc(ctx, prompt)
+	} else {
+		s.mu.Lock()
+		s.usage.PromptTokens += 50
+		s.usage.CompletionTokens += 100
+		s.usage.TotalTokens += 150
+		s.mu.Unlock()
+		msg = &AgentMessage{
+			Role:      "assistant",
+			Content:   "Default simulated response",
+			Timestamp: time.Now(),
+		}
 	}
 
-	if s.responseFunc != nil {
-		return s.responseFunc(ctx, prompt)
+	if err != nil {
+		return msg, err
 	}
 
-	// Default response
 	s.mu.Lock()
-	s.usage.PromptTokens += 50
-	s.usage.CompletionTokens += 100
-	s.usage.TotalTokens += 150
+	total := s.usage.TotalTokens
+	alloc := s.config.Budget.Allocated
 	s.mu.Unlock()
 
-	return &AgentMessage{
-		Role:      "assistant",
-		Content:   "Default simulated response",
-		Timestamp: time.Now(),
-	}, nil
+	if alloc > 0 && float64(total) > alloc {
+		return msg, fmt.Errorf("%w: fake session consumed %d tokens exceeds allocated %.0f", ErrBudgetExceeded, total, alloc)
+	}
+
+	return msg, nil
 }
 
 func (s *FakeSession) Cancel() error {

@@ -154,6 +154,16 @@ func (s *DurableActivityStore) dependenciesSatisfied(req ActivityRequest) bool {
 	return true
 }
 
+func (s *DurableActivityStore) dependenciesBlocked(req ActivityRequest) (bool, string) {
+	for _, depID := range req.DependsOn {
+		depRec, ok := s.records[depID]
+		if ok && depRec.Status == StatusFailed {
+			return true, fmt.Sprintf("dependency %q failed: %s", depID, depRec.Error)
+		}
+	}
+	return false, ""
+}
+
 // ClaimNext claims the next available activity whose dependencies have completed.
 func (s *DurableActivityStore) ClaimNext() (*ActivityRequest, error) {
 	return s.ClaimNextForAgent("")
@@ -170,10 +180,19 @@ func (s *DurableActivityStore) ClaimNextForAgent(agentID string) (*ActivityReque
 			continue
 		}
 
+		// Cascade failure if any dependency failed
+		if blocked, reason := s.dependenciesBlocked(rec.Request); blocked {
+			rec.Status = StatusFailed
+			rec.Error = reason
+			_ = s.persist(rec)
+			continue
+		}
+
 		// Check if dependencies are satisfied
 		if !s.dependenciesSatisfied(rec.Request) {
 			continue
 		}
+
 
 		// Check agent assignment filter if specified
 		if agentID != "" && rec.Request.AgentID != "" && rec.Request.AgentID != "team" && rec.Request.AgentID != agentID {
@@ -356,8 +375,16 @@ func (s *DurableActivityStore) HasClaimable() bool {
 
 	for _, id := range s.order {
 		rec := s.records[id]
-		if rec.Status == StatusPending && s.dependenciesSatisfied(rec.Request) {
-			return true
+		if rec.Status == StatusPending {
+			if blocked, reason := s.dependenciesBlocked(rec.Request); blocked {
+				rec.Status = StatusFailed
+				rec.Error = reason
+				_ = s.persist(rec)
+				continue
+			}
+			if s.dependenciesSatisfied(rec.Request) {
+				return true
+			}
 		}
 	}
 	return false
@@ -406,3 +433,49 @@ func (s *DurableActivityStore) ListAllDecisions() []*HumanDecisionRequest {
 	}
 	return list
 }
+
+// QueryActivities returns all activities matching the filter criteria.
+func (s *DurableActivityStore) QueryActivities(filter ActivityFilter) []*ActivityRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var list []*ActivityRecord
+	var rootSubtasks map[string]bool
+	if filter.RootID != "" {
+		rootSubtasks = make(map[string]bool)
+		rootSubtasks[filter.RootID] = true
+		for _, id := range s.order {
+			rec := s.records[id]
+			if rootSubtasks[rec.Request.ParentID] {
+				rootSubtasks[rec.Request.ID] = true
+			}
+		}
+	}
+
+	for _, id := range s.order {
+		rec := s.records[id]
+		if filter.Status != "" && rec.Status != filter.Status {
+			continue
+		}
+		if filter.AgentID != "" && rec.Request.AgentID != filter.AgentID {
+			continue
+		}
+		if filter.ParentID != "" && rec.Request.ParentID != filter.ParentID {
+			continue
+		}
+		if filter.RootID != "" && !rootSubtasks[rec.Request.ID] {
+			continue
+		}
+		if filter.HasErrors != nil {
+			hasErr := rec.Error != ""
+			if hasErr != *filter.HasErrors {
+				continue
+			}
+		}
+
+		cp := *rec
+		list = append(list, &cp)
+	}
+	return list
+}
+

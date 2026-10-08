@@ -33,7 +33,8 @@ Commands:
   init [path]                           Initialize an a4c workspace (.a4c directory)
   team list                             List persistent team members and permissions
   team add <id> <name> <role> <charter> Register a new persistent team member
-  task submit <objective> [budget]      Submit a feature request or task to the team
+  task submit <obj> [budget] [--strategy s] Submit a task (strategy: direct|reviewed|team)
+  task list [--status s] [--agent a]    Query activities matching filter criteria
   task history <task-id>                Display full audit history and DAG for a task
   status                                Display active activities and evidence
   run [--real-copilot] [--steps N]      Run governed collaboration loop
@@ -44,9 +45,11 @@ Commands:
 
 Flags:
   --real-copilot                        Connect to official GitHub Copilot CLI via Go SDK
+  --strategy direct|reviewed|team       Execution strategy (default: team)
   --steps N                             Maximum sequential steps to execute (default: 10)
   --dir path                            Workspace root directory (default: current directory)
 `)
+
 }
 
 func main() {
@@ -184,11 +187,11 @@ func runTeam(args []string) {
 
 func runTask(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: a4c task submit <objective> [budget_tokens]")
+		fmt.Println("Usage: a4c task <submit|list|history> [options]")
 		return
 	}
 
-	_, storeDir, _, _, _ := getPaths(".")
+	dotDir, storeDir, rosterDir, memDir, journalDir := getPaths(".")
 	store, err := a4c.NewDurableActivityStore(storeDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to open activity store: %v\n", err)
@@ -196,39 +199,69 @@ func runTask(args []string) {
 	}
 
 	subCmd := args[0]
-	if subCmd == "submit" {
+	switch subCmd {
+	case "submit":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task submit <objective> [budget_tokens]")
+			fmt.Println("Usage: a4c task submit <objective> [budget_tokens] [--strategy direct|reviewed|team]")
 			return
 		}
 		objective := args[1]
 		budgetTokens := 50000.0
-		if len(args) >= 3 {
-			if b, err := strconv.ParseFloat(args[2], 64); err == nil {
+		strategy := a4c.StrategyTeam
+
+		for i := 2; i < len(args); i++ {
+			if args[i] == "--strategy" && i+1 < len(args) {
+				strategy = a4c.ExecutionStrategy(args[i+1])
+				i++
+			} else if b, err := strconv.ParseFloat(args[i], 64); err == nil {
 				budgetTokens = b
 			}
 		}
 
-		req := a4c.ActivityRequest{
-			ID:        fmt.Sprintf("task-%d", os.Getpid()),
-			AgentID:   "lead",
-			Objective: objective,
-			Budget:    a4c.Budget{Allocated: budgetTokens},
-		}
+		roster, _ := a4c.DefaultTeamRoster(rosterDir)
+		memStore, _ := a4c.NewDurableMemoryStore(memDir)
+		journal, _ := a4c.NewDurableIntentJournal(journalDir)
+		gov := a4c.NewPolicyGovernor([]string{
+			"governed_read_file", "governed_apply_patch", "governed_propose_activity",
+			"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+		})
+		wtMgr, _ := a4c.NewWorktreeManager(".", filepath.Join(dotDir, "worktrees"))
 
-		if err := store.Enqueue(req); err != nil {
+		coord := a4c.NewTeamCoordinator(".", store, roster, memStore, gov, journal, &a4c.NativeGoTestRunner{}, nil)
+		coord.SetWorktreeManager(wtMgr)
+
+		req, err := coord.SubmitTaskWithStrategy(objective, a4c.Budget{Allocated: budgetTokens}, nil, strategy)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to enqueue task: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Task enqueued: %s\nAssigned to: lead\nObjective: %s\nBudget: %.0f tokens\n",
-			req.ID, req.Objective, req.Budget.Allocated)
-	} else if subCmd == "history" {
+		fmt.Printf("Task enqueued: %s\nStrategy: %s\nAssigned to: %s\nObjective: %s\nBudget: %.0f tokens\n",
+			req.ID, strategy, req.AgentID, req.Objective, req.Budget.Allocated)
+
+	case "list":
+		var filter a4c.ActivityFilter
+		for i := 1; i < len(args); i++ {
+			if args[i] == "--status" && i+1 < len(args) {
+				filter.Status = a4c.ActivityStatus(args[i+1])
+				i++
+			} else if args[i] == "--agent" && i+1 < len(args) {
+				filter.AgentID = args[i+1]
+				i++
+			}
+		}
+		matches := store.QueryActivities(filter)
+		fmt.Printf("Activities (%d matches):\n", len(matches))
+		for _, m := range matches {
+			fmt.Printf("[%s] Agent: %-8s Status: %-10s Objective: %s\n",
+				m.Request.ID, m.Request.AgentID, m.Status, m.Request.Objective)
+		}
+
+	case "history":
 		if len(args) < 2 {
 			fmt.Println("Usage: a4c task history <task-id>")
 			return
 		}
 		taskID := args[1]
-		dotDir, _, _, memDir, journalDir := getPaths(".")
 		journal, _ := a4c.NewDurableIntentJournal(journalDir)
 		memStore, _ := a4c.NewDurableMemoryStore(memDir)
 		wtMgr, _ := a4c.NewWorktreeManager(".", filepath.Join(dotDir, "worktrees"))
@@ -240,10 +273,12 @@ func runTask(args []string) {
 		}
 
 		fmt.Print(report.FormatHumanReadable())
-	} else {
-		fmt.Printf("Unknown task command %q. Usage: a4c task <submit|history>\n", subCmd)
+
+	default:
+		fmt.Printf("Unknown task command %q. Usage: a4c task <submit|list|history>\n", subCmd)
 	}
 }
+
 
 
 func runStatus(args []string) {

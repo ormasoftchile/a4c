@@ -459,3 +459,241 @@ func TestFormatHistoryHeader(t *testing.T) {
 	}
 }
 
+// TestRealCopilot_ComparativeBenchmarks executes live empirical comparisons between
+// Mode A (A4C Persistent Team) and Mode B (Single Governed Agent) using the real
+// GitHub Copilot SDK CLI on an identical engineering feature task.
+func TestRealCopilot_ComparativeBenchmarks(t *testing.T) {
+	if os.Getenv("RUN_REAL_COPILOT") != "1" {
+		t.Skip("Skipping real Copilot test; set RUN_REAL_COPILOT=1 to run")
+	}
+
+	type TrialResult struct {
+		Mode         string
+		Passed       bool
+		Tokens       int
+		PromptTokens int
+		CompTokens   int
+		Duration     time.Duration
+		ModelCalls   int
+		ReviewPassed bool
+	}
+
+	runBenchmarkTrial := func(modeName string, strategy spike.ExecutionStrategy) TrialResult {
+		tempDir := t.TempDir()
+		repoDir := filepath.Join(tempDir, "bench-repo")
+		_ = os.MkdirAll(repoDir, 0755)
+
+		runCmd(t, repoDir, "git", "init")
+		runCmd(t, repoDir, "git", "config", "user.name", "A4C Benchmarker")
+		runCmd(t, repoDir, "git", "config", "user.email", "bench@example.com")
+
+		_ = os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module example.com/bench\n\ngo 1.22\n"), 0644)
+
+		pkgDir := filepath.Join(repoDir, "pkg", "filter")
+		_ = os.MkdirAll(pkgDir, 0755)
+
+		initialCode := `package filter
+
+type Item struct {
+	ID     string
+	Active bool
+}
+
+// FilterActive returns only active items.
+func FilterActive(items []Item) []Item {
+	return nil // Stub
+}
+`
+		_ = os.WriteFile(filepath.Join(pkgDir, "filter.go"), []byte(initialCode), 0644)
+
+		initialTest := `package filter_test
+
+import (
+	"testing"
+	"example.com/bench/pkg/filter"
+)
+
+func TestFilterActive(t *testing.T) {
+	items := []filter.Item{
+		{ID: "1", Active: true},
+		{ID: "2", Active: false},
+		{ID: "3", Active: true},
+	}
+	active := filter.FilterActive(items)
+	if len(active) != 2 {
+		t.Fatalf("expected 2 active items, got %d", len(active))
+	}
+	if active[0].ID != "1" || active[1].ID != "3" {
+		t.Fatalf("unexpected items returned: %+v", active)
+	}
+}
+`
+		_ = os.WriteFile(filepath.Join(pkgDir, "filter_test.go"), []byte(initialTest), 0644)
+
+		runCmd(t, repoDir, "git", "add", ".")
+		runCmd(t, repoDir, "git", "commit", "-m", "chore: initial scaffold for benchmark")
+
+		stateDir := filepath.Join(tempDir, "state")
+		storeDir := filepath.Join(stateDir, "activities")
+		rosterDir := filepath.Join(stateDir, "roster")
+		memDir := filepath.Join(stateDir, "memory")
+		journalDir := filepath.Join(stateDir, "journal")
+		wtStateDir := filepath.Join(stateDir, "worktrees")
+
+		wtMgr, err := spike.NewWorktreeManager(repoDir, wtStateDir)
+		if err != nil {
+			t.Fatalf("[%s] failed to create WorktreeManager: %v", modeName, err)
+		}
+
+		store, _ := spike.NewDurableActivityStore(storeDir)
+		roster, _ := spike.DefaultTeamRoster(rosterDir)
+		memory, _ := spike.NewDurableMemoryStore(memDir)
+		journal, _ := spike.NewDurableIntentJournal(journalDir)
+		gov := spike.NewPolicyGovernor([]string{
+			"governed_read_file", "governed_apply_patch", "governed_propose_activity",
+			"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+		})
+
+		provider, err := spike.NewCopilotProvider("")
+		if err != nil {
+			t.Fatalf("[%s] failed to create CopilotProvider: %v", modeName, err)
+		}
+		defer provider.Close()
+
+		runner := &spike.NativeGoTestRunner{}
+		coord := spike.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, runner, provider)
+		coord.SetWorktreeManager(wtMgr)
+
+		objective := "Implement FilterActive(items []Item) []Item in pkg/filter/filter.go to return all items where Active == true using governed_apply_patch, so that TestFilterActive passes natively."
+
+		task, err := coord.SubmitTaskWithStrategy(objective, spike.Budget{Allocated: 80000}, nil, strategy)
+		if err != nil {
+			t.Fatalf("[%s] failed to submit task: %v", modeName, err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+
+		start := time.Now()
+		calls := 0
+		reviewApproved := false
+
+		// For Team strategy, handle Lead first and ensure coder and reviewer exist
+		if strategy == spike.StrategyTeam {
+			leadRes, err := coord.Step(ctx)
+			if err != nil {
+				t.Fatalf("[%s] lead step failed: %v", modeName, err)
+			}
+			calls++
+			t.Logf("[%s] Lead step executed: Proposals=%d Summary=%s", modeName, len(leadRes.Proposals), leadRes.Outputs["summary"])
+
+			coderActivityID := ""
+			for _, p := range leadRes.Proposals {
+				if p.ProposedAgentID == "coder" {
+					coderActivityID = p.ProposalID
+				}
+			}
+			if coderActivityID == "" {
+				coderActivityID = fmt.Sprintf("%s-coder", task.ID)
+				_ = store.Enqueue(spike.ActivityRequest{
+					ID:        coderActivityID,
+					ParentID:  task.ID,
+					AgentID:   "coder",
+					Objective: objective,
+					Budget:    spike.Budget{Allocated: 40000},
+					CreatedAt: time.Now(),
+				})
+			}
+
+			reviewerEnqueued := false
+			for _, p := range leadRes.Proposals {
+				if p.ProposedAgentID == "reviewer" {
+					reviewerEnqueued = true
+				}
+			}
+			if !reviewerEnqueued {
+				_ = store.Enqueue(spike.ActivityRequest{
+					ID:        fmt.Sprintf("%s-reviewer", task.ID),
+					ParentID:  task.ID,
+					AgentID:   "reviewer",
+					Objective: "Review FilterActive implementation and native test evidence",
+					Budget:    spike.Budget{Allocated: 20000},
+					DependsOn: []string{coderActivityID},
+					CreatedAt: time.Now(),
+				})
+			}
+		}
+
+		// Process claimable activities
+		for store.HasClaimable() {
+			res, err := coord.Step(ctx)
+			if err != nil {
+				t.Fatalf("[%s] step failed: %v", modeName, err)
+			}
+			if res == nil {
+				break
+			}
+			calls++
+			rec, _ := store.Get(res.ID)
+			t.Logf("[%s] Step executed: ID=%s Agent=%s Status=%s Outputs=%+v", modeName, res.ID, rec.Request.AgentID, res.Status, res.Outputs)
+			if approved, ok := res.Outputs["approved"].(bool); ok && approved {
+				reviewApproved = true
+			}
+		}
+
+		duration := time.Since(start)
+
+		// Reconstruct task history for aggregated metrics
+		hist, err := spike.BuildTaskHistory(task.ID, store, journal, wtMgr, memory)
+		if err != nil {
+			t.Fatalf("[%s] failed to build history: %v", modeName, err)
+		}
+
+		passed := len(hist.EvidenceIDs) > 0 && hist.Status == spike.StatusCompleted
+
+		return TrialResult{
+			Mode:         modeName,
+			Passed:       passed,
+			Tokens:       hist.MetricsSummary.TotalTokens,
+			PromptTokens: hist.MetricsSummary.PromptTokens,
+			CompTokens:   hist.MetricsSummary.CompletionTokens,
+			Duration:     duration,
+			ModelCalls:   calls,
+			ReviewPassed: reviewApproved || strategy == spike.StrategyDirect,
+		}
+	}
+
+	t.Log("--- Executing Live Comparative Benchmark Trial 1: Single Governed Agent ---")
+	resSingle := runBenchmarkTrial("Single Agent (Direct)", spike.StrategyDirect)
+
+	t.Log("--- Executing Live Comparative Benchmark Trial 2: Governed Pair (Reviewed) ---")
+	resPair := runBenchmarkTrial("Governed Pair (Reviewed)", spike.StrategyReviewed)
+
+	t.Log("--- Executing Live Comparative Benchmark Trial 3: A4C Multi-Agent Team ---")
+	resTeam := runBenchmarkTrial("A4C Team (Lead+Coder+Reviewer)", spike.StrategyTeam)
+
+	fmt.Printf("\n====================================================================================================\n")
+	fmt.Printf("A4C MILESTONE 5: LIVE REAL COPILOT COMPARATIVE BENCHMARK RESULTS\n")
+	fmt.Printf("====================================================================================================\n")
+	fmt.Printf("%-32s | %-6s | %-12s | %-10s | %-6s | %-8s\n", "Mode / Configuration", "Passed", "Total Tokens", "Duration", "Calls", "Reviewed")
+	fmt.Printf("----------------------------------------------------------------------------------------------------\n")
+	fmt.Printf("%-32s | %-6t | %-12d | %-10s | %-6d | %-8t\n",
+		resSingle.Mode, resSingle.Passed, resSingle.Tokens, resSingle.Duration.Round(time.Millisecond), resSingle.ModelCalls, resSingle.ReviewPassed)
+	fmt.Printf("%-32s | %-6t | %-12d | %-10s | %-6d | %-8t\n",
+		resPair.Mode, resPair.Passed, resPair.Tokens, resPair.Duration.Round(time.Millisecond), resPair.ModelCalls, resPair.ReviewPassed)
+	fmt.Printf("%-32s | %-6t | %-12d | %-10s | %-6d | %-8t\n",
+		resTeam.Mode, resTeam.Passed, resTeam.Tokens, resTeam.Duration.Round(time.Millisecond), resTeam.ModelCalls, resTeam.ReviewPassed)
+	fmt.Printf("====================================================================================================\n\n")
+
+	if !resSingle.Passed {
+		t.Errorf("Single agent trial failed")
+	}
+	if !resPair.Passed {
+		t.Errorf("Governed pair trial failed")
+	}
+	if !resTeam.Passed {
+		t.Errorf("A4C team trial failed")
+	}
+}
+
+

@@ -38,17 +38,48 @@ func (b Budget) Available() float64 {
 	return b.Allocated - (b.Reserved + b.Consumed)
 }
 
+// ExecutionStrategy defines how a submitted task is scheduled and executed.
+type ExecutionStrategy string
+
+const (
+	StrategyDirect   ExecutionStrategy = "direct"   // Single programmer handles task directly
+	StrategyReviewed ExecutionStrategy = "reviewed" // Programmer implements + Independent Reviewer verifies
+	StrategyTeam     ExecutionStrategy = "team"     // Lead coordinates, delegates to Coder & Reviewer
+)
+
+// ExecutionMetrics tracks detailed per-activity model, tool, and latency measurements.
+type ExecutionMetrics struct {
+	WallClockDuration time.Duration `json:"wall_clock_duration"`
+	ModelDuration     time.Duration `json:"model_duration"`
+	ToolDuration      time.Duration `json:"tool_duration"`
+	PromptTokens      int           `json:"prompt_tokens"`
+	CompletionTokens  int           `json:"completion_tokens"`
+	TotalTokens       int           `json:"total_tokens"`
+	ModelInvocations  int           `json:"model_invocations"`
+	ToolCalls         int           `json:"tool_calls"`
+}
+
+// ActivityFilter specifies criteria for querying historical or active activities.
+type ActivityFilter struct {
+	Status    ActivityStatus `json:"status,omitempty"`
+	AgentID   string         `json:"agent_id,omitempty"`
+	ParentID  string         `json:"parent_id,omitempty"`
+	RootID    string         `json:"root_id,omitempty"`
+	HasErrors *bool          `json:"has_errors,omitempty"`
+}
+
 // ActivityRequest is a unit of work scheduled for an agent or tool.
 type ActivityRequest struct {
-	ID                  string         `json:"id"`
-	ParentID            string         `json:"parent_id,omitempty"`
-	AgentID             string         `json:"agent_id"`
-	Objective           string         `json:"objective"`
-	Inputs              map[string]any `json:"inputs,omitempty"`
-	WorkspaceSnapshotID string         `json:"workspace_snapshot_id,omitempty"`
-	Budget              Budget         `json:"budget"`
-	DependsOn           []string       `json:"depends_on,omitempty"`
-	CreatedAt           time.Time      `json:"created_at"`
+	ID                  string            `json:"id"`
+	ParentID            string            `json:"parent_id,omitempty"`
+	AgentID             string            `json:"agent_id"`
+	Objective           string            `json:"objective"`
+	Inputs              map[string]any    `json:"inputs,omitempty"`
+	WorkspaceSnapshotID string            `json:"workspace_snapshot_id,omitempty"`
+	Budget              Budget            `json:"budget"`
+	Strategy            ExecutionStrategy `json:"strategy,omitempty"`
+	DependsOn           []string          `json:"depends_on,omitempty"`
+	CreatedAt           time.Time         `json:"created_at"`
 }
 
 // ActivityProposal allows an agent to request dynamic subtasks without directly mutating the execution graph.
@@ -69,7 +100,9 @@ type ActivityResult struct {
 	EvidenceIDs []string           `json:"evidence_ids,omitempty"`
 	Proposals   []ActivityProposal `json:"proposals,omitempty"`
 	Consumed    Budget             `json:"consumed"`
+	Metrics     *ExecutionMetrics  `json:"metrics,omitempty"`
 }
+
 
 // AgentIdentity models a persistent team member identity.
 type AgentIdentity struct {

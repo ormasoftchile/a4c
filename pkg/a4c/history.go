@@ -16,9 +16,10 @@ type ActivityHistoryEntry struct {
 	Status       ActivityStatus `json:"status"`
 	BudgetUsed   float64        `json:"budget_used"`
 	Error        string         `json:"error,omitempty"`
-	Outputs      map[string]any `json:"outputs,omitempty"`
-	EvidenceIDs  []string       `json:"evidence_ids,omitempty"`
-	CreatedAt    time.Time      `json:"created_at"`
+	Outputs      map[string]any    `json:"outputs,omitempty"`
+	EvidenceIDs  []string          `json:"evidence_ids,omitempty"`
+	Metrics      *ExecutionMetrics `json:"metrics,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
 }
 
 // ReviewHistoryEntry captures reviewer evaluation details.
@@ -34,6 +35,7 @@ type ReviewHistoryEntry struct {
 type TaskHistoryReport struct {
 	TaskID              string                 `json:"task_id"`
 	OriginalObjective   string                 `json:"original_objective"`
+	Strategy            ExecutionStrategy      `json:"strategy,omitempty"`
 	CreatedAt           time.Time              `json:"created_at"`
 	AllocatedBudget     float64                `json:"allocated_budget"`
 	ConsumedBudget      float64                `json:"consumed_budget"`
@@ -46,8 +48,10 @@ type TaskHistoryReport struct {
 	ReviewDecisions     []ReviewHistoryEntry   `json:"review_decisions,omitempty"`
 	HumanInterventions  []HumanDecisionRequest `json:"human_interventions,omitempty"`
 	PromotedConventions []MemoryRecord         `json:"promoted_conventions,omitempty"`
+	MetricsSummary      *ExecutionMetrics      `json:"metrics_summary,omitempty"`
 	FinalOutcome        string                 `json:"final_outcome"`
 }
+
 
 // BuildTaskHistory deterministically reconstructs the complete task history from durable stores.
 func BuildTaskHistory(
@@ -65,6 +69,7 @@ func BuildTaskHistory(
 	report := &TaskHistoryReport{
 		TaskID:            taskID,
 		OriginalObjective: rootRec.Request.Objective,
+		Strategy:          rootRec.Request.Strategy,
 		CreatedAt:         rootRec.Request.CreatedAt,
 		AllocatedBudget:   rootRec.Request.Budget.Allocated,
 		Status:            rootRec.Status,
@@ -82,6 +87,7 @@ func BuildTaskHistory(
 	// Collect related activities (root and all subtasks)
 	agentMap := make(map[string]bool)
 	subtasks := store.GetTaskTree(taskID)
+	var metricsAgg *ExecutionMetrics
 
 	for _, rec := range subtasks {
 		if rec.Request.AgentID != "" {
@@ -91,13 +97,29 @@ func BuildTaskHistory(
 		consumed := 0.0
 		var outputs map[string]any
 		var evIDs []string
+		var metrics *ExecutionMetrics
 
 		if rec.Result != nil {
 			consumed = rec.Result.Consumed.Consumed
 			outputs = rec.Result.Outputs
 			evIDs = rec.Result.EvidenceIDs
+			metrics = rec.Result.Metrics
 			report.ConsumedBudget += consumed
 			report.EvidenceIDs = append(report.EvidenceIDs, evIDs...)
+
+			if metrics != nil {
+				if metricsAgg == nil {
+					metricsAgg = &ExecutionMetrics{}
+				}
+				metricsAgg.WallClockDuration += metrics.WallClockDuration
+				metricsAgg.ModelDuration += metrics.ModelDuration
+				metricsAgg.ToolDuration += metrics.ToolDuration
+				metricsAgg.PromptTokens += metrics.PromptTokens
+				metricsAgg.CompletionTokens += metrics.CompletionTokens
+				metricsAgg.TotalTokens += metrics.TotalTokens
+				metricsAgg.ModelInvocations += metrics.ModelInvocations
+				metricsAgg.ToolCalls += metrics.ToolCalls
+			}
 		}
 
 		entry := ActivityHistoryEntry{
@@ -111,6 +133,7 @@ func BuildTaskHistory(
 			Error:       rec.Error,
 			Outputs:     outputs,
 			EvidenceIDs: evIDs,
+			Metrics:     metrics,
 			CreatedAt:   rec.Request.CreatedAt,
 		}
 		report.Activities = append(report.Activities, entry)
@@ -128,6 +151,7 @@ func BuildTaskHistory(
 			})
 		}
 	}
+	report.MetricsSummary = metricsAgg
 
 	for agent := range agentMap {
 		report.ParticipatingAgents = append(report.ParticipatingAgents, agent)
@@ -186,6 +210,8 @@ func BuildTaskHistory(
 		report.FinalOutcome = fmt.Sprintf("Task failed: %s", failErr)
 	} else if hasApprovedReview {
 		report.FinalOutcome = "Task successfully implemented, verified natively, and reviewed."
+	} else if rootRec.Request.Strategy == StrategyDirect && rootRec.Status == StatusCompleted {
+		report.FinalOutcome = "Task successfully implemented, verified natively, and completed."
 	} else if !allDone {
 		report.FinalOutcome = "Task in progress."
 	} else if rootRec.Status == StatusAwaitingHuman {
@@ -197,7 +223,6 @@ func BuildTaskHistory(
 	return report, nil
 }
 
-
 // FormatHumanReadable produces a clean, professional audit trail.
 func (r *TaskHistoryReport) FormatHumanReadable() string {
 	var sb strings.Builder
@@ -206,12 +231,25 @@ func (r *TaskHistoryReport) FormatHumanReadable() string {
 	sb.WriteString("================================================================================\n")
 	sb.WriteString(fmt.Sprintf("Original Objective:  %s\n", r.OriginalObjective))
 	sb.WriteString(fmt.Sprintf("Status:              %s\n", strings.ToUpper(string(r.Status))))
+	if r.Strategy != "" {
+		sb.WriteString(fmt.Sprintf("Execution Strategy:  %s\n", strings.ToUpper(string(r.Strategy))))
+	}
 	if r.Branch != "" {
 		sb.WriteString(fmt.Sprintf("Git Worktree Branch: %s\n", r.Branch))
 	}
 	sb.WriteString(fmt.Sprintf("Participating Agents: %s\n", strings.Join(r.ParticipatingAgents, ", ")))
 	sb.WriteString(fmt.Sprintf("Budget:              %.0f allocated (%.0f tokens consumed)\n", r.AllocatedBudget, r.ConsumedBudget))
+	if r.MetricsSummary != nil {
+		sb.WriteString(fmt.Sprintf("Execution Metrics:   Duration: %v (Model: %v) | Tokens: %d prompt, %d completion (%d total)\n",
+			r.MetricsSummary.WallClockDuration.Round(time.Millisecond),
+			r.MetricsSummary.ModelDuration.Round(time.Millisecond),
+			r.MetricsSummary.PromptTokens,
+			r.MetricsSummary.CompletionTokens,
+			r.MetricsSummary.TotalTokens,
+		))
+	}
 	sb.WriteString(fmt.Sprintf("Created At:          %s\n\n", r.CreatedAt.Format(time.RFC3339)))
+
 
 	sb.WriteString("--- Activity DAG & Transitions ---\n")
 	for idx, act := range r.Activities {

@@ -85,6 +85,12 @@ func (s *FakeSession) Usage() UsageInfo {
 	return s.usage
 }
 
+func (s *FakeSession) SetUsage(usage UsageInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.usage = usage
+}
+
 func (s *FakeSession) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -44,6 +44,7 @@ type TeamCoordinator struct {
 	revisionCount int
 	lastEvidence  *ValidationEvidence
 	sessions      map[string]AgentSession
+	Handoff       *HandoffBuilder
 }
 
 func NewTeamCoordinator(
@@ -75,8 +76,10 @@ func NewTeamCoordinator(
 		MaxRepair:    3,
 		MaxRevisions: 2,
 		sessions:     make(map[string]AgentSession),
+		Handoff:      NewHandoffBuilder(),
 	}
 }
+
 
 // SetWorktreeManager sets the Git worktree manager for task isolation.
 func (c *TeamCoordinator) SetWorktreeManager(mgr *WorktreeManager) {
@@ -112,24 +115,92 @@ func (c *TeamCoordinator) resolveWorkspace(req *ActivityRequest) string {
 
 // SubmitTask allows the human engineer to assign a feature request to the persistent team.
 func (c *TeamCoordinator) SubmitTask(objective string, budget Budget, inputs map[string]any) (*ActivityRequest, error) {
-	req := ActivityRequest{
-		ID:        fmt.Sprintf("task-%d", time.Now().UnixNano()),
-		AgentID:   "lead", // Defaults to team architect / lead
-		Objective: objective,
-		Inputs:    inputs,
-		Budget:    budget,
-		CreatedAt: time.Now(),
+	return c.SubmitTaskWithStrategy(objective, budget, inputs, StrategyTeam)
+}
+
+// SubmitTaskWithStrategy schedules a task according to the selected execution strategy.
+func (c *TeamCoordinator) SubmitTaskWithStrategy(
+	objective string,
+	budget Budget,
+	inputs map[string]any,
+	strategy ExecutionStrategy,
+) (*ActivityRequest, error) {
+	if strategy == "" {
+		strategy = StrategyTeam
 	}
+
+	taskID := fmt.Sprintf("task-%d", time.Now().UnixNano())
 
 	if c.WorktreeMgr != nil {
-		_, _ = c.WorktreeMgr.AcquireWorktree(context.Background(), req.ID, "team")
+		_, _ = c.WorktreeMgr.AcquireWorktree(context.Background(), taskID, "team")
 	}
 
-	if err := c.Store.Enqueue(req); err != nil {
-		return nil, fmt.Errorf("coordinator: failed to enqueue initial task: %w", err)
+	switch strategy {
+	case StrategyDirect:
+		// Mode B / Direct: Single programmer handles the task directly under governance & native tests
+		req := ActivityRequest{
+			ID:        taskID,
+			AgentID:   "coder",
+			Objective: objective,
+			Inputs:    inputs,
+			Budget:    budget,
+			Strategy:  StrategyDirect,
+			CreatedAt: time.Now(),
+		}
+		if err := c.Store.Enqueue(req); err != nil {
+			return nil, fmt.Errorf("coordinator: failed to enqueue direct task: %w", err)
+		}
+		return &req, nil
+
+	case StrategyReviewed:
+		// Programmer implements + Independent Reviewer verifies
+		coderReq := ActivityRequest{
+			ID:        taskID,
+			AgentID:   "coder",
+			Objective: objective,
+			Inputs:    inputs,
+			Budget:    Budget{Allocated: budget.Allocated * 0.7},
+			Strategy:  StrategyReviewed,
+			CreatedAt: time.Now(),
+		}
+		reviewerReq := ActivityRequest{
+			ID:        fmt.Sprintf("%s-rev", taskID),
+			ParentID:  taskID,
+			AgentID:   "reviewer",
+			Objective: fmt.Sprintf("Review implementation of: %s", objective),
+			Budget:    Budget{Allocated: budget.Allocated * 0.3},
+			DependsOn: []string{taskID},
+			Strategy:  StrategyReviewed,
+			CreatedAt: time.Now(),
+		}
+		if err := c.Store.Enqueue(coderReq); err != nil {
+			return nil, err
+		}
+		if err := c.Store.Enqueue(reviewerReq); err != nil {
+			return nil, err
+		}
+		return &coderReq, nil
+
+	case StrategyTeam:
+		fallthrough
+	default:
+		// Mode A / Full team: Lead coordinates, delegates to Coder & Reviewer
+		req := ActivityRequest{
+			ID:        taskID,
+			AgentID:   "lead",
+			Objective: objective,
+			Inputs:    inputs,
+			Budget:    budget,
+			Strategy:  StrategyTeam,
+			CreatedAt: time.Now(),
+		}
+		if err := c.Store.Enqueue(req); err != nil {
+			return nil, fmt.Errorf("coordinator: failed to enqueue team task: %w", err)
+		}
+		return &req, nil
 	}
-	return &req, nil
 }
+
 
 // Step processes the next claimable activity whose dependencies are satisfied.
 func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
@@ -204,35 +275,34 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	}
 	defer session.Close()
 
-	// 6. Build prompt with injected verified team memory & role-appropriate context
-	verifiedContext := c.Memory.FormatContext()
-	var promptBuilder strings.Builder
-	promptBuilder.WriteString(fmt.Sprintf("Objective: %s\n", req.Objective))
-	promptBuilder.WriteString(fmt.Sprintf("Agent Role: %s (%s)\n", ident.Name, ident.Role))
-	promptBuilder.WriteString(fmt.Sprintf("%s\n", verifiedContext))
-
-	if len(req.Inputs) > 0 {
-		promptBuilder.WriteString(fmt.Sprintf("Inputs: %v\n", req.Inputs))
+	// 6. Build prompt with injected verified team memory & role-appropriate context via HandoffBuilder
+	diff := ""
+	if ident.ID == "reviewer" {
+		diff, _ = c.getWorkspaceDiff(ctx, activeWorkspace)
+	}
+	evidenceID := "none"
+	if c.lastEvidence != nil {
+		evidenceID = c.lastEvidence.EvidenceID
 	}
 
-	// Role-specific context additions
-	if ident.ID == "lead" {
-		promptBuilder.WriteString("Instructions: You are the Lead Engineer. Inspect the repository if needed, then delegate implementation to 'coder' and verification to 'reviewer' using the governed_propose_activity tool.\n")
-	} else if ident.ID == "coder" {
-		promptBuilder.WriteString("Instructions: You are the Senior Programmer. Read repository code using governed_read_file and apply code changes using governed_apply_patch.\n")
-	} else if ident.ID == "reviewer" {
-		diff, _ := c.getWorkspaceDiff(ctx, activeWorkspace)
-		evidenceID := "none"
-		if c.lastEvidence != nil {
-			evidenceID = c.lastEvidence.EvidenceID
-		}
-		promptBuilder.WriteString(fmt.Sprintf("Code Changes Under Review:\n%s\n", diff))
-		promptBuilder.WriteString(fmt.Sprintf("Native Validation Evidence ID: %s (ExitCode: 0)\n", evidenceID))
-		promptBuilder.WriteString("Instructions: Review the code changes against the objective and submit your evaluation using governed_submit_review.\n")
+	artifact := HandoffArtifact{
+		Objective:          req.Objective,
+		Role:               fmt.Sprintf("%s (%s)", ident.Name, ident.Role),
+		AgentID:            ident.ID,
+		ActiveWorkspace:    activeWorkspace,
+		Diff:               diff,
+		ValidationEvidence: evidenceID,
+		VerifiedMemories:   c.Memory.FormatContext(),
+		Inputs:             req.Inputs,
 	}
 
-	// 7. Dispatch to agent session
-	resp, err := session.Send(ctx, promptBuilder.String())
+	prompt := c.Handoff.BuildPrompt(artifact)
+
+	// 7. Dispatch to agent session with latency tracking
+	startWall := time.Now()
+	startModel := time.Now()
+	resp, err := session.Send(ctx, prompt)
+	modelDuration := time.Since(startModel)
 	if err != nil {
 		_ = c.Store.Fail(req.ID, err)
 		return nil, err
@@ -240,6 +310,15 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 	usage := session.Usage()
 	consumed := Budget{Consumed: float64(usage.TotalTokens)}
+
+	metrics := &ExecutionMetrics{
+		WallClockDuration: time.Since(startWall),
+		ModelDuration:     modelDuration,
+		PromptTokens:      usage.PromptTokens,
+		CompletionTokens:  usage.CompletionTokens,
+		TotalTokens:       usage.TotalTokens,
+		ModelInvocations:  1,
+	}
 
 	// Parse fallback proposals from response text if tools were not invoked directly
 	c.parseTextDirectives(resp.Content, &proposedActivities, &proposedMemories, &decisionRequest, &reviewResult, req.ID, ident.ID)
@@ -255,6 +334,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			ID:       req.ID,
 			Status:   StatusAwaitingHuman,
 			Consumed: consumed,
+			Metrics:  metrics,
 			Outputs: map[string]any{
 				"decision_id": decisionRequest.DecisionID,
 				"question":    decisionRequest.Question,
@@ -272,11 +352,13 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		ID:       req.ID,
 		Status:   StatusCompleted,
 		Consumed: consumed,
+		Metrics:  metrics,
 		Outputs: map[string]any{
 			"summary":    resp.Content,
 			"session_id": session.SessionID(),
 		},
 	}
+
 
 	switch ident.ID {
 	case "lead":
@@ -406,7 +488,16 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			_, _ = c.Memory.Promote(m.Key, "native_tests")
 		}
 
+		if req.Strategy == StrategyDirect {
+			result.Outputs["proposed_commit"] = fmt.Sprintf("feat: %s (verified by A4C single agent & native tests)", req.Objective)
+			if c.WorktreeMgr != nil {
+				rootID := c.getRootTaskID(req)
+				_ = c.WorktreeMgr.ReleaseWorktree(rootID, true)
+			}
+		}
+
 		_ = c.Store.Complete(req.ID, *result)
+
 
 	case "reviewer":
 		// Reviewer verification

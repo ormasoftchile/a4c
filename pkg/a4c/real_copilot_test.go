@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	spike "github.com/ormasoftchile/a4c/pkg/a4c"
 )
+
 
 // TestRealCopilot_Connectivity verifies that our Go SDK adapter can connect
 // to the actual local GitHub Copilot CLI, create a session, and receive tokens.
@@ -232,3 +235,227 @@ func TestRealCopilot_MultiAgentTeam(t *testing.T) {
 	t.Logf("[RESTART VERIFIED]: %d completed activities and %d agent identities preserved across restarts.",
 		reloadedStore.CompletedCount(), len(reloadedRoster.ListMembers()))
 }
+
+// TestRealCopilot_DogfoodHistoryCommand demonstrates Milestone 4 Real-World Engineering Dogfooding:
+// A human engineer delegates the task of implementing and verifying the task history capability
+// on the A4C codebase to the persistent 3-agent team (Lead, Coder, Reviewer).
+// 1. Coder operates in an isolated Git worktree branch `a4c/<task-id>`, leaving root repo clean.
+// 2. Real Copilot agent writes Go code and native tests validate via go test ./...
+// 3. Independent Copilot reviewer evaluates diff and evidence, approving the change.
+// 4. Proposed commit is generated and worktree is released.
+// 5. BuildTaskHistory reconstructs and formats the full audit history.
+func TestRealCopilot_DogfoodHistoryCommand(t *testing.T) {
+	if os.Getenv("RUN_REAL_COPILOT") != "1" {
+		t.Skip("Skipping real Copilot test; set RUN_REAL_COPILOT=1 to run")
+	}
+
+	tempDir := t.TempDir()
+	repoDir := filepath.Join(tempDir, "a4c-repo")
+	_ = os.MkdirAll(repoDir, 0755)
+
+	runCmd(t, repoDir, "git", "init")
+	runCmd(t, repoDir, "git", "config", "user.name", "A4C Dogfood Test")
+	runCmd(t, repoDir, "git", "config", "user.email", "dogfood@example.com")
+
+	// Set up basic Go module in repoDir
+	_ = os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module github.com/ormasoftchile/a4c\n\ngo 1.22\n"), 0644)
+
+	pkgDir := filepath.Join(repoDir, "pkg", "a4c")
+	_ = os.MkdirAll(pkgDir, 0755)
+
+	// Create initial version.go stub that coder will expand
+	initialCode := `package a4c
+
+// Version returns the current A4C tool version string.
+func Version() string {
+	return "v0.4.0-dogfood"
+}
+
+// TODO: Coder must implement FormatHistoryHeader(taskID, objective string) string
+`
+	_ = os.WriteFile(filepath.Join(pkgDir, "version.go"), []byte(initialCode), 0644)
+
+	initialTest := `package a4c_test
+
+import (
+	"testing"
+	"github.com/ormasoftchile/a4c/pkg/a4c"
+)
+
+func TestVersion(t *testing.T) {
+	if a4c.Version() == "" {
+		t.Fatal("empty version")
+	}
+}
+
+func TestFormatHistoryHeader(t *testing.T) {
+	header := a4c.FormatHistoryHeader("task-123", "Test objective")
+	if header != "[TASK task-123]: Test objective" {
+		t.Fatalf("unexpected header: %q", header)
+	}
+}
+`
+	_ = os.WriteFile(filepath.Join(pkgDir, "version_test.go"), []byte(initialTest), 0644)
+
+	runCmd(t, repoDir, "git", "add", ".")
+	runCmd(t, repoDir, "git", "commit", "-m", "chore: initial scaffold for dogfooding")
+
+	stateDir := filepath.Join(tempDir, "state")
+	storeDir := filepath.Join(stateDir, "activities")
+	rosterDir := filepath.Join(stateDir, "roster")
+	memDir := filepath.Join(stateDir, "memory")
+	journalDir := filepath.Join(stateDir, "journal")
+	wtStateDir := filepath.Join(stateDir, "worktrees")
+
+	wtMgr, err := spike.NewWorktreeManager(repoDir, wtStateDir)
+	if err != nil {
+		t.Fatalf("failed to create WorktreeManager: %v", err)
+	}
+
+	store, _ := spike.NewDurableActivityStore(storeDir)
+	roster, _ := spike.DefaultTeamRoster(rosterDir)
+	memory, _ := spike.NewDurableMemoryStore(memDir)
+	journal, _ := spike.NewDurableIntentJournal(journalDir)
+	gov := spike.NewPolicyGovernor([]string{
+		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
+		"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+	})
+
+	provider, err := spike.NewCopilotProvider("")
+	if err != nil {
+		t.Fatalf("failed to create real CopilotProvider: %v", err)
+	}
+	defer provider.Close()
+
+	runner := &spike.NativeGoTestRunner{}
+	coord := spike.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, runner, provider)
+	coord.SetWorktreeManager(wtMgr)
+
+	// Submit Dogfooding assignment
+	objective := "Implement FormatHistoryHeader(taskID, objective string) string returning '[TASK ' + taskID + ']: ' + objective in pkg/a4c/version.go so that TestFormatHistoryHeader passes natively."
+	task, err := coord.SubmitTask(objective, spike.Budget{Allocated: 100000}, nil)
+	if err != nil {
+		t.Fatalf("failed to submit dogfood task: %v", err)
+	}
+	t.Logf("[DOGFOOD TASK SUBMITTED]: ID=%s", task.ID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	// Step 1: Alice (Lead)
+	leadRes, err := coord.Step(ctx)
+	if err != nil {
+		t.Fatalf("Lead step failed: %v", err)
+	}
+	t.Logf("[LEAD STEP RESULT]: Proposals=%d Summary=%s", len(leadRes.Proposals), leadRes.Outputs["summary"])
+	for idx, p := range leadRes.Proposals {
+		t.Logf("[PROPOSAL %d]: ID=%s Agent=%s DependsOn=%v Objective=%s", idx+1, p.ProposalID, p.ProposedAgentID, p.DependsOn, p.Objective)
+	}
+
+	// Ensure coder and reviewer are enqueued
+	coderActivityID := ""
+	for _, p := range leadRes.Proposals {
+		if p.ProposedAgentID == "coder" {
+			coderActivityID = p.ProposalID
+		}
+	}
+	if coderActivityID == "" {
+		coderActivityID = fmt.Sprintf("%s-coder", task.ID)
+		_ = store.Enqueue(spike.ActivityRequest{
+			ID:        coderActivityID,
+			ParentID:  task.ID,
+			AgentID:   "coder",
+			Objective: objective,
+			Budget:    spike.Budget{Allocated: 50000},
+			CreatedAt: time.Now(),
+		})
+	}
+
+	reviewerEnqueued := false
+	for _, p := range leadRes.Proposals {
+		if p.ProposedAgentID == "reviewer" {
+			reviewerEnqueued = true
+		}
+	}
+	if !reviewerEnqueued {
+		_ = store.Enqueue(spike.ActivityRequest{
+			ID:        fmt.Sprintf("%s-reviewer", task.ID),
+			ParentID:  task.ID,
+			AgentID:   "reviewer",
+			Objective: "Review FormatHistoryHeader implementation and native test evidence",
+			Budget:    spike.Budget{Allocated: 20000},
+			DependsOn: []string{coderActivityID},
+			CreatedAt: time.Now(),
+		})
+	}
+
+	// Process all remaining claimable activities (Coder then Reviewer)
+	var coderRes, reviewerRes *spike.ActivityResult
+	for store.HasClaimable() {
+		res, err := coord.Step(ctx)
+		if err != nil {
+			t.Fatalf("Step failed: %v", err)
+		}
+		if res == nil {
+			break
+		}
+		rec, _ := store.Get(res.ID)
+		t.Logf("[STEP EXECUTED]: ID=%s Agent=%s Status=%s", res.ID, rec.Request.AgentID, res.Status)
+		if rec.Request.AgentID == "coder" {
+			coderRes = res
+			t.Logf("[CODER STEP RESULT]: Status=%s Evidence=%v Outputs=%+v", res.Status, res.EvidenceIDs, res.Outputs)
+		} else if rec.Request.AgentID == "reviewer" {
+			reviewerRes = res
+			t.Logf("[REVIEWER STEP RESULT]: Approved=%v Comments=%v ProposedCommit=%v",
+				res.Outputs["approved"], res.Outputs["review_comments"], res.Outputs["proposed_commit"])
+		}
+	}
+
+	if coderRes == nil {
+		t.Fatalf("expected coder activity to execute")
+	}
+	if reviewerRes == nil {
+		t.Fatalf("expected reviewer activity to execute")
+	}
+	if approved, ok := reviewerRes.Outputs["approved"].(bool); !ok || !approved {
+		t.Fatalf("expected reviewer to approve, got %+v", reviewerRes.Outputs)
+	}
+
+	// Verify worktree isolation: root repo has no unstaged files or contamination
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = repoDir
+	statusOut, _ := statusCmd.CombinedOutput()
+	if len(strings.TrimSpace(string(statusOut))) > 0 {
+		t.Fatalf("root repo was contaminated! Status: %s", string(statusOut))
+	}
+	t.Logf("[WORKTREE ISOLATION CONFIRMED]: Root repo is completely clean.")
+
+	// Verify worktree record is released
+	wtRec, err := wtMgr.GetWorktree(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get worktree record: %v", err)
+	}
+	if wtRec.Status != spike.WorktreeStatusReleased {
+		t.Fatalf("expected worktree status released, got %s", wtRec.Status)
+	}
+
+	// Reconstruct and format task history
+	history, err := spike.BuildTaskHistory(task.ID, store, journal, wtMgr, memory)
+	if err != nil {
+		t.Fatalf("failed to build task history: %v", err)
+	}
+
+	formattedHistory := history.FormatHumanReadable()
+	t.Logf("[RECONSTRUCTED TASK HISTORY]:\n%s", formattedHistory)
+
+	if !strings.Contains(formattedHistory, "A4C Task Activity History") {
+		t.Fatalf("history header missing")
+	}
+	if !strings.Contains(formattedHistory, "Git Worktree Branch: a4c/"+task.ID) {
+		t.Fatalf("worktree branch missing from history")
+	}
+	if len(history.EvidenceIDs) == 0 {
+		t.Fatalf("expected native evidence recorded in history")
+	}
+}
+

@@ -217,7 +217,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 	// Role-specific context additions
 	if ident.ID == "lead" {
-		promptBuilder.WriteString("Instructions: You are the Lead Engineer. Inspect the repository if needed, then delegate implementation to 'coder' using the governed_propose_activity tool.\n")
+		promptBuilder.WriteString("Instructions: You are the Lead Engineer. Inspect the repository if needed, then delegate implementation to 'coder' and verification to 'reviewer' using the governed_propose_activity tool.\n")
 	} else if ident.ID == "coder" {
 		promptBuilder.WriteString("Instructions: You are the Senior Programmer. Read repository code using governed_read_file and apply code changes using governed_apply_patch.\n")
 	} else if ident.ID == "reviewer" {
@@ -281,11 +281,35 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	switch ident.ID {
 	case "lead":
 		// Authorize and enqueue delegated subtasks
+		proposalIDMap := make(map[string]string)
 		for idx, prop := range proposedActivities {
 			childID := prop.ProposalID
 			if childID == "" {
 				childID = fmt.Sprintf("%s-sub-%d", req.ID, idx+1)
 			}
+			if prop.ProposalID != "" {
+				proposalIDMap[prop.ProposalID] = childID
+			}
+			proposalIDMap[prop.ProposedAgentID] = childID
+			proposalIDMap[fmt.Sprintf("%d", idx+1)] = childID
+			prop.ProposalID = childID
+
+			// Remap DependsOn to actual childIDs if needed
+			var remappedDeps []string
+			for _, dep := range prop.DependsOn {
+				if actual, found := proposalIDMap[dep]; found {
+					remappedDeps = append(remappedDeps, actual)
+				} else if _, exists := c.Store.Get(dep); exists == nil {
+					remappedDeps = append(remappedDeps, dep)
+				}
+			}
+			// If reviewer has no dependencies specified, make it depend on preceding subtask
+			if prop.ProposedAgentID == "reviewer" && len(remappedDeps) == 0 && idx > 0 {
+				prevChildID := fmt.Sprintf("%s-sub-%d", req.ID, idx)
+				remappedDeps = append(remappedDeps, prevChildID)
+			}
+			prop.DependsOn = remappedDeps
+
 			authReq, authErr := c.Governor.AuthorizeProposal(*req, prop, childID)
 			if authErr != nil {
 				return nil, fmt.Errorf("coordinator: proposal rejected by governor: %w", authErr)
@@ -299,6 +323,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			result.Proposals = append(result.Proposals, prop)
 		}
 		_ = c.Store.Complete(req.ID, *result)
+
 
 	case "coder":
 		// Deterministic native testing and evidence collection

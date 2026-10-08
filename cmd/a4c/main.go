@@ -34,6 +34,7 @@ Commands:
   team list                             List persistent team members and permissions
   team add <id> <name> <role> <charter> Register a new persistent team member
   task submit <objective> [budget]      Submit a feature request or task to the team
+  task history <task-id>                Display full audit history and DAG for a task
   status                                Display active activities and evidence
   run [--real-copilot] [--steps N]      Run governed collaboration loop
   decisions list                        List questions awaiting human engineer guidance
@@ -221,8 +222,29 @@ func runTask(args []string) {
 		}
 		fmt.Printf("Task enqueued: %s\nAssigned to: lead\nObjective: %s\nBudget: %.0f tokens\n",
 			req.ID, req.Objective, req.Budget.Allocated)
+	} else if subCmd == "history" {
+		if len(args) < 2 {
+			fmt.Println("Usage: a4c task history <task-id>")
+			return
+		}
+		taskID := args[1]
+		dotDir, _, _, memDir, journalDir := getPaths(".")
+		journal, _ := a4c.NewDurableIntentJournal(journalDir)
+		memStore, _ := a4c.NewDurableMemoryStore(memDir)
+		wtMgr, _ := a4c.NewWorktreeManager(".", filepath.Join(dotDir, "worktrees"))
+
+		report, err := a4c.BuildTaskHistory(taskID, store, journal, wtMgr, memStore)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error building task history: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Print(report.FormatHumanReadable())
+	} else {
+		fmt.Printf("Unknown task command %q. Usage: a4c task <submit|history>\n", subCmd)
 	}
 }
+
 
 func runStatus(args []string) {
 	_, storeDir, rosterDir, memDir, _ := getPaths(".")

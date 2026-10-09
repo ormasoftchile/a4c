@@ -24,7 +24,16 @@ type TeamService interface {
 	RejectTask(ctx context.Context, req RejectTaskRequest) (*RejectResult, error)
 	ResumeTask(ctx context.Context, taskID string) error
 	ExecuteTask(ctx context.Context, taskID string, maxSteps int) ([]*ActivityResult, error)
+
+	// Host-Native Coordination Interface (Mode A)
+	GetTeamContext(ctx context.Context) (*TeamContextResult, error)
+	BeginTask(ctx context.Context, req BeginTaskRequest) (*BeginTaskResult, error)
+	AssignActivity(ctx context.Context, req AssignActivityRequest) (*ActivityRef, error)
+	RecordCheckpoint(ctx context.Context, req CheckpointRequest) (*CheckpointResult, error)
+	CompleteActivity(ctx context.Context, req CompleteActivityRequest) (*HostActivityResult, error)
+	RecordReview(ctx context.Context, req RecordReviewRequest) (*HostReviewResult, error)
 }
+
 
 // TeamServiceImpl is the default production implementation of TeamService.
 type TeamServiceImpl struct {
@@ -671,7 +680,7 @@ func (s *TeamServiceImpl) deriveTaskState(rootID string) (TaskLifecycleState, *H
 			}
 			allCompleted = false
 		case StatusCompleted:
-			if rec.Request.AgentID == "reviewer" && rec.Result != nil {
+			if (rec.Request.AgentID == "reviewer" || rec.Request.AgentID == "charlie" || strings.Contains(rec.Request.ID, "review")) && rec.Result != nil {
 				if app, ok := rec.Result.Outputs["approved"].(bool); ok && app {
 					hasApprovedReview = true
 				}
@@ -684,6 +693,9 @@ func (s *TeamServiceImpl) deriveTaskState(rootID string) (TaskLifecycleState, *H
 	}
 	if hasAwaitingDecision {
 		return TaskStateAwaitingDecision, lifecycle, nil
+	}
+	if hasApprovedReview {
+		return TaskStateAwaitingHumanReview, lifecycle, nil
 	}
 
 	// If latest action was human feedback, check if revision activity is still active
@@ -802,3 +814,441 @@ func parseGitDiff(raw string) ([]FileDiff, int, int) {
 
 	return files, totalAdds, totalDels
 }
+
+// GetTeamContext returns environmental context for host-native coordinators.
+func (s *TeamServiceImpl) GetTeamContext(ctx context.Context) (*TeamContextResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	branch := "main"
+	commit := ""
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = s.workspaceDir
+	if out, err := cmd.Output(); err == nil {
+		branch = strings.TrimSpace(string(out))
+	}
+	cmd = exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cmd.Dir = s.workspaceDir
+	if out, err := cmd.Output(); err == nil {
+		commit = strings.TrimSpace(string(out))
+	}
+
+	var members []TeamMemberInfo
+	if s.roster != nil {
+		for _, m := range s.roster.ListMembers() {
+			members = append(members, TeamMemberInfo{
+				ID:           m.ID,
+				Name:         m.Name,
+				Role:         m.Role,
+				Charter:      m.Charter,
+				AllowedTools: m.AllowedTools,
+			})
+		}
+	}
+
+	var activeTasks []TaskSummary
+	if s.store != nil {
+		all := s.store.ListAllActivities()
+		seenRoots := make(map[string]bool)
+		for _, act := range all {
+			rootID := act.Request.ID
+			if act.Request.ParentID != "" {
+				rootID = act.Request.ParentID
+			}
+			if seenRoots[rootID] {
+				continue
+			}
+			seenRoots[rootID] = true
+			state, _, _ := s.deriveTaskState(rootID)
+			activeTasks = append(activeTasks, TaskSummary{
+				TaskID:    rootID,
+				Objective: act.Request.Objective,
+				State:     state,
+				Strategy:  act.Request.Strategy,
+				CreatedAt: act.Request.CreatedAt,
+			})
+		}
+	}
+
+	var memories []string
+	if s.memory != nil {
+		for _, mem := range s.memory.ListVerified() {
+			memories = append(memories, fmt.Sprintf("[%s (rev %d)]: %s", mem.Key, mem.Revision, mem.Content))
+		}
+	}
+
+	return &TeamContextResult{
+		WorkspaceRoot:  s.workspaceDir,
+		CurrentBranch:  branch,
+		HeadCommit:     commit,
+		TeamMembers:    members,
+		ActiveTasks:    activeTasks,
+		RecentMemories: memories,
+	}, nil
+}
+
+// BeginTask initializes an engineering task and allocates an isolated worktree.
+// Crucially: it does NOT launch a background LLM inference loop.
+func (s *TeamServiceImpl) BeginTask(ctx context.Context, req BeginTaskRequest) (*BeginTaskResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if strings.TrimSpace(req.Objective) == "" {
+		return nil, fmt.Errorf("service: objective is required")
+	}
+
+	taskID := fmt.Sprintf("task-%d", time.Now().UnixNano())
+	if req.BudgetTokens <= 0 {
+		req.BudgetTokens = 50000.0
+	}
+	if req.Strategy == "" {
+		req.Strategy = StrategyTeam
+	}
+	if req.Coordinator == "" {
+		req.Coordinator = "alice"
+	}
+
+	branchName := fmt.Sprintf("a4c/%s", taskID)
+	wtPath := s.workspaceDir
+	if s.wtMgr != nil {
+		rec, err := s.wtMgr.AcquireWorktree(ctx, taskID, req.Coordinator)
+		if err == nil && rec != nil {
+			wtPath = rec.WorktreePath
+			branchName = rec.Branch
+		}
+	}
+
+	actReq := ActivityRequest{
+		ID:        taskID,
+		AgentID:   req.Coordinator,
+		Objective: req.Objective,
+		Budget:    Budget{Allocated: req.BudgetTokens},
+		Strategy:  req.Strategy,
+		Runtime:   req.Runtime,
+		Inputs: map[string]any{
+			"worktree_path": wtPath,
+			"branch":        branchName,
+			"coordinator":   req.Coordinator,
+		},
+		CreatedAt: time.Now(),
+	}
+
+	if s.store != nil {
+		if err := s.store.Enqueue(actReq); err != nil {
+			return nil, fmt.Errorf("service: failed to record task activity: %w", err)
+		}
+	}
+
+	if s.lifecycleStore != nil {
+		_ = s.lifecycleStore.Save(&HumanLifecycleRecord{
+			TaskID:    taskID,
+			UpdatedAt: time.Now(),
+		})
+	}
+
+	if s.journal != nil {
+		_ = s.journal.RecordIntent(IntentRecord{
+			IntentID:   fmt.Sprintf("intent-%s-begin", taskID),
+			ActivityID: taskID,
+			Action:     "begin_task",
+			Target:     branchName,
+			Status:     IntentCommitted,
+		})
+	}
+
+	return &BeginTaskResult{
+		TaskID:         taskID,
+		State:          TaskStateRunning,
+		Coordinator:    req.Coordinator,
+		WorktreePath:   wtPath,
+		WorktreeBranch: branchName,
+		CreatedAt:      actReq.CreatedAt,
+	}, nil
+}
+
+// AssignActivity records that the coordinator dispatched work to a specialist (Bob or Charlie).
+func (s *TeamServiceImpl) AssignActivity(ctx context.Context, req AssignActivityRequest) (*ActivityRef, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if strings.TrimSpace(req.TaskID) == "" {
+		return nil, fmt.Errorf("service: task_id is required")
+	}
+	if strings.TrimSpace(req.Agent) == "" {
+		return nil, fmt.Errorf("service: agent is required")
+	}
+
+	wtPath := s.workspaceDir
+	if s.wtMgr != nil {
+		if rec, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && rec != nil {
+			wtPath = rec.WorktreePath
+		}
+	}
+
+	role := req.Role
+	if role == "" {
+		if strings.EqualFold(req.Agent, "bob") || strings.Contains(strings.ToLower(req.Agent), "coder") {
+			role = "coder"
+		} else if strings.EqualFold(req.Agent, "charlie") || strings.Contains(strings.ToLower(req.Agent), "review") {
+			role = "reviewer"
+		} else {
+			role = "specialist"
+		}
+	}
+
+	actID := fmt.Sprintf("%s-%s-%d", req.TaskID, req.Agent, time.Now().UnixNano()%1000000)
+	actReq := ActivityRequest{
+		ID:        actID,
+		ParentID:  req.TaskID,
+		AgentID:   req.Agent,
+		Objective: req.Objective,
+		Inputs: map[string]any{
+			"role":          role,
+			"input":         req.Input,
+			"allowed_tools": req.AllowedTools,
+			"worktree_path": wtPath,
+		},
+		CreatedAt: time.Now(),
+	}
+
+	if s.store != nil {
+		if err := s.store.Enqueue(actReq); err != nil {
+			return nil, fmt.Errorf("service: failed to enqueue specialist activity: %w", err)
+		}
+	}
+
+	if s.journal != nil {
+		_ = s.journal.RecordIntent(IntentRecord{
+			IntentID:   fmt.Sprintf("intent-%s-assign", actID),
+			ActivityID: actID,
+			Action:     "assign_activity",
+			Target:     req.Agent,
+			Status:     IntentCommitted,
+		})
+	}
+
+	return &ActivityRef{
+		ActivityID:   actID,
+		TaskID:       req.TaskID,
+		Agent:        req.Agent,
+		Role:         role,
+		WorktreePath: wtPath,
+		AssignedAt:   actReq.CreatedAt,
+	}, nil
+}
+
+// RecordCheckpoint records intermediate progress and findings durably.
+func (s *TeamServiceImpl) RecordCheckpoint(ctx context.Context, req CheckpointRequest) (*CheckpointResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if strings.TrimSpace(req.TaskID) == "" {
+		return nil, fmt.Errorf("service: task_id is required")
+	}
+
+	wtPath := s.workspaceDir
+	if s.wtMgr != nil {
+		if rec, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && rec != nil {
+			wtPath = rec.WorktreePath
+		}
+	}
+
+	commit := ""
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cmd.Dir = wtPath
+	if out, err := cmd.Output(); err == nil {
+		commit = strings.TrimSpace(string(out))
+	}
+
+	chkID := fmt.Sprintf("chk-%s-%d", req.TaskID, time.Now().UnixNano()%1000000)
+	if s.memory != nil {
+		content := fmt.Sprintf("Checkpoint by %s: %s | Assumptions: %s | Findings: %s | Next: %s | SHA: %s",
+			req.Actor, req.Summary,
+			strings.Join(req.Assumptions, "; "),
+			strings.Join(req.Findings, "; "),
+			strings.Join(req.NextSteps, "; "),
+			commit,
+		)
+		key := fmt.Sprintf("checkpoint.%s.%s", req.TaskID, chkID)
+		_, _ = s.memory.Propose(key, content, req.Actor, req.ActivityID)
+	}
+
+	if s.journal != nil {
+		_ = s.journal.RecordIntent(IntentRecord{
+			IntentID:   fmt.Sprintf("intent-%s", chkID),
+			ActivityID: req.TaskID,
+			Action:     "checkpoint",
+			Target:     commit,
+			Status:     IntentCommitted,
+		})
+	}
+
+	return &CheckpointResult{
+		CheckpointID: chkID,
+		TaskID:       req.TaskID,
+		Actor:        req.Actor,
+		RecordedAt:   time.Now(),
+		SnapshotSHA:  commit,
+	}, nil
+}
+
+// CompleteActivity records completion of a specialist activity.
+func (s *TeamServiceImpl) CompleteActivity(ctx context.Context, req CompleteActivityRequest) (*HostActivityResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if strings.TrimSpace(req.ActivityID) == "" {
+		return nil, fmt.Errorf("service: activity_id is required")
+	}
+
+	var evidenceIDs []string
+	if req.ValidationEvidence != "" {
+		evidenceIDs = append(evidenceIDs, req.ValidationEvidence)
+	}
+
+	status := StatusCompleted
+	if !req.Success {
+		status = StatusFailed
+	}
+
+	result := ActivityResult{
+		ID:          req.ActivityID,
+		Status:      status,
+		EvidenceIDs: evidenceIDs,
+		Outputs: map[string]any{
+			"summary":        req.Summary,
+			"files_modified": req.FilesModified,
+			"evidence":       req.ValidationEvidence,
+			"actor":          req.Actor,
+		},
+	}
+
+	if s.store != nil {
+		_ = s.store.Complete(req.ActivityID, result)
+	}
+
+	if s.journal != nil {
+		_ = s.journal.RecordIntent(IntentRecord{
+			IntentID:   fmt.Sprintf("intent-%s-complete", req.ActivityID),
+			ActivityID: req.ActivityID,
+			Action:     "complete_activity",
+			Target:     req.Actor,
+			Status:     IntentCommitted,
+		})
+	}
+
+	return &HostActivityResult{
+		ActivityID:    req.ActivityID,
+		TaskID:        req.TaskID,
+		Actor:         req.Actor,
+		Status:        string(status),
+		Summary:       req.Summary,
+		FilesModified: req.FilesModified,
+		Evidence:      evidenceIDs,
+		CompletedAt:   time.Now(),
+	}, nil
+}
+
+// RecordReview records an independent reviewer verdict and validates non-mutating reviewer boundaries.
+func (s *TeamServiceImpl) RecordReview(ctx context.Context, req RecordReviewRequest) (*HostReviewResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if strings.TrimSpace(req.TaskID) == "" {
+		return nil, fmt.Errorf("service: task_id is required")
+	}
+	if strings.TrimSpace(req.Reviewer) == "" {
+		req.Reviewer = "charlie"
+	}
+
+	wtPath := s.workspaceDir
+	if s.wtMgr != nil {
+		if rec, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && rec != nil {
+			wtPath = rec.WorktreePath
+		}
+	}
+
+	// Non-Mutating Reviewer Boundary Invariant:
+	// Verify that the reviewer has NOT left uncommitted changes in the worktree.
+	cmdStat := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	cmdStat.Dir = wtPath
+	if out, err := cmdStat.CombinedOutput(); err == nil {
+		dirty := strings.TrimSpace(string(out))
+		if len(dirty) > 0 {
+			return nil, fmt.Errorf("governance: non-mutating reviewer invariant violated: reviewer %s produced workspace modifications (%s)", req.Reviewer, dirty)
+		}
+	}
+
+	commit := req.SnapshotSHA
+	if commit == "" {
+		cmdRev := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+		cmdRev.Dir = wtPath
+		if out, err := cmdRev.CombinedOutput(); err == nil {
+			commit = strings.TrimSpace(string(out))
+		}
+	}
+
+	revActID := fmt.Sprintf("%s-review-%d", req.TaskID, time.Now().UnixNano()%1000000)
+	isApproved := strings.EqualFold(req.Verdict, "approved")
+	revResult := ActivityResult{
+		ID:          revActID,
+		Status:      StatusCompleted,
+		EvidenceIDs: req.Findings,
+		Outputs: map[string]any{
+			"reviewer":     req.Reviewer,
+			"approved":     isApproved,
+			"comments":     req.Comments,
+			"verdict":      req.Verdict,
+			"snapshot_sha": commit,
+		},
+	}
+
+	if s.store != nil {
+		_ = s.store.Enqueue(ActivityRequest{
+			ID:        revActID,
+			ParentID:  req.TaskID,
+			AgentID:   req.Reviewer,
+			Objective: fmt.Sprintf("Independent code review of snapshot %s", commit),
+			CreatedAt: time.Now(),
+		})
+		_ = s.store.Complete(revActID, revResult)
+	}
+
+	targetState := TaskStateAwaitingHumanReview
+	if strings.EqualFold(req.Verdict, "rejected") {
+		targetState = TaskStateAwaitingDecision
+	} else if strings.EqualFold(req.Verdict, "revisions_requested") {
+		targetState = TaskStateRevisionRequested
+	}
+
+	if s.lifecycleStore != nil {
+		rec, _ := s.lifecycleStore.Get(req.TaskID)
+		if rec == nil {
+			rec = &HumanLifecycleRecord{
+				TaskID: req.TaskID,
+			}
+		}
+		rec.UpdatedAt = time.Now()
+		_ = s.lifecycleStore.Save(rec)
+	}
+
+	if s.journal != nil {
+		_ = s.journal.RecordIntent(IntentRecord{
+			IntentID:   fmt.Sprintf("intent-%s-review", revActID),
+			ActivityID: req.TaskID,
+			Action:     "record_review",
+			Target:     req.Verdict,
+			Status:     IntentCommitted,
+		})
+	}
+
+	return &HostReviewResult{
+		TaskID:         req.TaskID,
+		Reviewer:       req.Reviewer,
+		Verdict:        req.Verdict,
+		ReviewedAt:     time.Now(),
+		LifecycleState: targetState,
+		SnapshotSHA:    commit,
+	}, nil
+}
+

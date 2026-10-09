@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -116,6 +117,84 @@ func (s *Server) registerTools() {
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
 		),
 		s.handleIntegrate,
+	)
+
+	// 9. team_context
+	s.mcpServer.AddTool(
+		mcp.NewTool("team_context",
+			mcp.WithDescription("Retrieve environmental context: repository branch, head commit, team roster, active tasks, and recent architectural memories."),
+		),
+		s.handleContext,
+	)
+
+	// 10. team_begin_task
+	s.mcpServer.AddTool(
+		mcp.NewTool("team_begin_task",
+			mcp.WithDescription("Initialize an engineering task and allocate an isolated git worktree branch for host-native coordination without spawning an autonomous background LLM loop."),
+			mcp.WithString("objective", mcp.Required(), mcp.Description("Objective, specification, or instruction for the engineering assignment")),
+			mcp.WithNumber("budget_tokens", mcp.Description("Allocated token budget for execution (default: 50000)")),
+			mcp.WithString("strategy", mcp.Description("Execution strategy: direct, reviewed, or team (default: team)"), mcp.Enum("direct", "reviewed", "team")),
+			mcp.WithString("coordinator", mcp.Description("Coordinator agent identity (default: alice)")),
+			mcp.WithString("runtime", mcp.Description("Agent runtime environment: copilot, opencode, or antigravity")),
+		),
+		s.handleBeginTask,
+	)
+
+	// 11. team_assign_activity
+	s.mcpServer.AddTool(
+		mcp.NewTool("team_assign_activity",
+			mcp.WithDescription("Record assignment of a subtask to a specialist agent (Bob Coder, Charlie Reviewer) within the task's isolated worktree."),
+			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
+			mcp.WithString("agent", mcp.Required(), mcp.Description("Target specialist agent (e.g. bob, charlie)")),
+			mcp.WithString("role", mcp.Description("Role for the specialist: coder, reviewer, specialist")),
+			mcp.WithString("objective", mcp.Required(), mcp.Description("Specific subtask assignment objective")),
+			mcp.WithString("input", mcp.Description("Input parameters or context for the specialist")),
+		),
+		s.handleAssignActivity,
+	)
+
+	// 12. team_checkpoint
+	s.mcpServer.AddTool(
+		mcp.NewTool("team_checkpoint",
+			mcp.WithDescription("Persist an intermediate milestone, discovery, assumption, or snapshot SHA during host-native execution so progress survives host termination."),
+			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
+			mcp.WithString("activity_id", mcp.Description("Optional activity identifier")),
+			mcp.WithString("actor", mcp.Required(), mcp.Description("Reporting actor (e.g. alice, bob)")),
+			mcp.WithString("summary", mcp.Required(), mcp.Description("Summary of progress, observations, or discoveries")),
+			mcp.WithString("findings", mcp.Description("Semicolon-separated findings or discoveries")),
+			mcp.WithString("assumptions", mcp.Description("Semicolon-separated key assumptions made")),
+			mcp.WithString("next_steps", mcp.Description("Semicolon-separated next planned steps")),
+		),
+		s.handleCheckpoint,
+	)
+
+	// 13. team_complete_activity
+	s.mcpServer.AddTool(
+		mcp.NewTool("team_complete_activity",
+			mcp.WithDescription("Record completion of a specialist subtask with output summary, modified files, and validation evidence."),
+			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
+			mcp.WithString("activity_id", mcp.Required(), mcp.Description("The unique activity identifier")),
+			mcp.WithString("actor", mcp.Required(), mcp.Description("Completing actor (e.g. bob, charlie)")),
+			mcp.WithString("summary", mcp.Required(), mcp.Description("Summary of implemented changes or results")),
+			mcp.WithString("files_modified", mcp.Description("Comma-separated list of modified file paths")),
+			mcp.WithString("validation_evidence", mcp.Description("Verification command output or test evidence")),
+			mcp.WithBoolean("success", mcp.Description("Whether the activity succeeded (default: true)")),
+		),
+		s.handleCompleteActivity,
+	)
+
+	// 14. team_review_result
+	s.mcpServer.AddTool(
+		mcp.NewTool("team_review_result",
+			mcp.WithDescription("Record an independent code review verdict (approved, rejected, revisions_requested). Verifies that the reviewer did not produce any uncommitted mutations."),
+			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
+			mcp.WithString("reviewer", mcp.Description("Reviewer identity (default: charlie)")),
+			mcp.WithString("verdict", mcp.Required(), mcp.Description("Review verdict"), mcp.Enum("approved", "rejected", "revisions_requested")),
+			mcp.WithString("comments", mcp.Required(), mcp.Description("Detailed review comments and critique")),
+			mcp.WithString("findings", mcp.Description("Semicolon-separated review findings or issues")),
+			mcp.WithString("snapshot_sha", mcp.Description("Git snapshot SHA reviewed")),
+		),
+		s.handleReviewResult,
 	)
 }
 
@@ -288,6 +367,208 @@ func (s *Server) handleIntegrate(ctx context.Context, req mcp.CallToolRequest) (
 	return jsonResult(res)
 }
 
+func (s *Server) handleContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	res, err := s.service.GetTeamContext(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("get team context failed: %v", err)), nil
+	}
+	return jsonResult(res)
+}
+
+func (s *Server) handleBeginTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	objective, err := req.RequireString("objective")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'objective': %v", err)), nil
+	}
+
+	budget := req.GetFloat("budget_tokens", 50000.0)
+	strategy := req.GetString("strategy", "team")
+	coordinator := req.GetString("coordinator", "alice")
+	runtime := req.GetString("runtime", "")
+
+	res, err := s.service.BeginTask(ctx, a4c.BeginTaskRequest{
+		Objective:    objective,
+		BudgetTokens: budget,
+		Strategy:     a4c.ExecutionStrategy(strategy),
+		Coordinator:  coordinator,
+		Runtime:      runtime,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("begin task failed: %v", err)), nil
+	}
+	return jsonResult(res)
+}
+
+func (s *Server) handleAssignActivity(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
+	}
+	agent, err := req.RequireString("agent")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'agent': %v", err)), nil
+	}
+	objective, err := req.RequireString("objective")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'objective': %v", err)), nil
+	}
+
+	role := req.GetString("role", "")
+	input := req.GetString("input", "")
+
+	res, err := s.service.AssignActivity(ctx, a4c.AssignActivityRequest{
+		TaskID:    taskID,
+		Agent:     agent,
+		Role:      role,
+		Objective: objective,
+		Input:     input,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("assign activity failed: %v", err)), nil
+	}
+	return jsonResult(res)
+}
+
+func (s *Server) handleCheckpoint(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
+	}
+	actor, err := req.RequireString("actor")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'actor': %v", err)), nil
+	}
+	summary, err := req.RequireString("summary")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'summary': %v", err)), nil
+	}
+
+	activityID := req.GetString("activity_id", "")
+	findingsStr := req.GetString("findings", "")
+	assumptionsStr := req.GetString("assumptions", "")
+	nextStepsStr := req.GetString("next_steps", "")
+
+	var findings, assumptions, nextSteps []string
+	if findingsStr != "" {
+		for _, f := range splitClean(findingsStr, ";") {
+			findings = append(findings, f)
+		}
+	}
+	if assumptionsStr != "" {
+		for _, a := range splitClean(assumptionsStr, ";") {
+			assumptions = append(assumptions, a)
+		}
+	}
+	if nextStepsStr != "" {
+		for _, n := range splitClean(nextStepsStr, ";") {
+			nextSteps = append(nextSteps, n)
+		}
+	}
+
+	res, err := s.service.RecordCheckpoint(ctx, a4c.CheckpointRequest{
+		TaskID:      taskID,
+		ActivityID:  activityID,
+		Actor:       actor,
+		Summary:     summary,
+		Findings:    findings,
+		Assumptions: assumptions,
+		NextSteps:   nextSteps,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("record checkpoint failed: %v", err)), nil
+	}
+	return jsonResult(res)
+}
+
+func (s *Server) handleCompleteActivity(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
+	}
+	activityID, err := req.RequireString("activity_id")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'activity_id': %v", err)), nil
+	}
+	actor, err := req.RequireString("actor")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'actor': %v", err)), nil
+	}
+	summary, err := req.RequireString("summary")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'summary': %v", err)), nil
+	}
+
+	filesModifiedStr := req.GetString("files_modified", "")
+	var filesModified []string
+	if filesModifiedStr != "" {
+		filesModified = splitClean(filesModifiedStr, ",")
+	}
+
+	evidence := req.GetString("validation_evidence", "")
+	success := req.GetBool("success", true)
+
+	res, err := s.service.CompleteActivity(ctx, a4c.CompleteActivityRequest{
+		TaskID:             taskID,
+		ActivityID:         activityID,
+		Actor:              actor,
+		Summary:            summary,
+		FilesModified:      filesModified,
+		ValidationEvidence: evidence,
+		Success:            success,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("complete activity failed: %v", err)), nil
+	}
+	return jsonResult(res)
+}
+
+func (s *Server) handleReviewResult(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
+	}
+	verdict, err := req.RequireString("verdict")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'verdict': %v", err)), nil
+	}
+	comments, err := req.RequireString("comments")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'comments': %v", err)), nil
+	}
+
+	reviewer := req.GetString("reviewer", "charlie")
+	snapshotSHA := req.GetString("snapshot_sha", "")
+	findingsStr := req.GetString("findings", "")
+	var findings []string
+	if findingsStr != "" {
+		findings = splitClean(findingsStr, ";")
+	}
+
+	res, err := s.service.RecordReview(ctx, a4c.RecordReviewRequest{
+		TaskID:      taskID,
+		Reviewer:    reviewer,
+		Verdict:     verdict,
+		Comments:    comments,
+		Findings:    findings,
+		SnapshotSHA: snapshotSHA,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("record review failed: %v", err)), nil
+	}
+	return jsonResult(res)
+}
+
+func splitClean(s, sep string) []string {
+	var res []string
+	for _, part := range strings.Split(s, sep) {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			res = append(res, trimmed)
+		}
+	}
+	return res
+}
+
 func jsonResult(data any) (*mcp.CallToolResult, error) {
 	b, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -295,3 +576,4 @@ func jsonResult(data any) (*mcp.CallToolResult, error) {
 	}
 	return mcp.NewToolResultText(string(b)), nil
 }
+

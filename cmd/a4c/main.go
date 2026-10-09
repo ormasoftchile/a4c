@@ -37,6 +37,8 @@ func printUsage() {
 
 Commands:
   init [path]                           Initialize an a4c workspace (.a4c directory)
+  install <copilot|opencode|all>        Install host-native agent definitions (.github/agents, .opencode/agents)
+  doctor [--dir path] [--json]          Diagnose environment, host agents, and durable stores
   team list                             List persistent team members and permissions
   task submit <obj> [budget] [--strategy s] [--runtime r] [--model m] Submit a task (strategy: direct|reviewed|team)
   task list [--state s] [--status s] [--agent a] [--runtime r] Query tasks or activities
@@ -81,6 +83,12 @@ func main() {
 	case "init":
 		runInit(args)
 
+	case "install":
+		runInstall(args)
+
+	case "doctor":
+		runDoctor(args)
+
 	case "team":
 		runTeam(args)
 
@@ -110,6 +118,78 @@ func main() {
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %q. Run 'a4c help' for usage.\n", cmd)
+		os.Exit(1)
+	}
+}
+
+func runInstall(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: a4c install <copilot|opencode|antigravity|all> [--dir <path>]")
+		return
+	}
+	target := args[0]
+	workDir := "."
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--dir" && i+1 < len(args) {
+			workDir = args[i+1]
+			i++
+		}
+	}
+
+	switch target {
+	case "copilot":
+		if err := a4c.ExportCopilotAgents(workDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to install Copilot agents: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✅ Installed GitHub Copilot agents (.github/agents/a4c.agent.md, bob.agent.md, charlie.agent.md, .mcp.json) in %s\n", workDir)
+
+	case "opencode":
+		if err := a4c.ExportOpenCodeAgents(workDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to install OpenCode agents: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✅ Installed OpenCode agents (.opencode/agents/a4c.md, bob.md, charlie.md, opencode.json) in %s\n", workDir)
+
+	case "antigravity":
+		if err := a4c.ExportAntigravityCustomization(workDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to install Antigravity customization: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✅ Installed Antigravity skill customization in %s\n", workDir)
+
+	case "all":
+		_ = a4c.ExportCopilotAgents(workDir)
+		_ = a4c.ExportOpenCodeAgents(workDir)
+		_ = a4c.ExportAntigravityCustomization(workDir)
+		fmt.Printf("✅ Installed all host-native agent definitions (Copilot, OpenCode, Antigravity) in %s\n", workDir)
+
+	default:
+		fmt.Printf("Unknown install target %q. Available targets: copilot, opencode, antigravity, all\n", target)
+		os.Exit(1)
+	}
+}
+
+func runDoctor(args []string) {
+	workDir := "."
+	jsonOutput := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--dir" && i+1 < len(args) {
+			workDir = args[i+1]
+			i++
+		} else if args[i] == "--json" {
+			jsonOutput = true
+		}
+	}
+
+	rep := a4c.RunDoctor(workDir)
+	if jsonOutput {
+		b, _ := json.MarshalIndent(rep, "", "  ")
+		fmt.Println(string(b))
+	} else {
+		rep.Print()
+	}
+	if !rep.AllPassed {
 		os.Exit(1)
 	}
 }

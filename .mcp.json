@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "a4c": {
+      "args": [
+        "mcp"
+      ],
+      "command": "a4c"
+    }
+  }
+}

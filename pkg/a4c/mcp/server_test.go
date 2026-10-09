@@ -133,14 +133,20 @@ func TestMCPServer_ToolDiscovery(t *testing.T) {
 	}
 
 	expectedTools := map[string]bool{
-		"team_delegate":  false,
-		"team_list":      false,
-		"team_status":    false,
-		"team_result":    false,
-		"team_diff":      false,
-		"team_feedback":  false,
-		"team_accept":    false,
-		"team_integrate": false,
+		"team_delegate":          false,
+		"team_list":              false,
+		"team_status":            false,
+		"team_result":            false,
+		"team_diff":              false,
+		"team_feedback":          false,
+		"team_accept":            false,
+		"team_integrate":         false,
+		"team_context":           false,
+		"team_begin_task":        false,
+		"team_assign_activity":   false,
+		"team_checkpoint":        false,
+		"team_complete_activity": false,
+		"team_review_result":     false,
 	}
 
 	for _, tool := range toolsRes.Tools {
@@ -333,3 +339,165 @@ func TestMCPServer_AcceptAndIntegrateLifecycle(t *testing.T) {
 		t.Fatalf("expected state integrated, got %s", det.State)
 	}
 }
+
+func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
+	h := setupMCPHarness(t)
+	defer h.client.Close()
+
+	ctx := context.Background()
+
+	// 1. team_context
+	ctxRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      "team_context",
+			Arguments: map[string]any{},
+		},
+	})
+	if err != nil || ctxRes.IsError {
+		t.Fatalf("team_context failed: %v (%+v)", err, ctxRes)
+	}
+	var envCtx a4c.TeamContextResult
+	_ = json.Unmarshal([]byte(ctxRes.Content[0].(mcp.TextContent).Text), &envCtx)
+	if len(envCtx.TeamMembers) < 3 {
+		t.Fatalf("expected at least 3 team members, got %d", len(envCtx.TeamMembers))
+	}
+
+	// 2. team_begin_task
+	beginRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_begin_task",
+			Arguments: map[string]any{
+				"objective":   "Implement host-native math library",
+				"coordinator": "alice",
+				"runtime":     "copilot",
+			},
+		},
+	})
+	if err != nil || beginRes.IsError {
+		t.Fatalf("team_begin_task failed: %v (%+v)", err, beginRes)
+	}
+	var beginResult a4c.BeginTaskResult
+	_ = json.Unmarshal([]byte(beginRes.Content[0].(mcp.TextContent).Text), &beginResult)
+	if beginResult.TaskID == "" || beginResult.WorktreePath == "" {
+		t.Fatalf("invalid begin task result: %+v", beginResult)
+	}
+
+	// 3. team_assign_activity (Bob Coder)
+	assignRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_assign_activity",
+			Arguments: map[string]any{
+				"task_id":   beginResult.TaskID,
+				"agent":     "bob",
+				"role":      "coder",
+				"objective": "Add Add(a, b) function and tests",
+			},
+		},
+	})
+	if err != nil || assignRes.IsError {
+		t.Fatalf("team_assign_activity failed: %v (%+v)", err, assignRes)
+	}
+	var actRef a4c.ActivityRef
+	_ = json.Unmarshal([]byte(assignRes.Content[0].(mcp.TextContent).Text), &actRef)
+	if actRef.ActivityID == "" || actRef.Agent != "bob" {
+		t.Fatalf("invalid activity ref: %+v", actRef)
+	}
+
+	// 4. team_checkpoint
+	chkRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_checkpoint",
+			Arguments: map[string]any{
+				"task_id":     beginResult.TaskID,
+				"activity_id": actRef.ActivityID,
+				"actor":       "bob",
+				"summary":     "Designed function signatures; implementing tests",
+				"assumptions": "Pure Go with no external dependencies",
+				"findings":    "Repo is using Go 1.22",
+				"next_steps":  "Run go test",
+			},
+		},
+	})
+	if err != nil || chkRes.IsError {
+		t.Fatalf("team_checkpoint failed: %v (%+v)", err, chkRes)
+	}
+
+	// Simulate Bob modifying files in the worktree
+	mathFile := filepath.Join(beginResult.WorktreePath, "math.go")
+	_ = os.WriteFile(mathFile, []byte("package main\n\nfunc Add(a, b int) int { return a + b }\n"), 0644)
+	runGit(t, beginResult.WorktreePath, "add", "math.go")
+	runGit(t, beginResult.WorktreePath, "commit", "-m", "feat: add Add function")
+
+	// 5. team_complete_activity
+	compRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_complete_activity",
+			Arguments: map[string]any{
+				"task_id":             beginResult.TaskID,
+				"activity_id":         actRef.ActivityID,
+				"actor":               "bob",
+				"summary":             "Implemented Add(a, b int) in math.go",
+				"files_modified":      "math.go",
+				"validation_evidence": "All unit tests pass",
+				"success":             true,
+			},
+		},
+	})
+	if err != nil || compRes.IsError {
+		t.Fatalf("team_complete_activity failed: %v (%+v)", err, compRes)
+	}
+
+	// 6. team_review_result (Charlie Reviewer)
+	revRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_review_result",
+			Arguments: map[string]any{
+				"task_id":   beginResult.TaskID,
+				"reviewer":  "charlie",
+				"verdict":   "approved",
+				"comments":  "Clean implementation and non-breaking",
+				"findings":  "Zero regressions; clean style",
+			},
+		},
+	})
+	if err != nil || revRes.IsError {
+		t.Fatalf("team_review_result failed: %v (%+v)", err, revRes)
+	}
+	var revResult a4c.HostReviewResult
+	_ = json.Unmarshal([]byte(revRes.Content[0].(mcp.TextContent).Text), &revResult)
+	if revResult.LifecycleState != a4c.TaskStateAwaitingHumanReview {
+		t.Fatalf("expected state %s, got %s", a4c.TaskStateAwaitingHumanReview, revResult.LifecycleState)
+	}
+
+	// 7. team_accept & team_integrate
+	accRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_accept",
+			Arguments: map[string]any{
+				"task_id":  beginResult.TaskID,
+				"comments": "Approved for merge",
+			},
+		},
+	})
+	if err != nil || accRes.IsError {
+		t.Fatalf("team_accept failed: %v (%+v)", err, accRes)
+	}
+
+	intRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_integrate",
+			Arguments: map[string]any{
+				"task_id": beginResult.TaskID,
+			},
+		},
+	})
+	if err != nil || intRes.IsError {
+		t.Fatalf("team_integrate failed: %v (%+v)", err, intRes)
+	}
+
+	// Verify math.go now exists in root repo checkout!
+	if _, err := os.Stat(filepath.Join(h.repoDir, "math.go")); os.IsNotExist(err) {
+		t.Fatalf("math.go was not integrated into base checkout")
+	}
+}
+

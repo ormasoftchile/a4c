@@ -1,169 +1,188 @@
-# a4c: Agents for Coding
+# A4C: Agents for Coding — Host-Native Personal Engineering Team
 
-**a4c** is a persistent, local-first team of AI programmers operating under the deterministic execution authority of **YAWR** and powered by **GitHub Copilot**.
+**A4C** turns your existing coding agent into a **persistent, coordinated personal software engineering team**.
 
-The target user is **one individual software engineer managing their own group of persistent AI programmers**.
+Operating on the principle:
+> **The host runs the agents. A4C makes them a persistent, coordinated engineering team. YAWR governs consequential execution.**
 
-```
-                           +-------------------------------------+
-                           |        Human Software Engineer      |
-                           +------------------+------------------+
-                                              |
-                                              | Task Submission & Decisions
-                                              v
-+---------------------------------------------------------------------------------------------------+
-|                                  YAWR GOVERNANCE & EXECUTION RUNTIME                              |
-|                                                                                                   |
-|   +-----------------------+     +------------------------+     +------------------------------+   |
-|   |  Policy Governor      |     |  Durable Activity DAG  |     |  Durable Organizational      |   |
-|   |  - Role tool gates    |     |  - Dependency order    |     |    Memory Store              |   |
-|   |  - Budget reservations|     |  - Idempotent claim    |     |  - Verifier-gated promotion  |   |
-|   |  - Proposal dedup     |     |  - Human pause/resume  |     |  - Revision tracking         |   |
-|   +-----------------------+     +------------------------+     +------------------------------+   |
-|                                              |                                                    |
-|                                              | Governed Tool Calls & Activities                   |
-|                                              v                                                    |
-|   +-------------------------------------------------------------------------------------------+   |
-|   |                                  Deterministic Verifiers                                  |   |
-|   |  - Pre/Post Workspace Double-Hash Invariant (WorkspaceSnapshotID)                         |   |
-|   |  - Native Go Test Runner (go test ./... -> ExitCode: 0)                                   |   |
-|   |  - Pre-Mutation Intent Journal & Crash Reconciliation                                     |   |
-|   +-------------------------------------------------------------------------------------------+   |
-+---------------------------------------------------------------------------------------------------+
-                                              |
-               +------------------------------+------------------------------+
-               | (Independent Sessions)      | (Independent Sessions)       | (Independent Sessions)
-               v                             v                              v
-    +--------------------+        +--------------------+         +--------------------+
-    |   Alice (Lead)     |        |    Bob (Coder)     |         | Charlie (Reviewer) |
-    |  - Architecture    |        |  - Implementation  |         |  - Code Review     |
-    |  - Decomposition   |        |  - Governed Patch  |         |  - Evidence Check  |
-    |  - Delegation      |        |  - Native Repair   |         |  - Pass / Reject   |
-    +--------------------+        +--------------------+         +--------------------+
-               |                             |                              |
-               +-----------------------------+------------------------------+
-                                             |
-                                             v
-                           +-----------------------------------+
-                           |  Official GitHub Copilot Go SDK   |
-                           |  (Local Stdio CLI Connection)     |
-                           +-----------------------------------+
+A4C was inspired by **Squad** (the engineering team agent that operates inside GitHub Copilot). Instead of acting as a competing standalone conversational application, A4C operates natively inside **GitHub Copilot CLI**, **OpenCode**, and **Antigravity**.
+
+---
+
+## Architecture Overview
+
+```text
+Human Software Engineer
+       │
+       ▼
+GitHub Copilot CLI / OpenCode / Antigravity
+       │
+       ▼
+A4C Coordinator Agent (Alice — Lead Architect)
+       ├──► Host-native Bob subagent (Coder)
+       ├──► Host-native Charlie subagent (Reviewer — Read-Only)
+       └──► Other host-native specialists
+       │
+       ▼
+A4C Durable Coordination & State Layer (.a4c)
+       ├──► team_context          (environment, roster, active tasks)
+       ├──► team_begin_task       (isolated git worktree allocation)
+       ├──► team_assign_activity  (specialist task delegation)
+       ├──► team_checkpoint       (intermediate progress & snapshot persistence)
+       ├──► team_complete_activity(evidence-bound completion)
+       ├──► team_review_result    (non-mutating review verdict verification)
+       ├──► team_accept           (explicit human snapshot sign-off)
+       └──► team_integrate        (conflict-verified base repository merge)
+       │
+       ▼
+YAWR Governed Execution & CodeTopo Structural Intelligence
 ```
 
----
-
-## Core Principles
-
-1. **YAWR is the Sole Execution Authority**:
-   Agents own reasoning, hypothesis generation, and peer delegation. YAWR owns durable activity lifecycle, budgets, mutation authorization, and verifiable evidence. There is **no secondary LLM orchestrator**; scheduling is a deterministic Go engine.
-2. **Persistent Team Personas, Not Rigid Pipelines**:
-   The team consists of persistent personas (`lead`, `coder`, `reviewer`) with configurable charters, specialties, and role-restricted tools. Identities survive CLI restarts.
-3. **Idempotent Collaborative Delegation**:
-   Agents propose work for teammates (`governed_propose_activity`). YAWR authorizes proposals against parent budgets and deduplicates them across process interruptions and crash recovery.
-4. **DAG Dependency Enforcement**:
-   Subtasks dynamically declare dependencies (`DependsOn`). Downstream tasks (such as code review) are locked until upstream dependencies (code implementation and native tests) succeed.
-5. **Zero Hallucinated Validation**:
-   An agent stating "the code is fixed" is never accepted as evidence. Only native compiler and test exit codes (`0`) matching the exact workspace double-hash snapshot authorize transitions.
-6. **Shared Organizational Memory with Verifier-Gated Promotion**:
-   Model proposals for conventions or constraints are kept in a `proposed` holding state until verified by a test pass, reviewer approval, or human sign-off.
-7. **Human Leadership & Durable Escalation**:
-   The human engineer can assign work to the team, inspect open questions, approve/reject/reassign decisions, and resume execution.
+### Critical Architectural Invariants
+1. **Zero Secondary Inference in Host-Native Mode**:
+   Starting A4C inside Copilot or OpenCode does **NOT** cause A4C to initiate secondary SDK-managed model sessions. The hosting agent environment supplies reasoning, conversation, and native subagent dispatch.
+2. **Non-Mutating Reviewer Invariant**:
+   Charlie (Reviewer) is strictly read-only. A4C programmatically verifies git status before recording review verdicts; any reviewer modifications cause immediate rejection.
+3. **Cross-Host Task Portability**:
+   Engineering tasks, activity progress, checkpoints, and review states survive host restarts and transfer seamlessly across Copilot, OpenCode, and Antigravity.
 
 ---
 
-## Team Roster
+## Dual-Mode Contract
 
-| Member | Role | Allowed Tools | Specialties |
-| :--- | :--- | :--- | :--- |
-| **Alice (`lead`)** | Lead Architect & Planner | `governed_read_file`, `governed_propose_activity`, `governed_request_human_decision`, `governed_propose_memory` | Architecture, planning, delegation, triage |
-| **Bob (`coder`)** | Senior Software Engineer | `governed_read_file`, `governed_apply_patch`, `governed_propose_memory` | Implementation, refactoring, bugfix, Go |
-| **Charlie (`reviewer`)** | Quality & Verification Reviewer | `governed_read_file`, `governed_submit_review` | Code review, security, correctness, verification |
-
-*Non-coder agents (`lead`, `reviewer`) are strictly barred by the Policy Governor from invoking `governed_apply_patch`.*
+| Property | Mode A: Host-Native (Default Interactive) | Mode B: Headless (Automated CI / Benchmarking) |
+| :--- | :--- | :--- |
+| **Primary Interface** | `copilot --agent a4c` / `opencode --agent a4c` | `a4c run` / `a4c host` / Go test runner |
+| **Inference Source** | Host coding agent subscription & quotas | Direct Copilot SDK / OpenCode HTTP daemon |
+| **Agent Execution** | Host native subagents (`task` tool) | Standalone Go `TeamCoordinator` loop |
+| **Durable State** | A4C MCP Server (`a4c mcp`) & `.a4c/` | A4C Activity Store & Intent Journal |
+| **Reviewer Gate** | Host permissions + A4C worktree diff validation | Policy Governor tool restrictions |
 
 ---
 
-## Installation & Build
+## Installation & Setup
 
+Build the A4C CLI:
 ```bash
-cd /Users/cristianormazabal/Projects/a4c
 go build -o bin/a4c ./cmd/a4c
 ```
-
----
-
-## CLI Usage
 
 ### 1. Initialize Workspace
 ```bash
 ./bin/a4c init .
 ```
-Creates `.a4c/` containing the persistent team roster, activity DAG store, organizational memory, and pre-mutation journal.
+Initializes `.a4c/` storage for activities, persistent team roster, organizational memory, and journals.
 
-### 2. Inspect the Team
+### 2. Install Host-Native Agent Definitions
+Install for GitHub Copilot:
 ```bash
-./bin/a4c team list
+./bin/a4c install copilot
+```
+*Creates `.github/agents/a4c.agent.md`, `bob.agent.md`, `charlie.agent.md`, and `.mcp.json`.*
+
+Install for OpenCode:
+```bash
+./bin/a4c install opencode
+```
+*Creates `.opencode/agents/a4c.md`, `bob.md`, `charlie.md`, and `opencode.json`.*
+
+Install for all supported hosts:
+```bash
+./bin/a4c install all
 ```
 
-### 3. Submit a Feature Request
+### 3. Diagnose Environment
+Verify your configuration across git, durable stores, Copilot CLI, OpenCode, and Antigravity:
 ```bash
-./bin/a4c task submit "Implement Multiply(a, b int) int in calc.go and verify tests pass" 50000
-```
-
-### 4. Run the Governed Team Loop
-Run with simulated provider:
-```bash
-./bin/a4c run --steps 10
-```
-Or run with **real GitHub Copilot CLI** via the official Go SDK:
-```bash
-./bin/a4c run --real-copilot --steps 10
-```
-
-### 5. Inspect Workspace Status
-```bash
-./bin/a4c status
-```
-
-### 6. Review & Resolve Human Escalations
-```bash
-# List open questions from agents
-./bin/a4c decisions list
-
-# Resolve decision and resume execution
-./bin/a4c decisions resolve dec-12345 "Use SQLite for local storage" --approve
-```
-
-### 7. Inspect Verified Organizational Memory
-```bash
-./bin/a4c memory list
+./bin/a4c doctor
 ```
 
 ---
 
-## Testing & Verification
+## Interactive Host Usage
 
-### Deterministic Unit Test Suite (25 Tests)
-All 25 unit tests execute in ~1.5s with zero external API calls:
+### Running inside GitHub Copilot
+Launch Copilot with the A4C agent:
 ```bash
-go test -v -run "TestSpike|TestExtended|TestTeam" ./pkg/a4c
+copilot --agent a4c
+```
+Interact naturally:
+> *"Alice, investigate the failing test in calculation_test.go. Delegate the fix to Bob, have Charlie review the change, and report the result."*
+
+Alice will:
+1. Call `team_context` to inspect current team state and active tasks.
+2. Call `team_begin_task` to create an isolated worktree branch.
+3. Call `team_assign_activity` and dispatch Bob via Copilot's native `task` tool.
+4. Call `team_checkpoint` to record intermediate progress.
+5. Call `team_complete_activity` when Bob finishes with passing test evidence.
+6. Call `team_assign_activity` and dispatch Charlie via Copilot's native `task` tool for independent, read-only review.
+7. Call `team_review_result` to record the approved verdict.
+8. Report results directly to you in the Copilot chat.
+
+### Running inside OpenCode
+Launch OpenCode with the A4C primary agent:
+```bash
+opencode run --agent a4c "Investigate test failures, delegate to Bob, and have Charlie review."
+```
+OpenCode delegates to `@bob` and `@charlie` using its native subagent facility with strict permission boundaries (`edit: deny`, `write: deny` for Charlie).
+
+---
+
+## Cross-Host Task Continuity
+
+A4C allows work started in one environment to be seamlessly continued in another:
+
+1. **Start in Copilot**: Alice and Bob begin a complex refactoring in Copilot and record a checkpoint via `team_checkpoint`.
+2. **Host Session Ends**: The developer exits Copilot.
+3. **Resume in OpenCode**: The developer launches OpenCode (`opencode --agent a4c`). Alice reads `.a4c/` state via `team_context` and resumes the exact task ID, recognizing already-completed work without re-running earlier steps.
+4. **Independent Review & Merge**: Charlie reviews the changes, the developer approves via `a4c task accept <task-id>`, and integrates via `a4c task integrate <task-id>`.
+
+---
+
+## CLI Management & Diagnostics
+
+The CLI remains fully functional for inspection, auditing, and headless automation:
+
+```bash
+# Inspect task status, worktree, and lifecycle state
+./bin/a4c task inspect <task-id> [--json]
+
+# View review diffs before approval
+./bin/a4c task diff <task-id>
+
+# Submit human review feedback
+./bin/a4c task feedback <task-id> "Ensure nil checks are present"
+
+# Record explicit human approval of reviewed snapshot
+./bin/a4c task accept <task-id> "Approved for merge"
+
+# Integrate approved changes into base repository
+./bin/a4c task integrate <task-id>
+
+# Run MCP server manually
+./bin/a4c mcp
 ```
 
-Key test invariants verified:
-- `TestTeam_01_PersistentIdentitiesAndRestarts`: Persistent team identities survive process exit and disk reload.
-- `TestTeam_02_CollaborativeDelegationAndOrdering`: DAG dependency ordering (Lead -> Coder -> Reviewer).
-- `TestTeam_03_DuplicateDelegationPreventionAfterCrash`: Re-running parent does not duplicate child activities or double-spend budget.
-- `TestTeam_04_SharedOrganizationalMemory`: Model statements cannot be authoritative without verification; survives restarts.
-- `TestTeam_05_IndependentReviewWithEvidence`: Reviewer requires valid native test evidence; fails closed if files tampered post-test.
-- `TestTeam_06_HumanEscalationAndResumption`: Human pause/resolve cycle restores activity from `awaiting_human`.
-- `TestTeam_07_ToolPrivilegeSeparation`: Governor blocks Lead/Reviewer from mutating code.
+---
 
-### Live GitHub Copilot Integration Suite
-Requires local GitHub Copilot CLI (`gh auth status` active):
+## Verification & Test Suite
+
+Run unit and integration tests:
 ```bash
-RUN_REAL_COPILOT=1 go test -v -run TestRealCopilot ./pkg/a4c
+go test -short ./...
 ```
-Tests verified against live Copilot:
-- `TestRealCopilot_Connectivity`: Verifies stdio RPC connection and token streaming.
-- `TestRealCopilot_GovernedPatch`: Live model inspects Go code and applies patch via `governed_apply_patch`.
-- `TestRealCopilot_MultiAgentTeam`: Full live 2-agent collaboration (Lead delegates -> Coder implements -> native `go test` passes -> state survives restart).
+
+Run cross-host continuity test:
+```bash
+go test -v -run TestCrossHostContinuity ./pkg/a4c/...
+```
+
+Run reviewer boundary enforcement test:
+```bash
+go test -v -run TestReviewerBoundaryEnforcement ./pkg/a4c/...
+```
+
+Run MCP host-native flow test:
+```bash
+go test -v -run TestMCPServer_HostNativeCoordinationFlow ./pkg/a4c/mcp/...
+```

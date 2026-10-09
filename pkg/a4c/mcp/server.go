@@ -18,15 +18,22 @@ type Server struct {
 	mcpServer *server.MCPServer
 	service   a4c.TeamService
 	governed  *governed.Manager
+	role      string
 }
 
 // NewServer initializes an MCP server exposing canonical A4C team tools and YAWR-governed execution tools.
 func NewServer(service a4c.TeamService) *Server {
-	govMgr, _ := governed.NewManager(service, "")
+	return NewServerWithRole(service, "")
+}
+
+// NewServerWithRole initializes an MCP server filtered for a specific agent role boundary.
+func NewServerWithRole(service a4c.TeamService, role string) *Server {
+	govMgr, _ := governed.NewManagerWithRole(service, "", role)
 	s := &Server{
 		mcpServer: server.NewMCPServer("a4c-team", "1.0.0"),
 		service:   service,
 		governed:  govMgr,
+		role:      role,
 	}
 	s.registerTools()
 	return s
@@ -54,8 +61,19 @@ func (s *Server) ServeStdio() error {
 }
 
 func (s *Server) registerTools() {
+	role := strings.ToLower(s.role)
+	isLead := role == "lead" || role == "alice"
+	isCoder := role == "coder" || role == "bob"
+	isReviewer := role == "reviewer" || role == "charlie"
+
+	addTool := func(allowed bool, tool mcp.Tool, handler server.ToolHandlerFunc) {
+		if s.role == "" || allowed {
+			s.mcpServer.AddTool(tool, handler)
+		}
+	}
+
 	// 1. team_delegate
-	s.mcpServer.AddTool(
+	addTool(isLead,
 		mcp.NewTool("team_delegate",
 			mcp.WithDescription("Submit an engineering task to the autonomous personal software engineering team"),
 			mcp.WithString("objective", mcp.Required(), mcp.Description("Objective, specification, or instruction for the engineering assignment")),
@@ -68,7 +86,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 2. team_list
-	s.mcpServer.AddTool(
+	addTool(isLead,
 		mcp.NewTool("team_list",
 			mcp.WithDescription("List known engineering task assignments with their live lifecycle state and progress"),
 			mcp.WithString("state", mcp.Description("Filter by lifecycle state (queued, running, awaiting_decision, awaiting_human_review, accepted, integrated, rejected, failed)")),
@@ -79,7 +97,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 3. team_status
-	s.mcpServer.AddTool(
+	addTool(isLead || isCoder || isReviewer,
 		mcp.NewTool("team_status",
 			mcp.WithDescription("Inspect detailed live state, worktree branch, activity DAG, token metrics, and lifecycle facts for a task"),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -88,7 +106,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 4. team_result
-	s.mcpServer.AddTool(
+	addTool(isLead || isReviewer,
 		mcp.NewTool("team_result",
 			mcp.WithDescription("Retrieve final execution outputs, review verdict, reviewer comments, and validation evidence for a task"),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -97,7 +115,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 5. team_diff
-	s.mcpServer.AddTool(
+	addTool(isLead || isCoder || isReviewer,
 		mcp.NewTool("team_diff",
 			mcp.WithDescription("Inspect git diffs and file modifications made in the task worktree before approving"),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -106,7 +124,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 6. team_feedback
-	s.mcpServer.AddTool(
+	addTool(isLead,
 		mcp.NewTool("team_feedback",
 			mcp.WithDescription("Provide human review feedback and request revisions from the engineering team"),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -116,8 +134,8 @@ func (s *Server) registerTools() {
 		s.handleFeedback,
 	)
 
-	// 7. team_accept
-	s.mcpServer.AddTool(
+	// 7. team_accept (strictly human CLI boundary; omitted in roled MCP server)
+	addTool(false,
 		mcp.NewTool("team_accept",
 			mcp.WithDescription("Record explicit human approval of an exact reviewed snapshot. Note: AI agents are strictly prohibited from self-approving over MCP. Acceptance requires explicit human execution via CLI ('a4c task accept <task-id>')."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -126,8 +144,8 @@ func (s *Server) registerTools() {
 		s.handleAccept,
 	)
 
-	// 8. team_integrate
-	s.mcpServer.AddTool(
+	// 8. team_integrate (strictly human CLI boundary; omitted in roled MCP server)
+	addTool(false,
 		mcp.NewTool("team_integrate",
 			mcp.WithDescription("Integrate approved changes from an accepted task into the base repository working checkout. Note: AI agents are strictly prohibited from integrating over MCP. Integration requires explicit human execution via CLI ('a4c task integrate <task-id>')."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -136,7 +154,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 9. team_context
-	s.mcpServer.AddTool(
+	addTool(isLead,
 		mcp.NewTool("team_context",
 			mcp.WithDescription("Retrieve environmental context: repository branch, head commit, team roster, active tasks, and recent architectural memories."),
 		),
@@ -144,7 +162,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 10. team_begin_task
-	s.mcpServer.AddTool(
+	addTool(isLead,
 		mcp.NewTool("team_begin_task",
 			mcp.WithDescription("Initialize an engineering task and allocate an isolated git worktree branch for host-native coordination without spawning an autonomous background LLM loop."),
 			mcp.WithString("objective", mcp.Required(), mcp.Description("Objective, specification, or instruction for the engineering assignment")),
@@ -157,7 +175,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 11. team_assign_activity
-	s.mcpServer.AddTool(
+	addTool(isLead,
 		mcp.NewTool("team_assign_activity",
 			mcp.WithDescription("Record assignment of a subtask to a specialist agent (Bob Coder, Charlie Reviewer) within the task's isolated worktree."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -170,7 +188,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 12. team_checkpoint
-	s.mcpServer.AddTool(
+	addTool(isLead || isCoder || isReviewer,
 		mcp.NewTool("team_checkpoint",
 			mcp.WithDescription("Persist an intermediate milestone, discovery, assumption, or snapshot SHA during host-native execution so progress survives host termination."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -185,7 +203,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 13. team_complete_activity
-	s.mcpServer.AddTool(
+	addTool(isLead || isCoder,
 		mcp.NewTool("team_complete_activity",
 			mcp.WithDescription("Record completion of a specialist subtask with output summary, modified files, and validation evidence."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -200,7 +218,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 14. team_review_result
-	s.mcpServer.AddTool(
+	addTool(isReviewer,
 		mcp.NewTool("team_review_result",
 			mcp.WithDescription("Record an independent code review verdict (approved, rejected, revisions_requested). Verifies that the reviewer did not produce any uncommitted mutations."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -214,7 +232,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 15. governed_read_file
-	s.mcpServer.AddTool(
+	addTool(isLead || isCoder || isReviewer,
 		mcp.NewTool("governed_read_file",
 			mcp.WithDescription("Read an authorized file strictly inside the task's isolated worktree using the embedded YAWR execution engine."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -224,7 +242,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 16. governed_apply_patch
-	s.mcpServer.AddTool(
+	addTool(isCoder,
 		mcp.NewTool("governed_apply_patch",
 			mcp.WithDescription("Apply a snapshot-bound unified patch strictly inside the task worktree via YAWR's governed execution kernel. Recorded in durable dispatch store with replay detection."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -236,7 +254,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 17. governed_git_inspect
-	s.mcpServer.AddTool(
+	addTool(isLead || isReviewer,
 		mcp.NewTool("governed_git_inspect",
 			mcp.WithDescription("Inspect git status, diff, log, or commit SHA strictly inside the task worktree using the embedded YAWR engine."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -247,7 +265,7 @@ func (s *Server) registerTools() {
 	)
 
 	// 18. governed_run_tests
-	s.mcpServer.AddTool(
+	addTool(isCoder,
 		mcp.NewTool("governed_run_tests",
 			mcp.WithDescription("Execute bounded go test procedures in the task worktree and collect structured validation evidence via YAWR."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),

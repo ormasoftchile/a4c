@@ -653,9 +653,13 @@ func runHost(args []string) {
 
 func runMCP(args []string) {
 	workDir := "."
+	role := ""
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--dir" && i+1 < len(args) {
 			workDir = args[i+1]
+			i++
+		} else if (args[i] == "--role" || args[i] == "--agent") && i+1 < len(args) {
+			role = args[i+1]
 			i++
 		}
 	}
@@ -664,7 +668,7 @@ func runMCP(args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to initialize A4C service: %v\n", err)
 		os.Exit(1)
 	}
-	srv := a4cmcp.NewServer(svc)
+	srv := a4cmcp.NewServerWithRole(svc, role)
 	if err := srv.ServeStdio(); err != nil {
 		fmt.Fprintf(os.Stderr, "MCP server exited with error: %v\n", err)
 		os.Exit(1)

@@ -206,8 +206,9 @@ func TestTeamService_AcceptTask_DoesNotModifyWorkingCheckout(t *testing.T) {
 
 	// Explicitly accept task
 	accRes, err := h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{
-		TaskID:   ref.TaskID,
-		Comments: "LGTM!",
+		TaskID:     ref.TaskID,
+		Comments:   "LGTM!",
+		AcceptedBy: "human_cli",
 	})
 	if err != nil {
 		t.Fatalf("AcceptTask failed: %v", err)
@@ -232,7 +233,7 @@ func TestTeamService_AcceptTask_DoesNotModifyWorkingCheckout(t *testing.T) {
 	}
 
 	// Idempotency check: Cannot accept already accepted task
-	_, err = h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{TaskID: ref.TaskID})
+	_, err = h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{TaskID: ref.TaskID, AcceptedBy: "human_cli"})
 	if !errors.Is(err, a4c.ErrTaskAlreadyAccepted) {
 		t.Fatalf("expected ErrTaskAlreadyAccepted, got %v", err)
 	}
@@ -285,9 +286,12 @@ func TestTeamService_IntegrateTask_SuccessAndGuards(t *testing.T) {
 	}
 
 	// Accept task
-	accRes, err := h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{TaskID: ref.TaskID, Comments: "Approved"})
+	accRes, err := h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{TaskID: ref.TaskID, Comments: "Approved", AcceptedBy: "human_cli"})
 	if err != nil {
 		t.Fatalf("AcceptTask failed: %v", err)
+	}
+	if accRes.AcceptedSnapshot == "" {
+		t.Fatalf("expected non-empty AcceptedSnapshot")
 	}
 
 	// 2. Test Dirty Working Tree Guard
@@ -316,7 +320,7 @@ func TestTeamService_IntegrateTask_SuccessAndGuards(t *testing.T) {
 	}
 
 	// Reset worktree back to accepted commit
-	runGitCmd(t, wtRec.WorktreePath, "reset", "--hard", accRes.AcceptedSnapshot)
+	runGitCmd(t, wtRec.WorktreePath, "reset", "--hard", "HEAD~1")
 
 	// 4. Successful Integration
 	intRes, err := h.service.IntegrateTask(ctx, a4c.IntegrateTaskRequest{TaskID: ref.TaskID})

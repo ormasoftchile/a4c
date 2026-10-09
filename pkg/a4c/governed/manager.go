@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ormasoftchile/a4c/pkg/a4c"
 	"github.com/ormasoftchile/yawr/runtime/pkg/run"
@@ -31,10 +32,16 @@ type Manager struct {
 	registry tool.ToolRegistry
 	runtime  *governedRuntime
 	stateDir string
+	role     string
 }
 
 // NewManager initializes the YAWR registry, governed runtime, and ToolInvoker.
 func NewManager(service a4c.TeamService, stateDir string) (*Manager, error) {
+	return NewManagerWithRole(service, stateDir, "")
+}
+
+// NewManagerWithRole initializes the YAWR registry with an explicit agent role boundary.
+func NewManagerWithRole(service a4c.TeamService, stateDir, role string) (*Manager, error) {
 	if stateDir == "" {
 		stateDir = filepath.Join(service.WorkspaceDir(), ".a4c", "yawr-dispatch")
 	}
@@ -62,6 +69,7 @@ func NewManager(service a4c.TeamService, stateDir string) (*Manager, error) {
 		registry: reg,
 		runtime:  rt,
 		stateDir: stateDir,
+		role:     role,
 	}, nil
 }
 
@@ -129,8 +137,8 @@ func buildRegistry() tool.ToolRegistry {
 		Transport: tool.TransportNative,
 		Actions: map[string]*tool.ToolAction{
 			"run": {
-				Classification: &readOnly,
-				Description:    "Run bounded go test and collect structured validation evidence",
+				Classification: &mutating,
+				Description:    "Run bounded go test in an isolated disposable sandbox and collect structured validation evidence",
 				Args: map[string]*tool.ArgDef{
 					"task_id": {Type: "string", Required: true, Description: "Task identifier"},
 					"package": {Type: "string", Required: false, Description: "Go package to test (default: ./...)"},
@@ -155,38 +163,88 @@ func (m *Manager) BuildAuthority(ctx context.Context, taskID string) (tool.Invoc
 		return tool.InvocationAuthority{}, fmt.Errorf("governed: lookup worktree for %s: %w", taskID, err)
 	}
 
-	activeAgent := "alice"
+	// Build map of activity statuses to evaluate dependencies
+	activityStatus := make(map[string]a4c.ActivityStatus)
 	for _, act := range task.Activities {
-		if act.Status == a4c.StatusPending || act.Status == a4c.StatusClaimed {
+		activityStatus[act.ActivityID] = act.Status
+	}
+
+	activeAgent := "alice"
+	// 1. Look for newest currently claimed activity
+	for i := len(task.Activities) - 1; i >= 0; i-- {
+		act := task.Activities[i]
+		if act.Status == a4c.StatusClaimed {
 			activeAgent = act.AgentID
+			break
 		}
 	}
-	if activeAgent == "alice" && len(task.Activities) > 0 {
-		activeAgent = task.Activities[len(task.Activities)-1].AgentID
+
+	// 2. If none claimed, look for newest pending activity whose dependencies are met
+	if activeAgent == "alice" {
+		for i := len(task.Activities) - 1; i >= 0; i-- {
+			act := task.Activities[i]
+			if act.Status == a4c.StatusPending {
+				depsMet := true
+				for _, depID := range act.DependsOn {
+					if status, exists := activityStatus[depID]; !exists || status != a4c.StatusCompleted {
+						depsMet = false
+						break
+					}
+				}
+				if depsMet {
+					activeAgent = act.AgentID
+					break
+				}
+			}
+		}
 	}
+
+	if activeAgent == "alice" && len(task.Activities) > 0 {
+		activeAgent = task.Activities[0].AgentID
+	}
+
+	isCoder := strings.EqualFold(activeAgent, "bob") || strings.EqualFold(activeAgent, "coder")
+	isReviewer := strings.EqualFold(activeAgent, "charlie") || strings.EqualFold(activeAgent, "reviewer")
+
+	isActiveState := task.State == a4c.TaskStateRunning ||
+		task.State == a4c.TaskStateRevisionRequested ||
+		task.State == a4c.TaskStateQueued
+
+	isTerminalState := task.State == a4c.TaskStateAccepted ||
+		task.State == a4c.TaskStateIntegrated ||
+		task.State == a4c.TaskStateRejected
 
 	allowRead := true
 	allowMutating := false
+	effectiveAgent := activeAgent
 
-	// Role-based capability derivation from server-side active task and activity state
-	isCoder := strings.EqualFold(activeAgent, "bob") || strings.EqualFold(activeAgent, "coder")
-	isActiveState := task.State == a4c.TaskStateRunning || task.State == a4c.TaskStateRevisionRequested
-
-	if isCoder && isActiveState {
-		allowMutating = true
+	if m.role != "" {
+		if strings.EqualFold(m.role, "charlie") || strings.EqualFold(m.role, "reviewer") {
+			effectiveAgent = "charlie"
+			allowMutating = false // Reviewer is strictly non-mutating
+		} else if strings.EqualFold(m.role, "alice") || strings.EqualFold(m.role, "lead") {
+			effectiveAgent = "alice"
+			allowMutating = false // Lead coordinates, does not mutate
+		} else if strings.EqualFold(m.role, "bob") || strings.EqualFold(m.role, "coder") {
+			effectiveAgent = "bob"
+			if isCoder && isActiveState && !isTerminalState {
+				allowMutating = true
+			}
+		}
+	} else {
+		if isReviewer || isTerminalState || task.State == a4c.TaskStateAwaitingHumanReview {
+			effectiveAgent = "charlie"
+			allowMutating = false
+		} else if isCoder && isActiveState {
+			effectiveAgent = "bob"
+			allowMutating = true
+		} else {
+			effectiveAgent = activeAgent
+			allowMutating = false
+		}
 	}
 
-	// Strictly deny mutating capabilities during review or terminal states
-	if strings.EqualFold(activeAgent, "charlie") ||
-		strings.EqualFold(activeAgent, "reviewer") ||
-		task.State == a4c.TaskStateAwaitingHumanReview ||
-		task.State == a4c.TaskStateAccepted ||
-		task.State == a4c.TaskStateIntegrated ||
-		task.State == a4c.TaskStateRejected {
-		allowMutating = false
-	}
-
-	actor := fmt.Sprintf("a4c:%s:%s", activeAgent, taskID)
+	actor := fmt.Sprintf("a4c:%s:%s", effectiveAgent, taskID)
 
 	return tool.InvocationAuthority{
 		Actor:         actor,
@@ -304,7 +362,7 @@ func (r *governedRuntime) Invoke(ctx context.Context, toolName, action string, a
 		case "apply_patch":
 			patch, _ := args["patch"].(string)
 			expectedSnap, _ := args["expected_snapshot"].(string)
-			return r.executeApplyPatch(ctx, wtPath, patch, expectedSnap)
+			return r.executeApplyPatch(ctx, taskID, wtPath, patch, expectedSnap)
 		default:
 			return nil, fmt.Errorf("unknown action %q for workspace tool", action)
 		}
@@ -397,22 +455,60 @@ func (r *governedRuntime) executeReadFile(worktreePath, relPath string) (*tool.T
 	}, nil
 }
 
-func (r *governedRuntime) executeApplyPatch(ctx context.Context, worktreePath, patch, expectedSnapshot string) (*tool.ToolResult, error) {
+func validatePatchConfinement(patch string) error {
+	lines := strings.Split(patch, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				path := parts[1]
+				path = strings.TrimPrefix(path, "a/")
+				path = strings.TrimPrefix(path, "b/")
+				if path == "/dev/null" {
+					continue
+				}
+				if strings.Contains(path, "..") || filepath.IsAbs(path) {
+					return fmt.Errorf("%w: patch targets escaping path %q", ErrFilesystemEscape, path)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (r *governedRuntime) executeApplyPatch(ctx context.Context, taskID, worktreePath, patch, expectedSnapshot string) (*tool.ToolResult, error) {
 	if strings.TrimSpace(patch) == "" {
 		return nil, errors.New("patch content cannot be empty")
 	}
 
-	// 1. Snapshot Precondition Verification
+	if err := validatePatchConfinement(patch); err != nil {
+		return &tool.ToolResult{
+			ExitCode: 1,
+			Stderr:   err.Error(),
+		}, err
+	}
+
+	// Exclusive per-task lock to serialize mutations and prevent silent overwrites
+	unlock, err := a4c.AcquireTaskMutationLock(r.service.WorkspaceDir(), taskID)
+	if err != nil {
+		return nil, fmt.Errorf("acquire task mutation lock: %w", err)
+	}
+	defer unlock()
+
+	// 1. Snapshot Precondition Verification (strict content snapshot + git HEAD)
+	strictSnap, snapErr := a4c.NewStrictWorkspaceSnapshotter().ComputeSnapshot(worktreePath)
+	currentHead := ""
+	cmdRev := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cmdRev.Dir = worktreePath
+	if out, err := cmdRev.CombinedOutput(); err == nil {
+		currentHead = strings.TrimSpace(string(out))
+	}
+
 	if expectedSnapshot != "" {
-		cmdRev := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
-		cmdRev.Dir = worktreePath
-		out, err := cmdRev.CombinedOutput()
-		if err != nil {
-			return nil, fmt.Errorf("verify snapshot: rev-parse: %w", err)
-		}
-		currentHead := strings.TrimSpace(string(out))
-		if !strings.HasPrefix(currentHead, expectedSnapshot) && !strings.HasPrefix(expectedSnapshot, currentHead) {
-			return nil, fmt.Errorf("%w: expected %s, current worktree is at %s", ErrStaleSnapshot, expectedSnapshot, currentHead)
+		matchesStrict := (snapErr == nil && strictSnap == expectedSnapshot)
+		matchesHead := (currentHead != "" && (strings.HasPrefix(currentHead, expectedSnapshot) || strings.HasPrefix(expectedSnapshot, currentHead)))
+		if !matchesStrict && !matchesHead {
+			return nil, fmt.Errorf("%w: expected %s, current tree is at %s (HEAD %s)", ErrStaleSnapshot, expectedSnapshot, strictSnap, currentHead)
 		}
 	}
 
@@ -429,7 +525,17 @@ func (r *governedRuntime) executeApplyPatch(ctx context.Context, worktreePath, p
 	}
 	_ = tmpFile.Close()
 
-	// 3. Execute git apply strictly within worktree
+	// 3. Dry-run verify patch applicability before modifying working tree
+	cmdCheck := exec.CommandContext(ctx, "git", "apply", "--check", "--whitespace=nowarn", tmpFile.Name())
+	cmdCheck.Dir = worktreePath
+	if checkOut, checkErr := cmdCheck.CombinedOutput(); checkErr != nil {
+		return &tool.ToolResult{
+			ExitCode: 1,
+			Stderr:   string(checkOut),
+		}, fmt.Errorf("git apply --check failed: %s", string(checkOut))
+	}
+
+	// 4. Execute git apply strictly within worktree
 	cmdApply := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn", tmpFile.Name())
 	cmdApply.Dir = worktreePath
 	applyOut, applyErr := cmdApply.CombinedOutput()
@@ -440,17 +546,19 @@ func (r *governedRuntime) executeApplyPatch(ctx context.Context, worktreePath, p
 		}, fmt.Errorf("git apply failed: %s", string(applyOut))
 	}
 
-	// 4. Capture git status of modified files
+	// 5. Capture git status of modified files and compute new snapshot ID
 	cmdStatus := exec.CommandContext(ctx, "git", "status", "--porcelain")
 	cmdStatus.Dir = worktreePath
 	statusOut, _ := cmdStatus.CombinedOutput()
+	newSnap, _ := a4c.NewStrictWorkspaceSnapshotter().ComputeSnapshot(worktreePath)
 
 	return &tool.ToolResult{
 		ExitCode: 0,
 		Stdout:   fmt.Sprintf("Patch applied cleanly in worktree %s\n%s", worktreePath, string(statusOut)),
 		Output: map[string]any{
-			"applied":  true,
-			"modified": strings.TrimSpace(string(statusOut)),
+			"applied":     true,
+			"modified":    strings.TrimSpace(string(statusOut)),
+			"snapshot_id": newSnap,
 		},
 	}, nil
 }
@@ -499,22 +607,90 @@ func (r *governedRuntime) executeGitInspect(ctx context.Context, worktreePath, s
 	}, nil
 }
 
+func copyTree(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		name := info.Name()
+		if info.IsDir() {
+			if (name == ".git" || name == ".a4c") && path != src {
+				return filepath.SkipDir
+			}
+			rel, err := filepath.Rel(src, path)
+			if err != nil {
+				return err
+			}
+			return os.MkdirAll(filepath.Join(dst, rel), 0755)
+		}
+		if (name == ".git" || name == ".a4c") && path != src {
+			return nil
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(linkTarget, target)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
+}
+
 func (r *governedRuntime) executeRunTests(ctx context.Context, worktreePath, pkg string, race bool) (*tool.ToolResult, error) {
 	if pkg == "" {
 		pkg = "./..."
 	}
 
+	// 1. Snapshot worktree before test execution to verify immutability
+	beforeSnap, err := a4c.NewStrictWorkspaceSnapshotter().ComputeSnapshot(worktreePath)
+	if err != nil {
+		beforeSnap = ""
+	}
+
+	// 2. Create isolated disposable sandbox
+	sandboxDir, err := os.MkdirTemp("", "yawr-test-sandbox-*")
+	if err != nil {
+		return nil, fmt.Errorf("create test sandbox: %w", err)
+	}
+	defer os.RemoveAll(sandboxDir)
+
+	if err := copyTree(worktreePath, sandboxDir); err != nil {
+		return nil, fmt.Errorf("copy worktree to sandbox: %w", err)
+	}
+
+	// 3. Execute bounded go test in disposable sandbox
 	cmdArgs := []string{"test", "-v"}
 	if race {
 		cmdArgs = append(cmdArgs, "-race")
 	}
 	cmdArgs = append(cmdArgs, pkg)
 
+	startTime := time.Now()
 	cmd := exec.CommandContext(ctx, "go", cmdArgs...)
-	cmd.Dir = worktreePath
+	cmd.Dir = sandboxDir
 	cmd.Env = append(os.Environ(), "GOWORK=off")
 
 	out, err := cmd.CombinedOutput()
+	durationMs := time.Since(startTime).Milliseconds()
+
+	// 4. Verify invariant: original worktree was not modified by test execution
+	if beforeSnap != "" {
+		afterSnap, err := a4c.NewStrictWorkspaceSnapshotter().ComputeSnapshot(worktreePath)
+		if err == nil && beforeSnap != afterSnap {
+			return nil, fmt.Errorf("governance: test execution violated worktree invariant: worktree content modified (%s -> %s)", beforeSnap, afterSnap)
+		}
+	}
+
 	exitCode := 0
 	if err != nil {
 		exitCode = 1
@@ -526,6 +702,14 @@ func (r *governedRuntime) executeRunTests(ctx context.Context, worktreePath, pkg
 			ExitCode: exitCode,
 			Stdout:   string(out),
 			Stderr:   string(out),
+			Output: map[string]any{
+				"package":     pkg,
+				"race":        race,
+				"passed":      false,
+				"duration_ms": durationMs,
+				"sandbox":     "isolated",
+				"snapshot_id": beforeSnap,
+			},
 		}, fmt.Errorf("go test failed with exit code %d: %s", exitCode, string(out))
 	}
 
@@ -533,9 +717,12 @@ func (r *governedRuntime) executeRunTests(ctx context.Context, worktreePath, pkg
 		ExitCode: 0,
 		Stdout:   string(out),
 		Output: map[string]any{
-			"package": pkg,
-			"race":    race,
-			"passed":  true,
+			"package":     pkg,
+			"race":        race,
+			"passed":      true,
+			"duration_ms": durationMs,
+			"sandbox":     "isolated",
+			"snapshot_id": beforeSnap,
 		},
 	}, nil
 }

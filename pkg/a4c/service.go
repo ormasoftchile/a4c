@@ -465,10 +465,21 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 	// Only explicit human CLI execution (AcceptedBy == "human_cli" or "human") is authenticated.
 	// Agents and MCP callers are strictly unauthorized.
 	if req.AcceptedBy != "human_cli" && req.AcceptedBy != "human" {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "accept", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "unauthorized_caller", "caller": req.AcceptedBy,
+		})
 		return nil, fmt.Errorf("unauthorized: AI agents cannot approve their own work; manual execution via CLI ('a4c task accept %s') is required", req.TaskID)
 	}
 
 	snapshotID := s.resolveCurrentSnapshot(req.TaskID)
+	if reviewed := s.reviewedSnapshot(req.TaskID); reviewed != "" && snapshotID != "" && snapshotID != reviewed {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "accept", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "stale_or_unreviewed_snapshot", "reviewed_snapshot": reviewed, "current_snapshot": snapshotID,
+		})
+		return nil, fmt.Errorf("%w: current worktree snapshot %s does not match reviewed snapshot %s", ErrSnapshotMismatch, snapshotID, reviewed)
+	}
 
 	lifecycle.Accepted = true
 	lifecycle.AcceptedAt = time.Now()
@@ -483,6 +494,11 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 	if err := s.lifecycleStore.Save(lifecycle); err != nil {
 		return nil, fmt.Errorf("service: save acceptance: %w", err)
 	}
+
+	_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+		"op": "accept", "task_id": req.TaskID, "outcome": "approved",
+		"snapshot": snapshotID, "actor": req.AcceptedBy, "comments": req.Comments,
+	})
 
 	res := &AcceptResult{
 		TaskID:           req.TaskID,
@@ -506,10 +522,18 @@ func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRe
 	if lifecycle.Accepted {
 		currentSnapshot := s.resolveCurrentSnapshot(req.TaskID)
 		if lifecycle.AcceptedSnapshot != "" && currentSnapshot != "" && currentSnapshot != lifecycle.AcceptedSnapshot {
+			_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+				"op": "integrate", "task_id": req.TaskID, "outcome": "denied",
+				"reason": "snapshot_mismatch", "accepted_snapshot": lifecycle.AcceptedSnapshot, "current_snapshot": currentSnapshot,
+			})
 			return nil, fmt.Errorf("%w: accepted %s != current %s", ErrSnapshotMismatch, lifecycle.AcceptedSnapshot, currentSnapshot)
 		}
 	}
 	if state != TaskStateAccepted {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "integrate", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "task_not_accepted", "state": state,
+		})
 		return nil, fmt.Errorf("%w: task state is %s", ErrTaskNotAccepted, state)
 	}
 
@@ -771,18 +795,39 @@ func (s *TeamServiceImpl) deriveTaskState(rootID string) (TaskLifecycleState, *H
 	return TaskStateRunning, lifecycle, nil
 }
 
+// absPath resolves a possibly-relative path against the workspace directory (never the
+// process CWD). Relative worktree paths were previously resolved against CWD, which made
+// every snapshot lookup silently fail when the CLI ran from another directory.
+func (s *TeamServiceImpl) absPath(p string) string {
+	if p == "" {
+		p = "."
+	}
+	if !filepath.IsAbs(p) {
+		base, err := filepath.Abs(s.workspaceDir)
+		if err == nil {
+			p = filepath.Join(base, p)
+		}
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return abs
+}
+
+// resolveCurrentSnapshot returns the content-addressed identity of the task's worktree.
+// A git commit SHA is NOT used: it does not change when the working tree changes, so it
+// cannot bind an approval to what a human or reviewer actually saw.
 func (s *TeamServiceImpl) resolveCurrentSnapshot(taskID string) string {
-	workDir := s.workspaceDir
+	workDir := s.absPath(s.workspaceDir)
 	if s.wtMgr != nil {
 		if wt, err := s.wtMgr.GetWorktree(taskID); err == nil && wt != nil && wt.WorktreePath != "" {
-			workDir = wt.WorktreePath
+			workDir = s.absPath(wt.WorktreePath)
 		}
 	}
 
-	cmd := exec.Command("git", "rev-parse", "HEAD")
-	cmd.Dir = workDir
-	if out, err := cmd.CombinedOutput(); err == nil {
-		return strings.TrimSpace(string(out))
+	if id, err := NewStrictWorkspaceSnapshotter().ComputeSnapshot(workDir); err == nil {
+		return id
 	}
 
 	// Fallback to evidence snapshot if available
@@ -796,6 +841,53 @@ func (s *TeamServiceImpl) resolveCurrentSnapshot(taskID string) string {
 	}
 	return ""
 }
+
+// coderCompletionSnapshot returns the snapshot recorded by the most recent completed
+// non-reviewer activity of the task, or "" if none was recorded.
+func (s *TeamServiceImpl) coderCompletionSnapshot(taskID string) string {
+	var best string
+	var bestAt time.Time
+	for _, rec := range s.store.GetTaskTree(taskID) {
+		if rec.Result == nil || rec.Status != StatusCompleted {
+			continue
+		}
+		agent := strings.ToLower(rec.Request.AgentID)
+		if agent == "charlie" || agent == "reviewer" || strings.Contains(rec.Request.ID, "review") {
+			continue
+		}
+		snap, _ := rec.Result.Outputs["snapshot_id"].(string)
+		if snap == "" {
+			continue
+		}
+		if best == "" || rec.Request.CreatedAt.After(bestAt) {
+			best, bestAt = snap, rec.Request.CreatedAt
+		}
+	}
+	return best
+}
+
+// reviewedSnapshot returns the snapshot of the latest approved review, or "".
+func (s *TeamServiceImpl) reviewedSnapshot(taskID string) string {
+	var best string
+	var bestAt time.Time
+	for _, rec := range s.store.GetTaskTree(taskID) {
+		if rec.Result == nil || rec.Status != StatusCompleted {
+			continue
+		}
+		if approved, _ := rec.Result.Outputs["approved"].(bool); !approved {
+			continue
+		}
+		snap, _ := rec.Result.Outputs["snapshot_sha"].(string)
+		if snap == "" {
+			continue
+		}
+		if best == "" || rec.Request.CreatedAt.After(bestAt) {
+			best, bestAt = snap, rec.Request.CreatedAt
+		}
+	}
+	return best
+}
+
 
 func parseGitDiff(raw string) ([]FileDiff, int, int) {
 	if strings.TrimSpace(raw) == "" {
@@ -1091,11 +1183,13 @@ func (s *TeamServiceImpl) RecordCheckpoint(ctx context.Context, req CheckpointRe
 		}
 	}
 
-	commit := ""
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
-	cmd.Dir = wtPath
-	if out, err := cmd.Output(); err == nil {
-		commit = strings.TrimSpace(string(out))
+	commit := s.resolveCurrentSnapshot(req.TaskID)
+	if commit == "" {
+		cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+		cmd.Dir = wtPath
+		if out, err := cmd.Output(); err == nil {
+			commit = strings.TrimSpace(string(out))
+		}
 	}
 
 	chkID := fmt.Sprintf("chk-%s-%d", req.TaskID, time.Now().UnixNano()%1000000)
@@ -1160,6 +1254,11 @@ func (s *TeamServiceImpl) CompleteActivity(ctx context.Context, req CompleteActi
 			"actor":          req.Actor,
 		},
 	}
+	if req.TaskID != "" {
+		if snap := s.resolveCurrentSnapshot(req.TaskID); snap != "" {
+			result.Outputs["snapshot_id"] = snap
+		}
+	}
 
 	if s.store != nil {
 		_ = s.store.Complete(req.ActivityID, result)
@@ -1199,32 +1298,53 @@ func (s *TeamServiceImpl) RecordReview(ctx context.Context, req RecordReviewRequ
 		req.Reviewer = "charlie"
 	}
 
-	wtPath := s.workspaceDir
-	if s.wtMgr != nil {
-		if rec, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && rec != nil {
-			wtPath = rec.WorktreePath
+	current := s.resolveCurrentSnapshot(req.TaskID)
+
+	// A review is bound to the exact content snapshot the reviewer examined.
+	if req.SnapshotSHA != "" && current != "" && req.SnapshotSHA != current {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "review", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "stale_review_snapshot", "reviewer": req.Reviewer,
+			"claimed_snapshot": req.SnapshotSHA, "current_snapshot": current,
+		})
+		return nil, fmt.Errorf("%w: review references %s but worktree is at %s", ErrSnapshotMismatch, req.SnapshotSHA, current)
+	}
+
+	// Non-Mutating Reviewer Boundary Invariant (DETECTED, not prevented, at this layer):
+	// the worktree content must be identical to what it was when the coder completed.
+	// This replaces the earlier "worktree is dirty" test, which misclassified the coder's
+	// own uncommitted work as a reviewer mutation.
+	if baseline := s.coderCompletionSnapshot(req.TaskID); baseline != "" {
+		if current != "" && baseline != current {
+			_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+				"op": "review", "task_id": req.TaskID, "outcome": "denied",
+				"reason": "reviewer_invariant", "reviewer": req.Reviewer,
+				"baseline_snapshot": baseline, "current_snapshot": current,
+			})
+			return nil, fmt.Errorf("governance: non-mutating reviewer invariant violated: reviewer %s observed workspace changes since coder completion (snapshot %s -> %s)", req.Reviewer, baseline, current)
+		}
+	} else {
+		// No coder completion recorded yet: fall back to requiring a clean worktree.
+		wtPath := s.absPath(s.workspaceDir)
+		if s.wtMgr != nil {
+			if rec, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && rec != nil {
+				wtPath = s.absPath(rec.WorktreePath)
+			}
+		}
+		cmdStat := exec.CommandContext(ctx, "git", "status", "--porcelain")
+		cmdStat.Dir = wtPath
+		if out, err := cmdStat.CombinedOutput(); err == nil {
+			if dirty := strings.TrimSpace(string(out)); len(dirty) > 0 {
+				return nil, fmt.Errorf("governance: non-mutating reviewer invariant violated: reviewer %s produced workspace modifications (%s)", req.Reviewer, dirty)
+			}
 		}
 	}
 
-	// Non-Mutating Reviewer Boundary Invariant:
-	// Verify that the reviewer has NOT left uncommitted changes in the worktree.
-	cmdStat := exec.CommandContext(ctx, "git", "status", "--porcelain")
-	cmdStat.Dir = wtPath
-	if out, err := cmdStat.CombinedOutput(); err == nil {
-		dirty := strings.TrimSpace(string(out))
-		if len(dirty) > 0 {
-			return nil, fmt.Errorf("governance: non-mutating reviewer invariant violated: reviewer %s produced workspace modifications (%s)", req.Reviewer, dirty)
-		}
-	}
-
-	commit := req.SnapshotSHA
+	commit := current
 	if commit == "" {
-		cmdRev := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
-		cmdRev.Dir = wtPath
-		if out, err := cmdRev.CombinedOutput(); err == nil {
-			commit = strings.TrimSpace(string(out))
-		}
+		commit = req.SnapshotSHA
 	}
+
 
 	revActID := fmt.Sprintf("%s-review-%d", req.TaskID, time.Now().UnixNano()%1000000)
 	isApproved := strings.EqualFold(req.Verdict, "approved")

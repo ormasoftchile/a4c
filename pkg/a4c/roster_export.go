@@ -20,7 +20,7 @@ func ExportCopilotAgents(rootDir string) error {
 	aliceContent := `---
 name: a4c
 description: "Alice (Lead) — Governed personal engineering team coordinator. Coordinates investigation, implementation, and independent review."
-tools: ["*"]
+tools: ["read", "agent", "a4c/team_context", "a4c/team_list", "a4c/team_status", "a4c/team_result", "a4c/team_diff", "a4c/team_feedback", "a4c/team_begin_task", "a4c/team_assign_activity", "a4c/team_checkpoint", "a4c/team_complete_activity", "a4c/governed_read_file", "a4c/governed_git_inspect"]
 ---
 
 You are **Alice (Lead Architect & Engineering Coordinator)** of A4C (Agents for Coding).
@@ -54,7 +54,7 @@ You do NOT self-approve or integrate tasks (never call team_accept or team_integ
 	bobContent := `---
 name: bob
 description: "Bob (Coder) — Senior Software Engineer. Implements code changes via YAWR-governed tools, runs tests, and produces validation evidence."
-tools: ["*"]
+tools: ["read", "a4c/team_status", "a4c/team_checkpoint", "a4c/team_diff", "a4c/governed_read_file", "a4c/governed_apply_patch", "a4c/governed_run_tests"]
 ---
 
 You are **Bob (Senior Software Engineer)** of A4C (Agents for Coding).
@@ -76,7 +76,7 @@ Your responsibility is high-quality, minimal, deterministic code implementation.
 	charlieContent := `---
 name: charlie
 description: "Charlie (Reviewer) — Quality & Verification Reviewer. Independently reviews changes. Strictly read-only."
-tools: ["read", "bash"]
+tools: ["read", "a4c/team_status", "a4c/team_checkpoint", "a4c/team_diff", "a4c/team_review_result", "a4c/governed_read_file", "a4c/governed_git_inspect"]
 ---
 
 You are **Charlie (Quality & Verification Reviewer)** of A4C (Agents for Coding).
@@ -85,11 +85,10 @@ Your responsibility is independent, objective peer review of code changes and va
 ### Governed Verification Tools:
 - 'governed_git_inspect': Inspect git status, git diff, or commit SHA in the assigned worktree.
 - 'governed_read_file': Read files strictly within the task worktree.
-- 'governed_run_tests': Execute tests to independently verify test passage without modifying files.
 
 ### Strict Reviewer Invariant:
 - You NEVER edit, create, or modify code files. You are strictly read-only.
-- Mutating tools ('governed_apply_patch') and approval/integration tools ('team_accept', 'team_integrate') are strictly denied by server authority.
+- Mutating tools ('governed_apply_patch', 'governed_run_tests') and approval/integration tools ('team_accept', 'team_integrate') are strictly denied by server authority.
 - Evaluate code correctness, architectural consistency, test coverage, and safety.
 - Output your structured review verdict: Approved (true/false), Comments, and any Blockers/Findings.
 `
@@ -160,8 +159,19 @@ func ExportOpenCodeAgents(rootDir string) error {
 	aliceContent := `---
 description: "Alice (Lead) — Governed personal engineering team coordinator"
 mode: primary
-tools:
-  task: true
+permission:
+  edit: deny
+  write: deny
+  patch: deny
+  bash: deny
+  webfetch: deny
+  task:
+    "*": deny
+    bob: allow
+    charlie: allow
+  "a4c_governed_apply_patch": deny
+  "a4c_team_accept": deny
+  "a4c_team_integrate": deny
 ---
 
 You are **Alice (Lead Architect & Engineering Coordinator)** of A4C (Agents for Coding).
@@ -195,6 +205,16 @@ You do NOT self-approve or integrate tasks (never call team_accept or team_integ
 	bobContent := `---
 description: "Bob (Coder) — Senior Software Engineer implementing code changes and tests via YAWR-governed tools"
 mode: subagent
+permission:
+  edit: deny
+  write: deny
+  patch: deny
+  bash: deny
+  webfetch: deny
+  task: deny
+  "a4c_team_accept": deny
+  "a4c_team_integrate": deny
+  "a4c_team_review_result": deny
 ---
 
 You are **Bob (Senior Software Engineer)** of A4C.
@@ -218,16 +238,23 @@ mode: subagent
 permission:
   edit: deny
   write: deny
+  patch: deny
+  bash: deny
+  webfetch: deny
+  task: deny
+  "a4c_governed_apply_patch": deny
+  "a4c_governed_run_tests": deny
+  "a4c_team_accept": deny
+  "a4c_team_integrate": deny
 ---
 
 You are **Charlie (Quality & Verification Reviewer)** of A4C.
 You independently review code diffs and test evidence.
-You are strictly non-mutating: edit and write permissions are explicitly denied.
+You are strictly non-mutating: edit, write, bash, subagent delegation, and mutating MCP tools are explicitly denied.
 
 ### Governed Verification Tools:
 - 'governed_git_inspect': Inspect git status, git diff, or commit SHA in the assigned worktree.
 - 'governed_read_file': Read files strictly within the task worktree.
-- 'governed_run_tests': Execute tests to independently verify test passage without modifying files.
 
 ### Guidelines:
 - If an assigned worktree is specified, inspect git diffs inside that worktree using 'governed_git_inspect'.

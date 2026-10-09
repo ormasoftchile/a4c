@@ -270,7 +270,7 @@ func TestMCPServer_AcceptAndIntegrateLifecycle(t *testing.T) {
 	var ref a4c.TaskRef
 	_ = json.Unmarshal([]byte(delRes.Content[0].(mcp.TextContent).Text), &ref)
 
-	// Attempt integrate before acceptance -> must fail
+	// Attempt integrate via MCP -> must fail closed (unauthorized over MCP)
 	intReq := mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name: "team_integrate",
@@ -290,35 +290,47 @@ func TestMCPServer_AcceptAndIntegrateLifecycle(t *testing.T) {
 		Status: a4c.StatusCompleted,
 	})
 
-	// Call team_accept
+	// Call team_accept via MCP -> MUST FAIL CLOSED (Milestone 16 authorization hardening)
 	accReq := mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name: "team_accept",
 			Arguments: map[string]any{
 				"task_id":  ref.TaskID,
-				"comments": "Approved via MCP",
+				"comments": "Agent attempting self-approval",
 			},
 		},
 	}
-	accRes, err := h.client.CallTool(ctx, accReq)
-	if err != nil || accRes.IsError {
-		t.Fatalf("team_accept failed: %v (%+v)", err, accRes)
+	accRes, _ := h.client.CallTool(ctx, accReq)
+	if !accRes.IsError {
+		t.Fatalf("expected team_accept via MCP to fail closed with unauthorized, but succeeded")
 	}
 
-	var accResult a4c.AcceptResult
-	_ = json.Unmarshal([]byte(accRes.Content[0].(mcp.TextContent).Text), &accResult)
+	// Now perform authenticated human CLI acceptance
+	accResult, err := h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{
+		TaskID:     ref.TaskID,
+		Comments:   "Approved by operator CLI",
+		AcceptedBy: "human_cli",
+	})
+	if err != nil {
+		t.Fatalf("human CLI AcceptTask failed: %v", err)
+	}
 	if accResult.TaskID != ref.TaskID || accResult.AcceptedSnapshot == "" {
 		t.Fatalf("unexpected accResult: %+v", accResult)
 	}
 
-	// Call team_integrate
-	intRes2, err := h.client.CallTool(ctx, intReq)
-	if err != nil || intRes2.IsError {
-		t.Fatalf("team_integrate failed: %v (%+v)", err, intRes2)
+	// Call team_integrate via MCP -> MUST FAIL CLOSED (AI agents cannot integrate over MCP)
+	intResMCP, _ := h.client.CallTool(ctx, intReq)
+	if !intResMCP.IsError {
+		t.Fatalf("expected team_integrate via MCP to fail closed with unauthorized, but succeeded")
 	}
 
-	var intResult a4c.IntegrateResult
-	_ = json.Unmarshal([]byte(intRes2.Content[0].(mcp.TextContent).Text), &intResult)
+	// Execute authenticated human CLI integration
+	intResult, err := h.service.IntegrateTask(ctx, a4c.IntegrateTaskRequest{
+		TaskID: ref.TaskID,
+	})
+	if err != nil {
+		t.Fatalf("human CLI IntegrateTask failed: %v", err)
+	}
 	if intResult.TaskID != ref.TaskID {
 		t.Fatalf("unexpected intResult: %+v", intResult)
 	}
@@ -470,11 +482,12 @@ func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
 	}
 
 	// 7. team_accept & team_integrate
-	// Verify that unauthenticated MCP call (e.g. AI agent trying to self-approve) is rejected
+	// Verify that MCP call (e.g. AI agent trying to self-approve) is rejected
 	unauthRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name: "team_accept",
 			Arguments: map[string]any{
+				"taskID":   beginResult.TaskID,
 				"task_id":  beginResult.TaskID,
 				"comments": "Agent trying to self-approve",
 			},
@@ -484,22 +497,8 @@ func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
 		t.Fatalf("expected unauthenticated team_accept to fail, got %+v", unauthRes)
 	}
 
-	// Now authenticate with the human confirmation token
-	accRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_accept",
-			Arguments: map[string]any{
-				"task_id":            beginResult.TaskID,
-				"comments":          "Approved for merge by human engineer",
-				"confirmation_token": revResult.HumanConfirmationToken,
-			},
-		},
-	})
-	if err != nil || accRes.IsError {
-		t.Fatalf("authenticated team_accept failed: %v (%+v)", err, accRes)
-	}
-
-	intRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+	// Verify that MCP call to team_integrate is also rejected
+	unauthIntRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name: "team_integrate",
 			Arguments: map[string]any{
@@ -507,13 +506,141 @@ func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
 			},
 		},
 	})
-	if err != nil || intRes.IsError {
-		t.Fatalf("team_integrate failed: %v (%+v)", err, intRes)
+	if err != nil || !unauthIntRes.IsError {
+		t.Fatalf("expected unauthenticated team_integrate to fail, got %+v", unauthIntRes)
+	}
+
+	// Now perform authenticated human CLI acceptance
+	_, err = h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{
+		TaskID:     beginResult.TaskID,
+		Comments:   "Approved for merge by human engineer via CLI",
+		AcceptedBy: "human_cli",
+	})
+	if err != nil {
+		t.Fatalf("human CLI AcceptTask failed: %v", err)
+	}
+
+	// Now perform authenticated human CLI integration
+	_, err = h.service.IntegrateTask(ctx, a4c.IntegrateTaskRequest{
+		TaskID: beginResult.TaskID,
+	})
+	if err != nil {
+		t.Fatalf("human CLI IntegrateTask failed: %v", err)
 	}
 
 	// Verify math.go now exists in root repo checkout!
 	if _, err := os.Stat(filepath.Join(h.repoDir, "math.go")); os.IsNotExist(err) {
 		t.Fatalf("math.go was not integrated into base checkout")
+	}
+}
+
+func TestMCPServer_GovernedTools(t *testing.T) {
+	h := setupMCPHarness(t)
+	defer h.client.Close()
+
+	ctx := context.Background()
+
+	// 1. Begin a task to create worktree
+	beginRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_begin_task",
+			Arguments: map[string]any{
+				"objective": "Test governed execution tools",
+				"strategy":  "team",
+			},
+		},
+	})
+	if err != nil || beginRes.IsError {
+		t.Fatalf("team_begin_task failed: %v (%+v)", err, beginRes)
+	}
+	var bRes a4c.BeginTaskResult
+	_ = json.Unmarshal([]byte(beginRes.Content[0].(mcp.TextContent).Text), &bRes)
+
+	// Assign activity to Bob (coder) so mutating authority is granted
+	_, err = h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_assign_activity",
+			Arguments: map[string]any{
+				"task_id":   bRes.TaskID,
+				"agent":     "bob",
+				"role":      "coder",
+				"objective": "Implement test file",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("assign activity failed: %v", err)
+	}
+
+	// 2. governed_read_file on README.md
+	readRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "governed_read_file",
+			Arguments: map[string]any{
+				"task_id": bRes.TaskID,
+				"path":    "README.md",
+			},
+		},
+	})
+	if err != nil || readRes.IsError {
+		t.Fatalf("governed_read_file failed: %v (%+v)", err, readRes)
+	}
+
+	// 3. governed_git_inspect status
+	gitRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "governed_git_inspect",
+			Arguments: map[string]any{
+				"task_id":    bRes.TaskID,
+				"subcommand": "status",
+			},
+		},
+	})
+	if err != nil || gitRes.IsError {
+		t.Fatalf("governed_git_inspect failed: %v (%+v)", err, gitRes)
+	}
+
+	// 4. governed_apply_patch as Bob
+	patchText := `diff --git a/sample.txt b/sample.txt
+new file mode 100644
+--- /dev/null
++++ b/sample.txt
+@@ -0,0 +1,2 @@
++hello from governed patch
++verified by yawr
+`
+	patchRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "governed_apply_patch",
+			Arguments: map[string]any{
+				"task_id":         bRes.TaskID,
+				"patch":           patchText,
+				"idempotency_key": "patch-key-1",
+			},
+		},
+	})
+	if err != nil || patchRes.IsError {
+		t.Fatalf("governed_apply_patch failed: %v (%+v)", err, patchRes)
+	}
+
+	// 5. Verify replay of the identical patch
+	patchReplayRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "governed_apply_patch",
+			Arguments: map[string]any{
+				"task_id":         bRes.TaskID,
+				"patch":           patchText,
+				"idempotency_key": "patch-key-1",
+			},
+		},
+	})
+	if err != nil || patchReplayRes.IsError {
+		t.Fatalf("governed_apply_patch replay failed: %v (%+v)", err, patchReplayRes)
+	}
+	var repOut map[string]any
+	_ = json.Unmarshal([]byte(patchReplayRes.Content[0].(mcp.TextContent).Text), &repOut)
+	if repOut["replayed"] != true {
+		t.Errorf("expected replayed=true on identical key retry, got %+v", repOut)
 	}
 }
 

@@ -130,8 +130,8 @@ func TestMilestone14_CLI_MCP_Parity(t *testing.T) {
 		t.Fatalf("CLI inspect taskID mismatch: %s != %s", cliHistory.TaskID, taskID)
 	}
 
-	// 4. Accept via MCP
-	mcpAcceptRes, err := cli.CallTool(ctx, mcp.CallToolRequest{
+	// 4. Accept via MCP must fail closed (Milestone 16 security hardening)
+	mcpAcceptRes, _ := cli.CallTool(ctx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name: "team_accept",
 			Arguments: map[string]any{
@@ -140,8 +140,16 @@ func TestMilestone14_CLI_MCP_Parity(t *testing.T) {
 			},
 		},
 	})
-	if err != nil || mcpAcceptRes.IsError {
-		t.Fatalf("MCP team_accept failed: %v (%+v)", err, mcpAcceptRes)
+	if !mcpAcceptRes.IsError {
+		t.Fatalf("expected MCP team_accept to fail closed with unauthorized error, got success")
+	}
+
+	// Accept via CLI
+	cmdAccept := exec.Command(a4cBin, "task", "accept", taskID, "--comments", "Signed off via CLI")
+	cmdAccept.Dir = repoDir
+	outAccept, err := cmdAccept.CombinedOutput()
+	if err != nil {
+		t.Fatalf("a4c task accept failed: %s (%v)", string(outAccept), err)
 	}
 
 	// 5. Integrate via CLI

@@ -342,8 +342,24 @@ func runTask(args []string) {
 		return
 	}
 
+	workDir := "."
+	var cleanArgs []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--dir" && i+1 < len(args) {
+			workDir = args[i+1]
+			i++
+		} else {
+			cleanArgs = append(cleanArgs, args[i])
+		}
+	}
+	args = cleanArgs
+	if len(args) == 0 {
+		fmt.Println("Usage: a4c task <submit|list|history|inspect|diff|feedback|accept|integrate|reject> [options]")
+		return
+	}
+
 	ctx := context.Background()
-	svc, err := buildService(".")
+	svc, err := buildService(workDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Workspace not initialized. Run 'a4c init': %v\n", err)
 		os.Exit(1)
@@ -423,11 +439,11 @@ func runTask(args []string) {
 			return
 		}
 		taskID := args[1]
-		dotDir, storeDir, _, memDir, journalDir := getPaths(".")
+		dotDir, storeDir, _, memDir, journalDir := getPaths(workDir)
 		store, _ := a4c.NewDurableActivityStore(storeDir)
 		journal, _ := a4c.NewDurableIntentJournal(journalDir)
 		memStore, _ := a4c.NewDurableMemoryStore(memDir)
-		wtMgr, _ := a4c.NewWorktreeManager(".", filepath.Join(dotDir, "worktrees"))
+		wtMgr, _ := a4c.NewWorktreeManager(workDir, filepath.Join(dotDir, "worktrees"))
 
 		report, err := a4c.BuildTaskHistory(taskID, store, journal, wtMgr, memStore)
 		if err != nil {
@@ -451,11 +467,11 @@ func runTask(args []string) {
 			return
 		}
 
-		dotDir, storeDir, _, memDir, journalDir := getPaths(".")
+		dotDir, storeDir, _, memDir, journalDir := getPaths(workDir)
 		store, _ := a4c.NewDurableActivityStore(storeDir)
 		journal, _ := a4c.NewDurableIntentJournal(journalDir)
 		memStore, _ := a4c.NewDurableMemoryStore(memDir)
-		wtMgr, _ := a4c.NewWorktreeManager(".", filepath.Join(dotDir, "worktrees"))
+		wtMgr, _ := a4c.NewWorktreeManager(workDir, filepath.Join(dotDir, "worktrees"))
 		structStore, _ := a4c.NewDurableStructuralStore(filepath.Join(dotDir, "structural"))
 
 		report, err := a4c.BuildTaskHistory(taskID, store, journal, wtMgr, memStore)
@@ -474,7 +490,7 @@ func runTask(args []string) {
 			return
 		}
 
-		fmt.Print(report.FormatInspect(structStore, "."))
+		fmt.Print(report.FormatInspect(structStore, workDir))
 
 	case "diff":
 		if len(args) < 2 {

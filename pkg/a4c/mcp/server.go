@@ -9,19 +9,35 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/ormasoftchile/a4c/pkg/a4c"
+	"github.com/ormasoftchile/a4c/pkg/a4c/governed"
+	"github.com/ormasoftchile/yawr/runtime/pkg/tool"
 )
 
 // Server wraps the mark3labs MCP server with A4C team service handlers.
 type Server struct {
 	mcpServer *server.MCPServer
 	service   a4c.TeamService
+	governed  *governed.Manager
 }
 
-// NewServer initializes an MCP server exposing the 8 canonical A4C team tools.
+// NewServer initializes an MCP server exposing canonical A4C team tools and YAWR-governed execution tools.
 func NewServer(service a4c.TeamService) *Server {
+	govMgr, _ := governed.NewManager(service, "")
 	s := &Server{
 		mcpServer: server.NewMCPServer("a4c-team", "1.0.0"),
 		service:   service,
+		governed:  govMgr,
+	}
+	s.registerTools()
+	return s
+}
+
+// NewServerWithGoverned allows supplying an explicit governed Manager.
+func NewServerWithGoverned(service a4c.TeamService, gov *governed.Manager) *Server {
+	s := &Server{
+		mcpServer: server.NewMCPServer("a4c-team", "1.0.0"),
+		service:   service,
+		governed:  gov,
 	}
 	s.registerTools()
 	return s
@@ -103,10 +119,9 @@ func (s *Server) registerTools() {
 	// 7. team_accept
 	s.mcpServer.AddTool(
 		mcp.NewTool("team_accept",
-			mcp.WithDescription("Record explicit human approval of an exact reviewed snapshot. Note: AI agents are forbidden from self-approving. Requires authentic human confirmation token or CLI execution ('a4c task accept <task-id>')."),
+			mcp.WithDescription("Record explicit human approval of an exact reviewed snapshot. Note: AI agents are strictly prohibited from self-approving over MCP. Acceptance requires explicit human execution via CLI ('a4c task accept <task-id>')."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
 			mcp.WithString("comments", mcp.Description("Approval comments or sign-off notes")),
-			mcp.WithString("confirmation_token", mcp.Description("Human confirmation token required for MCP approval")),
 		),
 		s.handleAccept,
 	)
@@ -114,7 +129,7 @@ func (s *Server) registerTools() {
 	// 8. team_integrate
 	s.mcpServer.AddTool(
 		mcp.NewTool("team_integrate",
-			mcp.WithDescription("Integrate approved changes from an accepted task into the base repository working checkout. Verifies snapshot identity and clean working tree before merging."),
+			mcp.WithDescription("Integrate approved changes from an accepted task into the base repository working checkout. Note: AI agents are strictly prohibited from integrating over MCP. Integration requires explicit human execution via CLI ('a4c task integrate <task-id>')."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
 		),
 		s.handleIntegrate,
@@ -196,6 +211,51 @@ func (s *Server) registerTools() {
 			mcp.WithString("snapshot_sha", mcp.Description("Git snapshot SHA reviewed")),
 		),
 		s.handleReviewResult,
+	)
+
+	// 15. governed_read_file
+	s.mcpServer.AddTool(
+		mcp.NewTool("governed_read_file",
+			mcp.WithDescription("Read an authorized file strictly inside the task's isolated worktree using the embedded YAWR execution engine."),
+			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
+			mcp.WithString("path", mcp.Required(), mcp.Description("Relative file path within the task worktree")),
+		),
+		s.handleGovernedReadFile,
+	)
+
+	// 16. governed_apply_patch
+	s.mcpServer.AddTool(
+		mcp.NewTool("governed_apply_patch",
+			mcp.WithDescription("Apply a snapshot-bound unified patch strictly inside the task worktree via YAWR's governed execution kernel. Recorded in durable dispatch store with replay detection."),
+			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
+			mcp.WithString("patch", mcp.Required(), mcp.Description("Unified diff patch content to apply")),
+			mcp.WithString("expected_snapshot", mcp.Description("Expected git commit SHA prior to mutation")),
+			mcp.WithString("idempotency_key", mcp.Description("Optional idempotency key for deduplication")),
+		),
+		s.handleGovernedApplyPatch,
+	)
+
+	// 17. governed_git_inspect
+	s.mcpServer.AddTool(
+		mcp.NewTool("governed_git_inspect",
+			mcp.WithDescription("Inspect git status, diff, log, or commit SHA strictly inside the task worktree using the embedded YAWR engine."),
+			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
+			mcp.WithString("subcommand", mcp.Required(), mcp.Description("Subcommand: diff, status, log, rev-parse"), mcp.Enum("diff", "status", "log", "rev-parse")),
+			mcp.WithString("target", mcp.Description("Optional commit, branch, or file target")),
+		),
+		s.handleGovernedGitInspect,
+	)
+
+	// 18. governed_run_tests
+	s.mcpServer.AddTool(
+		mcp.NewTool("governed_run_tests",
+			mcp.WithDescription("Execute bounded go test procedures in the task worktree and collect structured validation evidence via YAWR."),
+			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
+			mcp.WithString("package", mcp.Description("Go package path to test (default: ./...)")),
+			mcp.WithBoolean("race", mcp.Description("Enable Go data race detector (default: true)")),
+			mcp.WithString("idempotency_key", mcp.Description("Optional idempotency key for deduplication")),
+		),
+		s.handleGovernedRunTests,
 	)
 }
 
@@ -361,14 +421,8 @@ func (s *Server) handleIntegrate(ctx context.Context, req mcp.CallToolRequest) (
 		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
 	}
 
-	res, err := s.service.IntegrateTask(ctx, a4c.IntegrateTaskRequest{
-		TaskID: taskID,
-	})
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("integrate task failed: %v", err)), nil
-	}
-
-	return jsonResult(res)
+	// AI agents cannot integrate work over MCP; manual human execution via CLI is strictly required.
+	return mcp.NewToolResultError(fmt.Sprintf("unauthorized: AI agents cannot integrate work into base workspace over MCP; manual execution via CLI ('a4c task integrate %s') is required", taskID)), nil
 }
 
 func (s *Server) handleContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -579,5 +633,143 @@ func jsonResult(data any) (*mcp.CallToolResult, error) {
 		return mcp.NewToolResultError(fmt.Sprintf("json serialization error: %v", err)), nil
 	}
 	return mcp.NewToolResultText(string(b)), nil
+}
+
+func (s *Server) handleGovernedReadFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.governed == nil {
+		return mcp.NewToolResultError("governed tool manager is not initialized"), nil
+	}
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
+	}
+	path, err := req.RequireString("path")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'path': %v", err)), nil
+	}
+
+	res, err := s.governed.ReadFile(ctx, taskID, path)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("governed read_file failed: %v", err)), nil
+	}
+	if res.Status == tool.InvocationStatusDenied {
+		return mcp.NewToolResultError(fmt.Sprintf("governed read_file denied: %s", res.ErrorMessage)), nil
+	}
+	if res.Status == tool.InvocationStatusFailed {
+		return mcp.NewToolResultError(fmt.Sprintf("governed read_file failed: %s\n%s", res.ErrorMessage, res.Stderr)), nil
+	}
+
+	return jsonResult(map[string]any{
+		"status":         res.Status,
+		"classification": res.Classification,
+		"content":        res.Stdout,
+		"duration_ms":    res.DurationMs,
+	})
+}
+
+func (s *Server) handleGovernedApplyPatch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.governed == nil {
+		return mcp.NewToolResultError("governed tool manager is not initialized"), nil
+	}
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
+	}
+	patch, err := req.RequireString("patch")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'patch': %v", err)), nil
+	}
+	expectedSnapshot := req.GetString("expected_snapshot", "")
+	idempotencyKey := req.GetString("idempotency_key", "")
+
+	res, err := s.governed.ApplyPatch(ctx, taskID, patch, expectedSnapshot, idempotencyKey)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("governed apply_patch failed: %v", err)), nil
+	}
+	if res.Status == tool.InvocationStatusDenied {
+		return mcp.NewToolResultError(fmt.Sprintf("governed apply_patch denied: %s", res.ErrorMessage)), nil
+	}
+	if res.Status == tool.InvocationStatusFailed {
+		return mcp.NewToolResultError(fmt.Sprintf("governed apply_patch failed: %s\n%s", res.ErrorMessage, res.Stderr)), nil
+	}
+
+	return jsonResult(map[string]any{
+		"status":          res.Status,
+		"classification":  res.Classification,
+		"occurrence_id":   res.OccurrenceID,
+		"idempotency_key": res.IdempotencyKey,
+		"replayed":        res.Replayed,
+		"stdout":          res.Stdout,
+		"duration_ms":     res.DurationMs,
+		"output":          res.Output,
+	})
+}
+
+func (s *Server) handleGovernedGitInspect(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.governed == nil {
+		return mcp.NewToolResultError("governed tool manager is not initialized"), nil
+	}
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
+	}
+	subcommand, err := req.RequireString("subcommand")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'subcommand': %v", err)), nil
+	}
+	target := req.GetString("target", "")
+
+	res, err := s.governed.GitInspect(ctx, taskID, subcommand, target)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("governed git_inspect failed: %v", err)), nil
+	}
+	if res.Status == tool.InvocationStatusDenied {
+		return mcp.NewToolResultError(fmt.Sprintf("governed git_inspect denied: %s", res.ErrorMessage)), nil
+	}
+	if res.Status == tool.InvocationStatusFailed {
+		return mcp.NewToolResultError(fmt.Sprintf("governed git_inspect failed: %s\n%s", res.ErrorMessage, res.Stderr)), nil
+	}
+
+	return jsonResult(map[string]any{
+		"status":         res.Status,
+		"classification": res.Classification,
+		"stdout":         res.Stdout,
+		"duration_ms":    res.DurationMs,
+	})
+}
+
+func (s *Server) handleGovernedRunTests(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.governed == nil {
+		return mcp.NewToolResultError("governed tool manager is not initialized"), nil
+	}
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
+	}
+	pkg := req.GetString("package", "./...")
+	race := req.GetBool("race", true)
+	idempotencyKey := req.GetString("idempotency_key", "")
+
+	res, err := s.governed.RunTests(ctx, taskID, pkg, race, idempotencyKey)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("governed run_tests failed: %v", err)), nil
+	}
+	if res.Status == tool.InvocationStatusDenied {
+		return mcp.NewToolResultError(fmt.Sprintf("governed run_tests denied: %s", res.ErrorMessage)), nil
+	}
+	if res.Status == tool.InvocationStatusFailed {
+		return mcp.NewToolResultError(fmt.Sprintf("governed run_tests failed: %s\n%s", res.ErrorMessage, res.Stderr)), nil
+	}
+
+	return jsonResult(map[string]any{
+		"status":          res.Status,
+		"classification":  res.Classification,
+		"occurrence_id":   res.OccurrenceID,
+		"replayed":        res.Replayed,
+		"stdout":          res.Stdout,
+		"exit_code":       res.ExitCode,
+		"duration_ms":     res.DurationMs,
+		"output":          res.Output,
+	})
 }
 

@@ -310,12 +310,11 @@ type RecordReviewRequest struct {
 
 // HostReviewResult confirms review verdict persistence.
 type HostReviewResult struct {
-	TaskID                 string             `json:"task_id"`
-	Reviewer               string             `json:"reviewer"`
-	Verdict                string             `json:"verdict"`
-	ReviewedAt             time.Time          `json:"reviewed_at"`
-	LifecycleState         TaskLifecycleState `json:"lifecycle_state"`
-	SnapshotSHA            string             `json:"snapshot_sha"`
-	HumanConfirmationToken string             `json:"human_confirmation_token,omitempty"`
+	TaskID         string             `json:"task_id"`
+	Reviewer       string             `json:"reviewer"`
+	Verdict        string             `json:"verdict"`
+	ReviewedAt     time.Time          `json:"reviewed_at"`
+	LifecycleState TaskLifecycleState `json:"lifecycle_state"`
+	SnapshotSHA    string             `json:"snapshot_sha"`
 }
 

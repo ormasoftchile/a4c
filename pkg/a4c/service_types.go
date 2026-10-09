@@ -43,19 +43,22 @@ type RevisionRecord struct {
 
 // HumanLifecycleRecord persists non-derivable human decisions for a task.
 type HumanLifecycleRecord struct {
-	TaskID           string           `json:"task_id"`
-	Accepted         bool             `json:"accepted"`
-	AcceptedAt       time.Time        `json:"accepted_at,omitempty"`
-	AcceptedSnapshot string           `json:"accepted_snapshot,omitempty"`
-	AcceptComments   string           `json:"accept_comments,omitempty"`
-	Integrated       bool             `json:"integrated"`
-	IntegratedAt     time.Time        `json:"integrated_at,omitempty"`
-	IntegratedCommit string           `json:"integrated_commit,omitempty"`
-	Rejected         bool             `json:"rejected"`
-	RejectedAt       time.Time        `json:"rejected_at,omitempty"`
-	RejectionReason  string           `json:"rejection_reason,omitempty"`
-	Revisions        []RevisionRecord `json:"revisions,omitempty"`
-	UpdatedAt        time.Time        `json:"updated_at"`
+	TaskID                 string           `json:"task_id"`
+	HumanConfirmationToken string           `json:"human_confirmation_token,omitempty"` // Secret token required for human approval via MCP
+	Accepted               bool             `json:"accepted"`
+	AcceptedAt             time.Time        `json:"accepted_at,omitempty"`
+	AcceptedBy             string           `json:"accepted_by,omitempty"`
+	AcceptedSnapshot       string           `json:"accepted_snapshot,omitempty"`
+	AcceptComments         string           `json:"accept_comments,omitempty"`
+	Integrated             bool             `json:"integrated"`
+	IntegratedAt           time.Time        `json:"integrated_at,omitempty"`
+	IntegratedBy           string           `json:"integrated_by,omitempty"`
+	IntegratedCommit       string           `json:"integrated_commit,omitempty"`
+	Rejected               bool             `json:"rejected"`
+	RejectedAt             time.Time        `json:"rejected_at,omitempty"`
+	RejectionReason        string           `json:"rejection_reason,omitempty"`
+	Revisions              []RevisionRecord `json:"revisions,omitempty"`
+	UpdatedAt              time.Time        `json:"updated_at"`
 }
 
 // SubmitTaskRequest parameters for task delegation.
@@ -150,8 +153,10 @@ type FeedbackRequest struct {
 
 // AcceptTaskRequest parameters for recording human approval.
 type AcceptTaskRequest struct {
-	TaskID   string `json:"task_id"`
-	Comments string `json:"comments,omitempty"`
+	TaskID            string `json:"task_id"`
+	Comments          string `json:"comments,omitempty"`
+	AcceptedBy        string `json:"accepted_by,omitempty"`
+	ConfirmationToken string `json:"confirmation_token,omitempty"`
 }
 
 // AcceptResult confirms human acceptance without modifying the working tree.
@@ -164,7 +169,9 @@ type AcceptResult struct {
 
 // IntegrateTaskRequest applies an accepted task to the working tree.
 type IntegrateTaskRequest struct {
-	TaskID string `json:"task_id"`
+	TaskID            string `json:"task_id"`
+	ConfirmationToken string `json:"confirmation_token,omitempty"`
+	IntegratedBy      string `json:"integrated_by,omitempty"`
 }
 
 // IntegrateResult confirms integration of approved changes.
@@ -303,11 +310,12 @@ type RecordReviewRequest struct {
 
 // HostReviewResult confirms review verdict persistence.
 type HostReviewResult struct {
-	TaskID         string             `json:"task_id"`
-	Reviewer       string             `json:"reviewer"`
-	Verdict        string             `json:"verdict"`
-	ReviewedAt     time.Time          `json:"reviewed_at"`
-	LifecycleState TaskLifecycleState `json:"lifecycle_state"`
-	SnapshotSHA    string             `json:"snapshot_sha"`
+	TaskID                 string             `json:"task_id"`
+	Reviewer               string             `json:"reviewer"`
+	Verdict                string             `json:"verdict"`
+	ReviewedAt             time.Time          `json:"reviewed_at"`
+	LifecycleState         TaskLifecycleState `json:"lifecycle_state"`
+	SnapshotSHA            string             `json:"snapshot_sha"`
+	HumanConfirmationToken string             `json:"human_confirmation_token,omitempty"`
 }
 

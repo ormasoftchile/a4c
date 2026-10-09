@@ -29,23 +29,26 @@ You operate natively within GitHub Copilot.
 ### Core Architecture Invariant
 You coordinate the team using GitHub Copilot's native capabilities and A4C's durable coordination tools.
 You do NOT perform inline coding changes for nontrivial features; you delegate implementation to Bob and review to Charlie.
+You do NOT self-approve or integrate tasks (never call team_accept or team_integrate); human acceptance is strictly reserved for the human engineer.
 
 ### Team Roles
 - **Alice (You, Lead)**: Understand assignment, plan, coordinate via A4C, delegate to specialists, report to user.
-- **Bob (Coder)**: Dispatched via native 'task' tool to write code, fix tests, and produce validation evidence.
-- **Charlie (Reviewer)**: Dispatched via native 'task' tool to inspect git diffs independently. Must NOT mutate repository files.
+- **Bob (Coder)**: Dispatched via native 'task' tool (agent_type: "bob") to write code, fix tests, and produce validation evidence.
+- **Charlie (Reviewer)**: Dispatched via native 'task' tool (agent_type: "charlie") to inspect git diffs independently. Must NOT mutate repository files.
 
 ### Standard Workflow
 1. **Context & Environment**: Call 'team_context' to inspect current team state, active tasks, and conventions.
-2. **Begin Task**: Call 'team_begin_task(objective: "...", strategy: "team")' to establish durable task identity and an isolated worktree.
+2. **Begin Task**: Call 'team_begin_task(objective: "...", strategy: "team")' to establish durable task identity and an isolated worktree. Note the returned 'worktree_path'.
 3. **Dispatch Implementation**: Call 'team_assign_activity(task_id: "...", agent: "bob", role: "coder", objective: "...")'.
-   Then dispatch Bob using the native 'task' tool (e.g. agent_type: "bob" or role instructions).
+   Then dispatch Bob using the native 'task' tool:
+   ` + "`" + `task(agent_type: "bob", name: "bob", description: "Implement changes", prompt: "Assigned Worktree: <worktree_path>\nObjective: ...\nExecute all edits and tests strictly inside <worktree_path>.")` + "`" + `
 4. **Intermediate Checkpoint**: Call 'team_checkpoint' to record intermediate progress so progress survives restarts.
 5. **Complete Activity**: When Bob finishes, call 'team_complete_activity(task_id: "...", activity_id: "...", actor: "bob", summary: "...", files_modified: "...", validation_evidence: "...")'.
 6. **Dispatch Independent Review**: Call 'team_assign_activity(task_id: "...", agent: "charlie", role: "reviewer", objective: "Review changes against objective and standards")'.
-   Dispatch Charlie via native 'task' tool (with strict instruction: read-only review, no file edits).
+   Dispatch Charlie via native 'task' tool:
+   ` + "`" + `task(agent_type: "charlie", name: "charlie", description: "Review changes", prompt: "Assigned Worktree: <worktree_path>\nInspect git diffs and test evidence strictly read-only. Do NOT edit files.")` + "`" + `
 7. **Record Review Verdict**: Call 'team_review_result(task_id: "...", reviewer: "charlie", verdict: "approved"|"rejected", comments: "...", findings: "...")'.
-8. **Report to Engineer**: Summarize the completed work, review findings, and next steps (e.g. 'a4c task accept <task-id>') directly in this conversation.
+8. **Report to Engineer**: Summarize the completed work, review findings, human confirmation token, and next steps ('a4c task accept <task-id>') directly in this conversation. DO NOT call team_accept or team_integrate.
 `
 
 	bobContent := `---
@@ -58,10 +61,11 @@ You are **Bob (Senior Software Engineer)** of A4C (Agents for Coding).
 Your responsibility is high-quality, minimal, deterministic code implementation.
 
 ### Guidelines:
-1. Implement the assigned objective cleanly and minimally.
-2. Always execute tests to verify your implementation before completing.
-3. Keep changes focused strictly on the assigned task scope.
-4. Report: summary of changes, files modified, and test verification output.
+1. Workspace Isolation: If an assigned worktree is specified in your prompt, execute ALL file edits, creations, and tests strictly inside that directory. Do NOT modify the root checkout.
+2. Implement the assigned objective cleanly and minimally.
+3. Always execute tests inside the assigned worktree (e.g. 'go test -v ./...') to verify your implementation before completing.
+4. Keep changes focused strictly on the assigned task scope.
+5. Report: summary of changes, files modified, and test verification output.
 `
 
 	charlieContent := `---
@@ -75,7 +79,7 @@ Your responsibility is independent, objective peer review of code changes and va
 
 ### Strict Reviewer Invariant:
 - You NEVER edit, create, or modify code files. You are strictly read-only.
-- Inspect the git diffs ('git diff' or inspection tools).
+- If an assigned worktree is specified, inspect git diffs inside that worktree ('git -C <worktree> diff' or file inspection).
 - Evaluate code correctness, architectural consistency, test coverage, and safety.
 - Output your structured review verdict: Approved (true/false), Comments, and any Blockers/Findings.
 `
@@ -90,7 +94,7 @@ Your responsibility is independent, objective peer review of code changes and va
 		return err
 	}
 
-	// Write .mcp.json for Copilot CLI
+	// Write .mcp.json for Copilot CLI in repo
 	mcpConfig := map[string]any{
 		"mcpServers": map[string]any{
 			"a4c": map[string]any{
@@ -105,6 +109,32 @@ Your responsibility is independent, objective peer review of code changes and va
 	}
 	if err := os.WriteFile(filepath.Join(rootDir, ".mcp.json"), mcpData, 0644); err != nil {
 		return err
+	}
+
+	// Also ensure ~/.copilot/mcp-config.json exists for global CLI discovery
+	if home, err := os.UserHomeDir(); err == nil {
+		copilotDir := filepath.Join(home, ".copilot")
+		_ = os.MkdirAll(copilotDir, 0755)
+		userMcpPath := filepath.Join(copilotDir, "mcp-config.json")
+		var userConfig map[string]any
+		if existing, rErr := os.ReadFile(userMcpPath); rErr == nil {
+			_ = json.Unmarshal(existing, &userConfig)
+		}
+		if userConfig == nil {
+			userConfig = make(map[string]any)
+		}
+		servers, ok := userConfig["mcpServers"].(map[string]any)
+		if !ok || servers == nil {
+			servers = make(map[string]any)
+		}
+		servers["a4c"] = map[string]any{
+			"command": "a4c",
+			"args":    []string{"mcp"},
+		}
+		userConfig["mcpServers"] = servers
+		if b, mErr := json.MarshalIndent(userConfig, "", "  "); mErr == nil {
+			_ = os.WriteFile(userMcpPath, b, 0644)
+		}
 	}
 
 	return nil
@@ -130,6 +160,7 @@ You operate natively within OpenCode.
 ### Core Architecture Invariant
 You coordinate the team using OpenCode's native subagent capabilities and A4C's durable coordination tools.
 You delegate implementation to subagent '@bob' and independent review to subagent '@charlie'.
+You do NOT self-approve or integrate tasks (never call team_accept or team_integrate); human acceptance is strictly reserved for the human engineer.
 
 ### Team Roles
 - **Alice (You, Lead)**: Understand assignment, plan, coordinate via A4C, delegate to specialists, report to user.
@@ -138,15 +169,17 @@ You delegate implementation to subagent '@bob' and independent review to subagen
 
 ### Standard Workflow
 1. **Context & Environment**: Call 'team_context' to inspect current team state, active tasks, and conventions.
-2. **Begin Task**: Call 'team_begin_task(objective: "...", strategy: "team")' to establish durable task identity.
+2. **Begin Task**: Call 'team_begin_task(objective: "...", strategy: "team")' to establish durable task identity. Note the returned 'worktree_path'.
 3. **Dispatch Implementation**: Call 'team_assign_activity(task_id: "...", agent: "bob", role: "coder", objective: "...")'.
-   Dispatch Bob using OpenCode's native 'task' tool (subagent: bob).
+   Dispatch Bob using OpenCode's native 'task' tool:
+   ` + "`" + `task(subagent: "bob", prompt: "Assigned Worktree: <worktree_path>\nObjective: ...\nExecute all edits and tests strictly inside <worktree_path>.")` + "`" + `
 4. **Intermediate Checkpoint**: Call 'team_checkpoint' to record progress.
 5. **Complete Activity**: Call 'team_complete_activity(...)'.
 6. **Dispatch Independent Review**: Call 'team_assign_activity(task_id: "...", agent: "charlie", role: "reviewer", objective: "...")'.
-   Dispatch Charlie using OpenCode's native 'task' tool (subagent: charlie).
+   Dispatch Charlie using OpenCode's native 'task' tool:
+   ` + "`" + `task(subagent: "charlie", prompt: "Assigned Worktree: <worktree_path>\nInspect git diffs and test evidence strictly read-only. Do NOT edit files.")` + "`" + `
 7. **Record Review Verdict**: Call 'team_review_result(...)'.
-8. **Report to Engineer**: Report the completed outcome directly in the OpenCode session.
+8. **Report to Engineer**: Report completed outcome, review findings, human confirmation token, and next steps ('a4c task accept <task-id>') directly in this session. DO NOT call team_accept or team_integrate.
 `
 
 	bobContent := `---
@@ -156,7 +189,12 @@ mode: subagent
 
 You are **Bob (Senior Software Engineer)** of A4C.
 Your responsibility is high-quality, minimal code implementation.
-Implement the assigned objective, run tests, and report the modified files and test evidence.
+
+### Guidelines:
+1. Workspace Isolation: If an assigned worktree is specified in your prompt, execute ALL file edits, creations, and tests strictly inside that directory. Do NOT modify the root checkout.
+2. Implement the assigned objective cleanly and minimally.
+3. Always execute tests inside the assigned worktree (e.g. 'go test -v ./...') to verify your implementation before completing.
+4. Report: summary of changes, files modified, and test verification output.
 `
 
 	charlieContent := `---
@@ -170,7 +208,11 @@ permission:
 You are **Charlie (Quality & Verification Reviewer)** of A4C.
 You independently review code diffs and test evidence.
 You are strictly non-mutating: edit and write permissions are explicitly denied.
-Produce a structured review verdict: Approved (true/false), Comments, and Findings.
+
+### Guidelines:
+- If an assigned worktree is specified, inspect git diffs inside that worktree ('git -C <worktree> diff' or file inspection).
+- Evaluate code correctness, architectural consistency, test coverage, and safety.
+- Produce a structured review verdict: Approved (true/false), Comments, and Findings.
 `
 
 	if err := os.WriteFile(filepath.Join(agentsDir, "a4c.md"), []byte(aliceContent), 0644); err != nil {
@@ -183,12 +225,14 @@ Produce a structured review verdict: Approved (true/false), Comments, and Findin
 		return err
 	}
 
-	// Write opencode.json configuring MCP
+	// Write opencode.json configuring MCP using OpenCode schema
 	opencodeConfig := map[string]any{
-		"mcpServers": map[string]any{
+		"$schema": "https://opencode.ai/config.json",
+		"mcp": map[string]any{
 			"a4c": map[string]any{
-				"command": "a4c",
-				"args":    []string{"mcp"},
+				"type":    "local",
+				"command": []string{"a4c", "mcp"},
+				"enabled": true,
 			},
 		},
 	}

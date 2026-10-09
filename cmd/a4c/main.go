@@ -529,17 +529,28 @@ func runTask(args []string) {
 
 	case "accept":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task accept <task-id> [comments]")
+			fmt.Println("Usage: a4c task accept <task-id> [comments] [--token <auth-token>]")
 			return
 		}
 		taskID := args[1]
 		comments := ""
-		if len(args) > 2 {
-			comments = strings.Join(args[2:], " ")
+		token := ""
+		for i := 2; i < len(args); i++ {
+			if (args[i] == "--token" || args[i] == "-t") && i+1 < len(args) {
+				token = args[i+1]
+				i++
+			} else {
+				if comments != "" {
+					comments += " "
+				}
+				comments += args[i]
+			}
 		}
 		res, err := svc.AcceptTask(ctx, a4c.AcceptTaskRequest{
-			TaskID:   taskID,
-			Comments: comments,
+			TaskID:            taskID,
+			Comments:          comments,
+			AcceptedBy:        "human_cli",
+			ConfirmationToken: token,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to accept task: %v\n", err)

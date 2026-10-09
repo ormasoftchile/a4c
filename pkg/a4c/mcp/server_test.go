@@ -470,17 +470,33 @@ func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
 	}
 
 	// 7. team_accept & team_integrate
-	accRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+	// Verify that unauthenticated MCP call (e.g. AI agent trying to self-approve) is rejected
+	unauthRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name: "team_accept",
 			Arguments: map[string]any{
 				"task_id":  beginResult.TaskID,
-				"comments": "Approved for merge",
+				"comments": "Agent trying to self-approve",
+			},
+		},
+	})
+	if err != nil || !unauthRes.IsError {
+		t.Fatalf("expected unauthenticated team_accept to fail, got %+v", unauthRes)
+	}
+
+	// Now authenticate with the human confirmation token
+	accRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_accept",
+			Arguments: map[string]any{
+				"task_id":            beginResult.TaskID,
+				"comments":          "Approved for merge by human engineer",
+				"confirmation_token": revResult.HumanConfirmationToken,
 			},
 		},
 	})
 	if err != nil || accRes.IsError {
-		t.Fatalf("team_accept failed: %v (%+v)", err, accRes)
+		t.Fatalf("authenticated team_accept failed: %v (%+v)", err, accRes)
 	}
 
 	intRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{

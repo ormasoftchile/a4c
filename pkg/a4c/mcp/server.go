@@ -103,9 +103,10 @@ func (s *Server) registerTools() {
 	// 7. team_accept
 	s.mcpServer.AddTool(
 		mcp.NewTool("team_accept",
-			mcp.WithDescription("Record explicit human approval of an exact reviewed snapshot. Note: does NOT modify the working checkout."),
+			mcp.WithDescription("Record explicit human approval of an exact reviewed snapshot. Note: AI agents are forbidden from self-approving. Requires authentic human confirmation token or CLI execution ('a4c task accept <task-id>')."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
 			mcp.WithString("comments", mcp.Description("Approval comments or sign-off notes")),
+			mcp.WithString("confirmation_token", mcp.Description("Human confirmation token required for MCP approval")),
 		),
 		s.handleAccept,
 	)
@@ -339,10 +340,13 @@ func (s *Server) handleAccept(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
 	}
 	comments := req.GetString("comments", "")
+	token := req.GetString("confirmation_token", "")
 
 	res, err := s.service.AcceptTask(ctx, a4c.AcceptTaskRequest{
-		TaskID:   taskID,
-		Comments: comments,
+		TaskID:            taskID,
+		Comments:          comments,
+		AcceptedBy:        "mcp_caller",
+		ConfirmationToken: token,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("accept task failed: %v", err)), nil

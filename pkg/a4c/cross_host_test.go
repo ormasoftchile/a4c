@@ -270,8 +270,10 @@ func (g *PaymentGateway) ProcessPayment(req PaymentRequest) bool {
 
 	// Step 11: Human accepts task
 	accRes, err := openCodeSvc.AcceptTask(ctx, a4c.AcceptTaskRequest{
-		TaskID:   taskID,
-		Comments: "Reviewed and approved across both Copilot and OpenCode sessions",
+		TaskID:            taskID,
+		Comments:          "Reviewed and approved across both Copilot and OpenCode sessions",
+		AcceptedBy:        "human",
+		ConfirmationToken: revResult.HumanConfirmationToken,
 	})
 	if err != nil {
 		t.Fatalf("opencode: AcceptTask failed: %v", err)

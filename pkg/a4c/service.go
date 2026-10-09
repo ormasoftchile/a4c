@@ -434,10 +434,23 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 			ErrTaskNotReadyForReview, state, TaskStateAwaitingHumanReview)
 	}
 
+	// Authenticate human approval boundary (Milestone 15 Section 7)
+	// Direct CLI execution (AcceptedBy == "human_cli" or "human") is authenticated.
+	// Calls via MCP or unauthenticated callers must supply the correct HumanConfirmationToken.
+	if lifecycle.HumanConfirmationToken != "" && req.AcceptedBy != "human_cli" && req.AcceptedBy != "human" {
+		if req.ConfirmationToken != lifecycle.HumanConfirmationToken {
+			return nil, fmt.Errorf("unauthorized: AI agents cannot approve their own work; valid human confirmation token required (or run 'a4c task accept %s' via CLI)", req.TaskID)
+		}
+	}
+
 	snapshotID := s.resolveCurrentSnapshot(req.TaskID)
 
 	lifecycle.Accepted = true
 	lifecycle.AcceptedAt = time.Now()
+	lifecycle.AcceptedBy = req.AcceptedBy
+	if lifecycle.AcceptedBy == "" {
+		lifecycle.AcceptedBy = "human"
+	}
 	lifecycle.AcceptedSnapshot = snapshotID
 	lifecycle.AcceptComments = req.Comments
 	lifecycle.Rejected = false
@@ -1221,6 +1234,7 @@ func (s *TeamServiceImpl) RecordReview(ctx context.Context, req RecordReviewRequ
 		targetState = TaskStateRevisionRequested
 	}
 
+	var confirmToken string
 	if s.lifecycleStore != nil {
 		rec, _ := s.lifecycleStore.Get(req.TaskID)
 		if rec == nil {
@@ -1228,6 +1242,10 @@ func (s *TeamServiceImpl) RecordReview(ctx context.Context, req RecordReviewRequ
 				TaskID: req.TaskID,
 			}
 		}
+		if targetState == TaskStateAwaitingHumanReview && rec.HumanConfirmationToken == "" {
+			rec.HumanConfirmationToken = fmt.Sprintf("human-auth-%08x", time.Now().UnixNano()%0xFFFFFFFF)
+		}
+		confirmToken = rec.HumanConfirmationToken
 		rec.UpdatedAt = time.Now()
 		_ = s.lifecycleStore.Save(rec)
 	}
@@ -1243,12 +1261,13 @@ func (s *TeamServiceImpl) RecordReview(ctx context.Context, req RecordReviewRequ
 	}
 
 	return &HostReviewResult{
-		TaskID:         req.TaskID,
-		Reviewer:       req.Reviewer,
-		Verdict:        req.Verdict,
-		ReviewedAt:     time.Now(),
-		LifecycleState: targetState,
-		SnapshotSHA:    commit,
+		TaskID:                 req.TaskID,
+		Reviewer:               req.Reviewer,
+		Verdict:                req.Verdict,
+		ReviewedAt:             time.Now(),
+		LifecycleState:         targetState,
+		SnapshotSHA:            commit,
+		HumanConfirmationToken: confirmToken,
 	}, nil
 }
 

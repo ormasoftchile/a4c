@@ -1,11 +1,13 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "mcpServers": {
+  "mcp": {
     "a4c": {
-      "args": [
+      "command": [
+        "a4c",
         "mcp"
       ],
-      "command": "a4c"
+      "enabled": true,
+      "type": "local"
     }
   }
 }

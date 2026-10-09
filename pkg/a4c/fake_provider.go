@@ -153,6 +153,18 @@ func NewFakeProvider() *FakeProvider {
 	}
 }
 
+func (p *FakeProvider) Capabilities() RuntimeCapabilities {
+	return RuntimeCapabilities{
+		GovernedCustomTools:    true,
+		GovernedProposalMode:   true,
+		NativeToolRestrictions: true,
+		SessionResumption:      true,
+		SessionCancellation:    true,
+		UsageReporting:         true,
+		ProviderTokenLimits:    true,
+	}
+}
+
 func (p *FakeProvider) SetSessionResponseFunc(fn FakeSessionResponseFunc) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

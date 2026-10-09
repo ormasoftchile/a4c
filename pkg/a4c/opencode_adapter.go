@@ -3,11 +3,14 @@ package a4c
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +40,7 @@ func NewOpenCodeProvider(endpoint, model string, mgr *OpenCodeServerManager) *Op
 		endpoint:     endpoint,
 		defaultModel: model,
 		serverMgr:    mgr,
-		httpClient:   &http.Client{Timeout: 120 * time.Second},
+		httpClient:   &http.Client{Timeout: 300 * time.Second},
 	}
 }
 
@@ -49,6 +52,19 @@ func (p *OpenCodeProvider) Close() error {
 		return p.serverMgr.Stop()
 	}
 	return nil
+}
+
+// Capabilities returns the explicit governance and technical guarantees supported by OpenCode.
+func (p *OpenCodeProvider) Capabilities() RuntimeCapabilities {
+	return RuntimeCapabilities{
+		GovernedCustomTools:    false,
+		GovernedProposalMode:   true,
+		NativeToolRestrictions: true,
+		SessionResumption:      true,
+		SessionCancellation:    true,
+		UsageReporting:         true,
+		ProviderTokenLimits:    true,
+	}
 }
 
 // ParseModelIdentifier splits a model string like "opencode-go/mimo-v2.5" into providerID and modelID.
@@ -150,48 +166,21 @@ func (p *OpenCodeProvider) buildSession(ctx context.Context, existingID string, 
 }
 
 func (p *OpenCodeProvider) buildPermissionRules(config AgentConfig) []map[string]string {
-	// Base P0 security boundary: bash and task are ALWAYS strictly denied
+	// Base P0 security boundary: all native mutations and shell executions strictly denied at session level
 	rules := []map[string]string{
 		{"permission": "bash", "pattern": "*", "action": "deny"},
 		{"permission": "task", "pattern": "*", "action": "deny"},
+		{"permission": "write", "pattern": "*", "action": "deny"},
+		{"permission": "edit", "pattern": "*", "action": "deny"},
+		{"permission": "patch", "pattern": "*", "action": "deny"},
 		{"permission": "webfetch", "pattern": "*", "action": "deny"},
 		{"permission": "websearch", "pattern": "*", "action": "deny"},
 		{"permission": "question", "pattern": "*", "action": "deny"},
 		{"permission": "skill", "pattern": "*", "action": "deny"},
+		{"permission": "read", "pattern": "*", "action": "allow"},
+		{"permission": "glob", "pattern": "*", "action": "allow"},
+		{"permission": "grep", "pattern": "*", "action": "allow"},
 	}
-
-	isCoder := config.AgentID == "coder" || strings.Contains(config.AgentID, "coder")
-	canMutate := false
-
-	if config.Profile != nil {
-		for _, t := range config.Profile.AllowedTools {
-			if t == "governed_apply_patch" || t == "write" || t == "edit" {
-				canMutate = true
-			}
-		}
-	} else if isCoder {
-		canMutate = true
-	}
-
-	if canMutate {
-		rules = append(rules,
-			map[string]string{"permission": "write", "pattern": "*", "action": "allow"},
-			map[string]string{"permission": "edit", "pattern": "*", "action": "allow"},
-		)
-	} else {
-		rules = append(rules,
-			map[string]string{"permission": "write", "pattern": "*", "action": "deny"},
-			map[string]string{"permission": "edit", "pattern": "*", "action": "deny"},
-		)
-	}
-
-	// Read tools are safe and read-only
-	rules = append(rules,
-		map[string]string{"permission": "read", "pattern": "*", "action": "allow"},
-		map[string]string{"permission": "glob", "pattern": "*", "action": "allow"},
-		map[string]string{"permission": "grep", "pattern": "*", "action": "allow"},
-	)
-
 	return rules
 }
 
@@ -205,6 +194,7 @@ type OpenCodeSessionAdapter struct {
 	modelID              string
 	usage                UsageInfo
 	turnCount            int
+	toolCallCount        int
 	providerWaitDuration time.Duration
 	toolDuration         time.Duration
 	closed               bool
@@ -301,10 +291,13 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 	modelID := s.modelID
 	s.mu.Unlock()
 
-	// Tool toggles: strictly deny bash, task, and unauthorized tools
+	// Tool toggles: strictly deny bash, task, and all mutations.
+	// In Governed Proposal Mode (Zero-Authority Runtime), OpenCode is strictly read-only.
 	toolsMap := map[string]bool{
 		"bash":      false,
 		"task":      false,
+		"write":     false,
+		"edit":      false,
 		"patch":     false,
 		"webfetch":  false,
 		"websearch": false,
@@ -315,16 +308,19 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 		"grep":      true,
 	}
 
+	promptText := prompt
 	isCoder := s.config.AgentID == "coder" || strings.Contains(s.config.AgentID, "coder")
 	if isCoder {
-		toolsMap["write"] = true
-		toolsMap["edit"] = true
-	} else {
-		toolsMap["write"] = false
-		toolsMap["edit"] = false
+		promptText += "\n\n[GOVERNANCE INSTRUCTION FOR CODER]:\n" +
+			"You operate in Governed Proposal Mode with zero native write permissions.\n" +
+			"To modify files, output patch blocks formatted as:\n" +
+			"[PROPOSE_PATCH: path=\"relative/path/to/file.ext\"]\n" +
+			"```\n" +
+			"<file content>\n" +
+			"```\n" +
+			"[END_PATCH]\n" +
+			"A4C PolicyGovernor and DurableIntentJournal will pre-authorize, record durable intent, and safely apply the changes."
 	}
-
-	promptText := prompt
 	if s.config.AgentID == "reviewer" {
 		promptText += "\n\n[INSTRUCTION]: If approving the changes, include [REVIEW_APPROVED] in your response. If rejecting, include [REVIEW_REJECTED: reason]."
 	}
@@ -426,11 +422,30 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 	content := sb.String()
 
 	s.mu.Lock()
-	s.usage.PromptTokens += msgResp.Info.Tokens.Input
-	s.usage.CompletionTokens += msgResp.Info.Tokens.Output
-	s.usage.TotalTokens += msgResp.Info.Tokens.Total
-	s.usage.ReasoningTokens += msgResp.Info.Tokens.Reasoning
-	s.usage.CachedTokens += msgResp.Info.Tokens.Cache.Read
+	in := msgResp.Info.Tokens.Input
+	out := msgResp.Info.Tokens.Output
+	reasoning := msgResp.Info.Tokens.Reasoning
+	cached := msgResp.Info.Tokens.Cache.Read
+	totalTok := msgResp.Info.Tokens.Total
+
+	// Fallback to parts-level tokens if info.tokens was empty
+	if totalTok == 0 && in == 0 && out == 0 {
+		for _, p := range msgResp.Parts {
+			in += p.Tokens.Input
+			out += p.Tokens.Output
+			reasoning += p.Tokens.Reasoning
+			totalTok += p.Tokens.Total
+		}
+	}
+	if totalTok == 0 && (in > 0 || out > 0) {
+		totalTok = in + out
+	}
+
+	s.usage.PromptTokens += in
+	s.usage.CompletionTokens += out
+	s.usage.TotalTokens += totalTok
+	s.usage.ReasoningTokens += reasoning
+	s.usage.CachedTokens += cached
 	s.usage.ReportedCostUSD += msgResp.Info.Cost
 
 	total := s.usage.TotalTokens
@@ -440,14 +455,19 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 	}
 	s.mu.Unlock()
 
-	// Parse fallback review or proposal patterns from output
-	s.parseStructuredOutputs(content)
-
 	msg := &AgentMessage{
 		Role:      "assistant",
 		Content:   content,
 		Timestamp: time.Now(),
 	}
+
+	// Apply governed patches in Governed Proposal Mode
+	if err := s.applyGovernedPatches(content); err != nil {
+		return msg, err
+	}
+
+	// Parse fallback review or proposal patterns from output
+	s.parseStructuredOutputs(content)
 
 	// Post-invocation budget check
 	if alloc > 0 && float64(total) > alloc {
@@ -557,4 +577,162 @@ func (s *OpenCodeSessionAdapter) parseStructuredOutputs(content string) {
 			}
 		}
 	}
+}
+
+// GovernedPatch represents a code modification proposal emitted by an agent.
+type GovernedPatch struct {
+	Path    string
+	Content string
+}
+
+// extractGovernedPatches extracts all [PROPOSE_PATCH: path="..."] blocks from model output.
+func extractGovernedPatches(content string) []GovernedPatch {
+	var patches []GovernedPatch
+	marker := "[PROPOSE_PATCH:"
+	pos := 0
+	for {
+		idx := strings.Index(content[pos:], marker)
+		if idx == -1 {
+			break
+		}
+		patchStart := pos + idx
+		headerEnd := strings.Index(content[patchStart:], "]")
+		if headerEnd == -1 {
+			break
+		}
+		header := content[patchStart : patchStart+headerEnd]
+
+		// Parse path="..." or file="..."
+		path := ""
+		if pIdx := strings.Index(header, "path="); pIdx != -1 {
+			rawPath := header[pIdx+5:]
+			rawPath = strings.TrimLeft(rawPath, " \"'")
+			if endQ := strings.IndexAny(rawPath, "\"' ]"); endQ != -1 {
+				path = rawPath[:endQ]
+			} else {
+				path = rawPath
+			}
+		} else if fIdx := strings.Index(header, "file="); fIdx != -1 {
+			rawPath := header[fIdx+5:]
+			rawPath = strings.TrimLeft(rawPath, " \"'")
+			if endQ := strings.IndexAny(rawPath, "\"' ]"); endQ != -1 {
+				path = rawPath[:endQ]
+			} else {
+				path = rawPath
+			}
+		}
+
+		bodyStart := patchStart + headerEnd + 1
+		// Look for [END_PATCH]
+		bodyEnd := -1
+		if endIdx := strings.Index(content[bodyStart:], "[END_PATCH]"); endIdx != -1 {
+			bodyEnd = bodyStart + endIdx
+			pos = bodyEnd + len("[END_PATCH]")
+		} else {
+			// Look for next [PROPOSE_PATCH:
+			if nextIdx := strings.Index(content[bodyStart:], marker); nextIdx != -1 {
+				bodyEnd = bodyStart + nextIdx
+				pos = bodyEnd
+			} else {
+				bodyEnd = len(content)
+				pos = bodyEnd
+			}
+		}
+
+		body := strings.TrimSpace(content[bodyStart:bodyEnd])
+		// Strip markdown code fences if present: ```lang ... ```
+		if strings.HasPrefix(body, "```") {
+			if firstLineEnd := strings.Index(body, "\n"); firstLineEnd != -1 {
+				body = body[firstLineEnd+1:]
+			} else {
+				body = strings.TrimPrefix(body, "```")
+			}
+			if lastFence := strings.LastIndex(body, "```"); lastFence != -1 {
+				body = body[:lastFence]
+			}
+			body = strings.TrimRight(body, " \t\r")
+		}
+
+		if path != "" && body != "" {
+			patches = append(patches, GovernedPatch{
+				Path:    path,
+				Content: body,
+			})
+		}
+	}
+	return patches
+}
+
+func (s *OpenCodeSessionAdapter) applyGovernedPatches(content string) error {
+	patches := extractGovernedPatches(content)
+	if len(patches) == 0 {
+		return nil
+	}
+
+	for _, patch := range patches {
+		cleanPath := filepath.Clean(patch.Path)
+		if strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
+			return fmt.Errorf("access denied: path outside workspace: %s", patch.Path)
+		}
+
+		// PolicyGovernor pre-invocation authorization
+		if s.config.Governor != nil {
+			if err := s.config.Governor.AuthorizeToolInvocation(s.config.AgentID, "governed_apply_patch"); err != nil {
+				return fmt.Errorf("governance authorization denied for %s on %s: %w", s.config.AgentID, cleanPath, err)
+			}
+		}
+
+		s.mu.Lock()
+		s.toolCallCount++
+		calls := s.toolCallCount
+		maxCalls := s.config.MaxToolCalls
+		if s.config.Limits != nil && s.config.Limits.MaxToolCalls > 0 && maxCalls == 0 {
+			maxCalls = s.config.Limits.MaxToolCalls
+		}
+		s.mu.Unlock()
+
+		if maxCalls > 0 && calls > maxCalls {
+			return fmt.Errorf("%w: maximum %d calls allowed per session", ErrToolCallLimitExceeded, maxCalls)
+		}
+
+		tStart := time.Now()
+		hasher := sha256.New()
+		hasher.Write([]byte(patch.Content))
+		payloadHash := fmt.Sprintf("%x", hasher.Sum(nil))
+		intentID := fmt.Sprintf("intent-patch-%d-%s", time.Now().UnixNano(), payloadHash[:8])
+
+		if s.config.IntentJournal != nil {
+			_ = s.config.IntentJournal.RecordIntent(IntentRecord{
+				IntentID:    intentID,
+				ActivityID:  s.config.AgentID,
+				Action:      "apply_patch",
+				Target:      cleanPath,
+				PayloadHash: payloadHash,
+			})
+		}
+
+		if s.config.WorkspaceDir != "" {
+			target := filepath.Join(s.config.WorkspaceDir, cleanPath)
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return fmt.Errorf("failed to create directory for patch %s: %w", cleanPath, err)
+			}
+			if err := os.WriteFile(target, []byte(patch.Content), 0644); err != nil {
+				return fmt.Errorf("failed to write file for patch %s: %w", cleanPath, err)
+			}
+		}
+
+		if s.config.IntentJournal != nil {
+			_ = s.config.IntentJournal.RecordOutcome(intentID, "committed-"+cleanPath)
+		}
+
+		s.mu.Lock()
+		s.toolDuration += time.Since(tStart)
+		s.mu.Unlock()
+
+		if s.config.OnRecordMetric != nil {
+			s.config.OnRecordMetric("governed_apply_patch", 1)
+		}
+	}
+
+	return nil
 }

@@ -726,8 +726,8 @@ func TestMilestone12_16_ScopedTools_PermittedReadOnly(t *testing.T) {
 	}
 }
 
-// 17. Scoped tools: Coder permitted write and edit
-func TestMilestone12_17_ScopedTools_CoderPermittedWrite(t *testing.T) {
+// 17. Scoped tools: Coder operates in Governed Proposal Mode (zero native write/edit authority)
+func TestMilestone12_17_ScopedTools_CoderGovernedProposalMode(t *testing.T) {
 	mock := newMockOpenCodeServer()
 	defer mock.Close()
 
@@ -750,11 +750,11 @@ func TestMilestone12_17_ScopedTools_CoderPermittedWrite(t *testing.T) {
 	defer mock.mu.Unlock()
 	msg := mock.receivedMessages[0]
 	tools := msg["tools"].(map[string]any)
-	if tools["write"] != true {
-		t.Errorf("expected write=true for coder")
+	if tools["write"] != false {
+		t.Errorf("expected write=false for coder under Governed Proposal Mode")
 	}
-	if tools["edit"] != true {
-		t.Errorf("expected edit=true for coder")
+	if tools["edit"] != false {
+		t.Errorf("expected edit=false for coder under Governed Proposal Mode")
 	}
 	if tools["bash"] != false {
 		t.Errorf("security violation: bash must remain false for coder")

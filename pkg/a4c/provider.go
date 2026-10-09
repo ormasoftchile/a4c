@@ -59,8 +59,20 @@ type AgentSession interface {
 	Close() error
 }
 
-// AgentProvider is the pluggable interface for LLM backends (Copilot Go SDK, FakeProvider).
+// RuntimeCapabilities describes the explicit governance and technical guarantees supported by a runtime.
+type RuntimeCapabilities struct {
+	GovernedCustomTools    bool `json:"governed_custom_tools"`
+	GovernedProposalMode   bool `json:"governed_proposal_mode"`
+	NativeToolRestrictions bool `json:"native_tool_restrictions"`
+	SessionResumption      bool `json:"session_resumption"`
+	SessionCancellation    bool `json:"session_cancellation"`
+	UsageReporting         bool `json:"usage_reporting"`
+	ProviderTokenLimits    bool `json:"provider_token_limits"`
+}
+
+// AgentProvider is the pluggable interface for LLM backends (Copilot Go SDK, OpenCode, FakeProvider).
 type AgentProvider interface {
+	Capabilities() RuntimeCapabilities
 	CreateSession(ctx context.Context, config AgentConfig) (AgentSession, error)
 	ResumeSession(ctx context.Context, sessionID string, config AgentConfig) (AgentSession, error)
 }

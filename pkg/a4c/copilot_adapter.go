@@ -288,6 +288,18 @@ func (p *CopilotProvider) Close() error {
 	return nil
 }
 
+func (p *CopilotProvider) Capabilities() RuntimeCapabilities {
+	return RuntimeCapabilities{
+		GovernedCustomTools:    true,
+		GovernedProposalMode:   false,
+		NativeToolRestrictions: true,
+		SessionResumption:      true,
+		SessionCancellation:    true,
+		UsageReporting:         true,
+		ProviderTokenLimits:    true,
+	}
+}
+
 func (p *CopilotProvider) CreateSession(ctx context.Context, config AgentConfig) (AgentSession, error) {
 	return p.buildSession(ctx, "", config)
 }

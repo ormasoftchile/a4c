@@ -131,7 +131,7 @@ func TestMilestone14_CLI_MCP_Parity(t *testing.T) {
 	}
 
 	// 4. Accept via MCP must fail closed (Milestone 16 security hardening)
-	mcpAcceptRes, _ := cli.CallTool(ctx, mcp.CallToolRequest{
+	mcpAcceptRes, accErr := cli.CallTool(ctx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name: "team_accept",
 			Arguments: map[string]any{
@@ -140,7 +140,7 @@ func TestMilestone14_CLI_MCP_Parity(t *testing.T) {
 			},
 		},
 	})
-	if !mcpAcceptRes.IsError {
+	if accErr == nil && (mcpAcceptRes == nil || !mcpAcceptRes.IsError) {
 		t.Fatalf("expected MCP team_accept to fail closed with unauthorized error, got success")
 	}
 

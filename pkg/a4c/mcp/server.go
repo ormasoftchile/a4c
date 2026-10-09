@@ -62,18 +62,27 @@ func (s *Server) ServeStdio() error {
 
 func (s *Server) registerTools() {
 	role := strings.ToLower(s.role)
-	isLead := role == "lead" || role == "alice"
+	isLead := role == "lead" || role == "alice" || role == "a4c"
 	isCoder := role == "coder" || role == "bob"
 	isReviewer := role == "reviewer" || role == "charlie"
 
-	addTool := func(allowed bool, tool mcp.Tool, handler server.ToolHandlerFunc) {
-		if s.role == "" || allowed {
+	addAgentTool := func(forLead, forCoder, forReviewer bool, tool mcp.Tool, handler server.ToolHandlerFunc) {
+		if s.role == "" {
+			// On un-roled MCP server, register any tool permitted for at least one agent role.
+			// Human-only tools (forLead=false, forCoder=false, forReviewer=false) are never registered over MCP.
+			if forLead || forCoder || forReviewer {
+				s.mcpServer.AddTool(tool, handler)
+			}
+			return
+		}
+		// On roled MCP server, only register if permitted for the specific role.
+		if (isLead && forLead) || (isCoder && forCoder) || (isReviewer && forReviewer) {
 			s.mcpServer.AddTool(tool, handler)
 		}
 	}
 
-	// 1. team_delegate
-	addTool(isLead,
+	// 1. team_delegate (Lead only)
+	addAgentTool(true, false, false,
 		mcp.NewTool("team_delegate",
 			mcp.WithDescription("Submit an engineering task to the autonomous personal software engineering team"),
 			mcp.WithString("objective", mcp.Required(), mcp.Description("Objective, specification, or instruction for the engineering assignment")),
@@ -85,8 +94,8 @@ func (s *Server) registerTools() {
 		s.handleDelegate,
 	)
 
-	// 2. team_list
-	addTool(isLead,
+	// 2. team_list (Lead only)
+	addAgentTool(true, false, false,
 		mcp.NewTool("team_list",
 			mcp.WithDescription("List known engineering task assignments with their live lifecycle state and progress"),
 			mcp.WithString("state", mcp.Description("Filter by lifecycle state (queued, running, awaiting_decision, awaiting_human_review, accepted, integrated, rejected, failed)")),
@@ -96,8 +105,8 @@ func (s *Server) registerTools() {
 		s.handleList,
 	)
 
-	// 3. team_status
-	addTool(isLead || isCoder || isReviewer,
+	// 3. team_status (All agents)
+	addAgentTool(true, true, true,
 		mcp.NewTool("team_status",
 			mcp.WithDescription("Inspect detailed live state, worktree branch, activity DAG, token metrics, and lifecycle facts for a task"),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -105,8 +114,8 @@ func (s *Server) registerTools() {
 		s.handleStatus,
 	)
 
-	// 4. team_result
-	addTool(isLead || isReviewer,
+	// 4. team_result (Lead, Reviewer)
+	addAgentTool(true, false, true,
 		mcp.NewTool("team_result",
 			mcp.WithDescription("Retrieve final execution outputs, review verdict, reviewer comments, and validation evidence for a task"),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -114,8 +123,8 @@ func (s *Server) registerTools() {
 		s.handleResult,
 	)
 
-	// 5. team_diff
-	addTool(isLead || isCoder || isReviewer,
+	// 5. team_diff (All agents)
+	addAgentTool(true, true, true,
 		mcp.NewTool("team_diff",
 			mcp.WithDescription("Inspect git diffs and file modifications made in the task worktree before approving"),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -123,8 +132,8 @@ func (s *Server) registerTools() {
 		s.handleDiff,
 	)
 
-	// 6. team_feedback
-	addTool(isLead,
+	// 6. team_feedback (Lead only)
+	addAgentTool(true, false, false,
 		mcp.NewTool("team_feedback",
 			mcp.WithDescription("Provide human review feedback and request revisions from the engineering team"),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -134,35 +143,20 @@ func (s *Server) registerTools() {
 		s.handleFeedback,
 	)
 
-	// 7. team_accept (strictly human CLI boundary; omitted in roled MCP server)
-	addTool(false,
-		mcp.NewTool("team_accept",
-			mcp.WithDescription("Record explicit human approval of an exact reviewed snapshot. Note: AI agents are strictly prohibited from self-approving over MCP. Acceptance requires explicit human execution via CLI ('a4c task accept <task-id>')."),
-			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
-			mcp.WithString("comments", mcp.Description("Approval comments or sign-off notes")),
-		),
-		s.handleAccept,
-	)
+	// NOTE: team_accept and team_integrate are STRICT human-only CLI boundaries.
+	// They are NEVER exposed over MCP under any circumstances. Agents attempting to
+	// invoke acceptance or integration over MCP fail closed by server definition.
 
-	// 8. team_integrate (strictly human CLI boundary; omitted in roled MCP server)
-	addTool(false,
-		mcp.NewTool("team_integrate",
-			mcp.WithDescription("Integrate approved changes from an accepted task into the base repository working checkout. Note: AI agents are strictly prohibited from integrating over MCP. Integration requires explicit human execution via CLI ('a4c task integrate <task-id>')."),
-			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
-		),
-		s.handleIntegrate,
-	)
-
-	// 9. team_context
-	addTool(isLead,
+	// 7. team_context (Lead only)
+	addAgentTool(true, false, false,
 		mcp.NewTool("team_context",
 			mcp.WithDescription("Retrieve environmental context: repository branch, head commit, team roster, active tasks, and recent architectural memories."),
 		),
 		s.handleContext,
 	)
 
-	// 10. team_begin_task
-	addTool(isLead,
+	// 8. team_begin_task (Lead only)
+	addAgentTool(true, false, false,
 		mcp.NewTool("team_begin_task",
 			mcp.WithDescription("Initialize an engineering task and allocate an isolated git worktree branch for host-native coordination without spawning an autonomous background LLM loop."),
 			mcp.WithString("objective", mcp.Required(), mcp.Description("Objective, specification, or instruction for the engineering assignment")),
@@ -174,8 +168,8 @@ func (s *Server) registerTools() {
 		s.handleBeginTask,
 	)
 
-	// 11. team_assign_activity
-	addTool(isLead,
+	// 9. team_assign_activity (Lead only)
+	addAgentTool(true, false, false,
 		mcp.NewTool("team_assign_activity",
 			mcp.WithDescription("Record assignment of a subtask to a specialist agent (Bob Coder, Charlie Reviewer) within the task's isolated worktree."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -187,8 +181,8 @@ func (s *Server) registerTools() {
 		s.handleAssignActivity,
 	)
 
-	// 12. team_checkpoint
-	addTool(isLead || isCoder || isReviewer,
+	// 10. team_checkpoint (All agents)
+	addAgentTool(true, true, true,
 		mcp.NewTool("team_checkpoint",
 			mcp.WithDescription("Persist an intermediate milestone, discovery, assumption, or snapshot SHA during host-native execution so progress survives host termination."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -202,8 +196,8 @@ func (s *Server) registerTools() {
 		s.handleCheckpoint,
 	)
 
-	// 13. team_complete_activity
-	addTool(isLead || isCoder,
+	// 11. team_complete_activity (Lead, Coder)
+	addAgentTool(true, true, false,
 		mcp.NewTool("team_complete_activity",
 			mcp.WithDescription("Record completion of a specialist subtask with output summary, modified files, and validation evidence."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -217,8 +211,8 @@ func (s *Server) registerTools() {
 		s.handleCompleteActivity,
 	)
 
-	// 14. team_review_result
-	addTool(isReviewer,
+	// 12. team_review_result (Reviewer only)
+	addAgentTool(false, false, true,
 		mcp.NewTool("team_review_result",
 			mcp.WithDescription("Record an independent code review verdict (approved, rejected, revisions_requested). Verifies that the reviewer did not produce any uncommitted mutations."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -231,8 +225,8 @@ func (s *Server) registerTools() {
 		s.handleReviewResult,
 	)
 
-	// 15. governed_read_file
-	addTool(isLead || isCoder || isReviewer,
+	// 13. governed_read_file (All agents)
+	addAgentTool(true, true, true,
 		mcp.NewTool("governed_read_file",
 			mcp.WithDescription("Read an authorized file strictly inside the task's isolated worktree using the embedded YAWR execution engine."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -241,8 +235,8 @@ func (s *Server) registerTools() {
 		s.handleGovernedReadFile,
 	)
 
-	// 16. governed_apply_patch
-	addTool(isCoder,
+	// 14. governed_apply_patch (Coder only)
+	addAgentTool(false, true, false,
 		mcp.NewTool("governed_apply_patch",
 			mcp.WithDescription("Apply a snapshot-bound unified patch strictly inside the task worktree via YAWR's governed execution kernel. Recorded in durable dispatch store with replay detection."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -253,8 +247,8 @@ func (s *Server) registerTools() {
 		s.handleGovernedApplyPatch,
 	)
 
-	// 17. governed_git_inspect
-	addTool(isLead || isReviewer,
+	// 15. governed_git_inspect (Lead, Reviewer)
+	addAgentTool(true, false, true,
 		mcp.NewTool("governed_git_inspect",
 			mcp.WithDescription("Inspect git status, diff, log, or commit SHA strictly inside the task worktree using the embedded YAWR engine."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
@@ -264,8 +258,8 @@ func (s *Server) registerTools() {
 		s.handleGovernedGitInspect,
 	)
 
-	// 18. governed_run_tests
-	addTool(isCoder,
+	// 16. governed_run_tests (Coder only)
+	addAgentTool(false, true, false,
 		mcp.NewTool("governed_run_tests",
 			mcp.WithDescription("Execute bounded go test procedures in the task worktree and collect structured validation evidence via YAWR."),
 			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),

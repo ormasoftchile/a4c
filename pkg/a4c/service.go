@@ -568,22 +568,35 @@ func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRe
 	filesChanged := 0
 	commitSHA := currentSnapshot
 
-	// If a git worktree branch exists, perform merge into main workspace
+	// If a git worktree branch exists, commit working changes in worktree and perform merge into main workspace
 	if s.wtMgr != nil {
-		if wt, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && wt != nil && wt.Branch != "" {
-			// Merge the branch into current checkout
-			cmdMerge := exec.CommandContext(ctx, "git", "merge", "--no-ff", "-m", fmt.Sprintf("integrate(a4c): task %s", req.TaskID), wt.Branch)
-			cmdMerge.Dir = s.workspaceDir
-			if mOut, mErr := cmdMerge.CombinedOutput(); mErr != nil {
-				// Abort on conflict
-				_ = exec.CommandContext(ctx, "git", "merge", "--abort").Run()
-				return nil, fmt.Errorf("service: git merge failed during integration: %s (%w)", string(mOut), mErr)
+		if wt, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && wt != nil {
+			if wt.WorktreePath != "" {
+				// Stage and commit approved changes in the worktree
+				cmdAdd := exec.CommandContext(ctx, "git", "add", "-A")
+				cmdAdd.Dir = wt.WorktreePath
+				_ = cmdAdd.Run()
+
+				cmdCommit := exec.CommandContext(ctx, "git", "commit", "-m", fmt.Sprintf("feat(a4c): task %s approved changes", req.TaskID))
+				cmdCommit.Dir = wt.WorktreePath
+				_ = cmdCommit.Run()
 			}
-			// Resolve new commit SHA
-			cmdRev := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
-			cmdRev.Dir = s.workspaceDir
-			if revOut, err := cmdRev.CombinedOutput(); err == nil {
-				commitSHA = strings.TrimSpace(string(revOut))
+
+			if wt.Branch != "" {
+				// Merge the branch into current checkout
+				cmdMerge := exec.CommandContext(ctx, "git", "merge", "--no-ff", "-m", fmt.Sprintf("integrate(a4c): task %s", req.TaskID), wt.Branch)
+				cmdMerge.Dir = s.workspaceDir
+				if mOut, mErr := cmdMerge.CombinedOutput(); mErr != nil {
+					// Abort on conflict
+					_ = exec.CommandContext(ctx, "git", "merge", "--abort").Run()
+					return nil, fmt.Errorf("service: git merge failed during integration: %s (%w)", string(mOut), mErr)
+				}
+				// Resolve new commit SHA
+				cmdRev := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+				cmdRev.Dir = s.workspaceDir
+				if revOut, err := cmdRev.CombinedOutput(); err == nil {
+					commitSHA = strings.TrimSpace(string(revOut))
+				}
 			}
 		}
 	}
@@ -591,10 +604,13 @@ func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRe
 	// File copy fallback if direct directory was used (e.g. in non-branch test mode)
 	if workDir != s.workspaceDir {
 		_ = filepath.Walk(workDir, func(path string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() || strings.Contains(path, ".git") || strings.Contains(path, ".a4c") {
+			if err != nil || info.IsDir() {
 				return nil
 			}
 			rel, _ := filepath.Rel(workDir, path)
+			if strings.HasPrefix(rel, ".git") || strings.HasPrefix(rel, ".a4c") {
+				return nil
+			}
 			dest := filepath.Join(s.workspaceDir, rel)
 			data, err := os.ReadFile(path)
 			if err == nil {

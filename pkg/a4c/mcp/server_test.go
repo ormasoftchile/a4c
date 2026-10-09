@@ -79,7 +79,71 @@ func setupMCPHarness(t *testing.T) *mcpHarness {
 	coord.SetWorktreeManager(wtMgr)
 
 	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr, structStore)
-	srv := a4cmcp.NewServer(svc)
+	return createMCPHarnessWithRole(t, repoDir, svc, store, "")
+}
+
+func setupMCPHarnessWithRole(t *testing.T, role string) *mcpHarness {
+	t.Helper()
+	repoDir := t.TempDir()
+
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "config", "user.name", "MCP Tester")
+	runGit(t, repoDir, "config", "user.email", "mcp@example.com")
+	_ = os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("# MCP Test Repo\n"), 0644)
+	runGit(t, repoDir, "add", "README.md")
+	runGit(t, repoDir, "commit", "-m", "init")
+
+	dotDir := filepath.Join(repoDir, ".a4c")
+	storeDir := filepath.Join(dotDir, "activities")
+	rosterDir := filepath.Join(dotDir, "roster")
+	memDir := filepath.Join(dotDir, "memory")
+	journalDir := filepath.Join(dotDir, "journal")
+	lifecycleDir := filepath.Join(dotDir, "lifecycle")
+	wtDir := filepath.Join(dotDir, "worktrees")
+	structDir := filepath.Join(dotDir, "structural")
+
+	store, err := a4c.NewDurableActivityStore(storeDir)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	lifecycleStore, err := a4c.NewDurableLifecycleStore(lifecycleDir)
+	if err != nil {
+		t.Fatalf("create lifecycle store: %v", err)
+	}
+	roster, err := a4c.DefaultTeamRoster(rosterDir)
+	if err != nil {
+		t.Fatalf("create roster: %v", err)
+	}
+	memory, err := a4c.NewDurableMemoryStore(memDir)
+	if err != nil {
+		t.Fatalf("create memory: %v", err)
+	}
+	journal, err := a4c.NewDurableIntentJournal(journalDir)
+	if err != nil {
+		t.Fatalf("create journal: %v", err)
+	}
+	wtMgr, err := a4c.NewWorktreeManager(repoDir, wtDir)
+	if err != nil {
+		t.Fatalf("create worktrees: %v", err)
+	}
+	structStore, err := a4c.NewDurableStructuralStore(structDir)
+	if err != nil {
+		t.Fatalf("create structural store: %v", err)
+	}
+
+	gov := a4c.NewPolicyGovernor([]string{
+		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
+		"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+	})
+	coord := a4c.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, &a4c.NativeGoTestRunner{}, nil)
+	coord.SetWorktreeManager(wtMgr)
+
+	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr, structStore)
+	return createMCPHarnessWithRole(t, repoDir, svc, store, role)
+}
+
+func createMCPHarnessWithRole(t *testing.T, repoDir string, svc a4c.TeamService, store *a4c.DurableActivityStore, role string) *mcpHarness {
+	srv := a4cmcp.NewServerWithRole(svc, role)
 
 	cli, err := client.NewInProcessClient(srv.MCPServer())
 	if err != nil {
@@ -139,17 +203,27 @@ func TestMCPServer_ToolDiscovery(t *testing.T) {
 		"team_result":            false,
 		"team_diff":              false,
 		"team_feedback":          false,
-		"team_accept":            false,
-		"team_integrate":         false,
 		"team_context":           false,
 		"team_begin_task":        false,
 		"team_assign_activity":   false,
 		"team_checkpoint":        false,
 		"team_complete_activity": false,
 		"team_review_result":     false,
+		"governed_read_file":     false,
+		"governed_apply_patch":   false,
+		"governed_git_inspect":   false,
+		"governed_run_tests":     false,
+	}
+
+	prohibitedTools := map[string]bool{
+		"team_accept":    true,
+		"team_integrate": true,
 	}
 
 	for _, tool := range toolsRes.Tools {
+		if prohibitedTools[tool.Name] {
+			t.Errorf("VIOLATION: human CLI boundary tool %q was exposed in MCP tool discovery", tool.Name)
+		}
 		if _, ok := expectedTools[tool.Name]; ok {
 			expectedTools[tool.Name] = true
 		}
@@ -158,6 +232,164 @@ func TestMCPServer_ToolDiscovery(t *testing.T) {
 	for name, found := range expectedTools {
 		if !found {
 			t.Errorf("expected MCP tool %q was not registered", name)
+		}
+	}
+
+	// Verify that calling human-only tools over MCP fails closed
+	accRes, accErr := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Name: "team_accept", Arguments: map[string]any{"task_id": "dummy"}},
+	})
+	if accErr == nil && (accRes == nil || !accRes.IsError) {
+		t.Errorf("VIOLATION: calling team_accept over MCP succeeded instead of failing closed")
+	}
+
+	intRes, intErr := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Name: "team_integrate", Arguments: map[string]any{"task_id": "dummy"}},
+	})
+	if intErr == nil && (intRes == nil || !intRes.IsError) {
+		t.Errorf("VIOLATION: calling team_integrate over MCP succeeded instead of failing closed")
+	}
+}
+
+func TestMCPServer_RoleDiscovery_Coder(t *testing.T) {
+	h := setupMCPHarnessWithRole(t, "coder")
+	defer h.client.Close()
+
+	ctx := context.Background()
+	toolsRes, err := h.client.ListTools(ctx, mcp.ListToolsRequest{})
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+
+	allowed := map[string]bool{
+		"team_status":            true,
+		"team_diff":              true,
+		"team_checkpoint":        true,
+		"team_complete_activity": true,
+		"governed_read_file":     true,
+		"governed_apply_patch":   true,
+		"governed_run_tests":     true,
+	}
+
+	prohibited := []string{
+		"team_review_result", "governed_git_inspect", "team_delegate",
+		"team_list", "team_feedback", "team_accept", "team_integrate",
+	}
+
+	toolMap := make(map[string]bool)
+	for _, tool := range toolsRes.Tools {
+		toolMap[tool.Name] = true
+		if !allowed[tool.Name] {
+			t.Errorf("VIOLATION: coder sees unpermitted tool %q", tool.Name)
+		}
+	}
+
+	for name := range allowed {
+		if !toolMap[name] {
+			t.Errorf("coder missing expected tool %q", name)
+		}
+	}
+
+	for _, name := range prohibited {
+		if toolMap[name] {
+			t.Errorf("VIOLATION: coder exposed prohibited tool %q", name)
+		}
+	}
+}
+
+func TestMCPServer_RoleDiscovery_Reviewer(t *testing.T) {
+	h := setupMCPHarnessWithRole(t, "reviewer")
+	defer h.client.Close()
+
+	ctx := context.Background()
+	toolsRes, err := h.client.ListTools(ctx, mcp.ListToolsRequest{})
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+
+	allowed := map[string]bool{
+		"team_status":          true,
+		"team_result":          true,
+		"team_diff":            true,
+		"team_checkpoint":      true,
+		"team_review_result":   true,
+		"governed_read_file":   true,
+		"governed_git_inspect": true,
+	}
+
+	prohibited := []string{
+		"governed_apply_patch", "governed_run_tests", "team_delegate",
+		"team_complete_activity", "team_accept", "team_integrate",
+	}
+
+	toolMap := make(map[string]bool)
+	for _, tool := range toolsRes.Tools {
+		toolMap[tool.Name] = true
+		if !allowed[tool.Name] {
+			t.Errorf("VIOLATION: reviewer sees unpermitted tool %q", tool.Name)
+		}
+	}
+
+	for name := range allowed {
+		if !toolMap[name] {
+			t.Errorf("reviewer missing expected tool %q", name)
+		}
+	}
+
+	for _, name := range prohibited {
+		if toolMap[name] {
+			t.Errorf("VIOLATION: reviewer exposed prohibited tool %q", name)
+		}
+	}
+}
+
+func TestMCPServer_RoleDiscovery_Lead(t *testing.T) {
+	h := setupMCPHarnessWithRole(t, "lead")
+	defer h.client.Close()
+
+	ctx := context.Background()
+	toolsRes, err := h.client.ListTools(ctx, mcp.ListToolsRequest{})
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+
+	allowed := map[string]bool{
+		"team_delegate":          true,
+		"team_list":              true,
+		"team_status":            true,
+		"team_result":            true,
+		"team_diff":              true,
+		"team_feedback":          true,
+		"team_context":           true,
+		"team_begin_task":        true,
+		"team_assign_activity":   true,
+		"team_checkpoint":        true,
+		"team_complete_activity": true,
+		"governed_read_file":     true,
+		"governed_git_inspect":   true,
+	}
+
+	prohibited := []string{
+		"governed_apply_patch", "governed_run_tests", "team_accept", "team_integrate",
+	}
+
+	toolMap := make(map[string]bool)
+	for _, tool := range toolsRes.Tools {
+		toolMap[tool.Name] = true
+		if !allowed[tool.Name] {
+			t.Errorf("VIOLATION: lead sees unpermitted tool %q", tool.Name)
+		}
+	}
+
+	for name := range allowed {
+		if !toolMap[name] {
+			t.Errorf("lead missing expected tool %q", name)
+		}
+	}
+
+	for _, name := range prohibited {
+		if toolMap[name] {
+			t.Errorf("VIOLATION: lead exposed prohibited tool %q", name)
 		}
 	}
 }
@@ -279,8 +511,8 @@ func TestMCPServer_AcceptAndIntegrateLifecycle(t *testing.T) {
 			},
 		},
 	}
-	intRes, _ := h.client.CallTool(ctx, intReq)
-	if !intRes.IsError {
+	intRes, intErr := h.client.CallTool(ctx, intReq)
+	if intErr == nil && (intRes == nil || !intRes.IsError) {
 		t.Fatalf("expected error integrating unaccepted task, got success")
 	}
 
@@ -300,8 +532,8 @@ func TestMCPServer_AcceptAndIntegrateLifecycle(t *testing.T) {
 			},
 		},
 	}
-	accRes, _ := h.client.CallTool(ctx, accReq)
-	if !accRes.IsError {
+	accRes, accErr := h.client.CallTool(ctx, accReq)
+	if accErr == nil && (accRes == nil || !accRes.IsError) {
 		t.Fatalf("expected team_accept via MCP to fail closed with unauthorized, but succeeded")
 	}
 
@@ -319,8 +551,8 @@ func TestMCPServer_AcceptAndIntegrateLifecycle(t *testing.T) {
 	}
 
 	// Call team_integrate via MCP -> MUST FAIL CLOSED (AI agents cannot integrate over MCP)
-	intResMCP, _ := h.client.CallTool(ctx, intReq)
-	if !intResMCP.IsError {
+	intResMCP, intMCPErr := h.client.CallTool(ctx, intReq)
+	if intMCPErr == nil && (intResMCP == nil || !intResMCP.IsError) {
 		t.Fatalf("expected team_integrate via MCP to fail closed with unauthorized, but succeeded")
 	}
 
@@ -493,12 +725,12 @@ func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
 			},
 		},
 	})
-	if err != nil || !unauthRes.IsError {
-		t.Fatalf("expected unauthenticated team_accept to fail, got %+v", unauthRes)
+	if err == nil && (unauthRes == nil || !unauthRes.IsError) {
+		t.Fatalf("expected unauthenticated team_accept to fail closed, got %+v", unauthRes)
 	}
 
 	// Verify that MCP call to team_integrate is also rejected
-	unauthIntRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+	unauthIntRes, intErr := h.client.CallTool(ctx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name: "team_integrate",
 			Arguments: map[string]any{
@@ -506,8 +738,8 @@ func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
 			},
 		},
 	})
-	if err != nil || !unauthIntRes.IsError {
-		t.Fatalf("expected unauthenticated team_integrate to fail, got %+v", unauthIntRes)
+	if intErr == nil && (unauthIntRes == nil || !unauthIntRes.IsError) {
+		t.Fatalf("expected unauthenticated team_integrate to fail closed, got %+v", unauthIntRes)
 	}
 
 	// Now perform authenticated human CLI acceptance

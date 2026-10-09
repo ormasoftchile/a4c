@@ -3,14 +3,19 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/ormasoftchile/a4c/pkg/a4c"
+	a4cmcp "github.com/ormasoftchile/a4c/pkg/a4c/mcp"
 )
 
 const banner = `
@@ -34,9 +39,16 @@ Commands:
   init [path]                           Initialize an a4c workspace (.a4c directory)
   team list                             List persistent team members and permissions
   task submit <obj> [budget] [--strategy s] [--runtime r] [--model m] Submit a task (strategy: direct|reviewed|team)
-  task list [--status s] [--agent a]    Query activities matching filter criteria
+  task list [--state s] [--status s] [--agent a] [--runtime r] Query tasks or activities
   task history <task-id>                Display full audit history and DAG for a task
   task inspect <task-id> [--json]       Inspect a task; output machine-readable JSON with --json
+  task diff <task-id> [--json]          Display worktree review diffs against base branch
+  task feedback <task-id> <feedback>    Provide review guidance and request revisions
+  task accept <task-id> [comments]      Record explicit human approval of reviewed snapshot
+  task integrate <task-id>              Integrate approved task into base checkout
+  task reject <task-id> <reason>        Reject task
+  host [--steps N] [--poll-ms MS]       Run durable background worker host
+  mcp                                   Run Model Context Protocol (MCP) server over stdio
   status                                Display active activities and evidence
   run [--runtime r] [--model m] [--real-copilot] [--steps N] Run governed collaboration loop
   decisions list                        List questions awaiting human engineer guidance
@@ -74,6 +86,12 @@ func main() {
 
 	case "task":
 		runTask(args)
+
+	case "host":
+		runHost(args)
+
+	case "mcp":
+		runMCP(args)
 
 	case "status":
 		runStatus(args)
@@ -190,16 +208,64 @@ func runTeam(args []string) {
 	}
 }
 
+func buildService(workDir string) (*a4c.TeamServiceImpl, error) {
+	if workDir == "" {
+		workDir = "."
+	}
+	dotDir, storeDir, rosterDir, memDir, journalDir := getPaths(workDir)
+	lifecycleDir := filepath.Join(dotDir, "lifecycle")
+	wtDir := filepath.Join(dotDir, "worktrees")
+	structDir := filepath.Join(dotDir, "structural")
+
+	store, err := a4c.NewDurableActivityStore(storeDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open activity store: %w", err)
+	}
+	lifecycleStore, err := a4c.NewDurableLifecycleStore(lifecycleDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open lifecycle store: %w", err)
+	}
+	roster, err := a4c.DefaultTeamRoster(rosterDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open roster: %w", err)
+	}
+	memStore, err := a4c.NewDurableMemoryStore(memDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open memory store: %w", err)
+	}
+	journal, err := a4c.NewDurableIntentJournal(journalDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open journal: %w", err)
+	}
+	wtMgr, err := a4c.NewWorktreeManager(workDir, wtDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open worktree manager: %w", err)
+	}
+	structStore, err := a4c.NewDurableStructuralStore(structDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open structural store: %w", err)
+	}
+
+	gov := a4c.NewPolicyGovernor([]string{
+		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
+		"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+	})
+	coord := a4c.NewTeamCoordinator(workDir, store, roster, memStore, gov, journal, &a4c.NativeGoTestRunner{}, nil)
+	coord.SetWorktreeManager(wtMgr)
+
+	return a4c.NewTeamService(workDir, store, lifecycleStore, coord, roster, memStore, journal, wtMgr, structStore), nil
+}
+
 func runTask(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: a4c task <submit|list|history|inspect> [options]")
+		fmt.Println("Usage: a4c task <submit|list|history|inspect|diff|feedback|accept|integrate|reject> [options]")
 		return
 	}
 
-	dotDir, storeDir, rosterDir, memDir, journalDir := getPaths(".")
-	store, err := a4c.NewDurableActivityStore(storeDir)
+	ctx := context.Background()
+	svc, err := buildService(".")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to open activity store: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Workspace not initialized. Run 'a4c init': %v\n", err)
 		os.Exit(1)
 	}
 
@@ -231,50 +297,44 @@ func runTask(args []string) {
 			}
 		}
 
-		roster, _ := a4c.DefaultTeamRoster(rosterDir)
-		memStore, _ := a4c.NewDurableMemoryStore(memDir)
-		journal, _ := a4c.NewDurableIntentJournal(journalDir)
-		gov := a4c.NewPolicyGovernor([]string{
-			"governed_read_file", "governed_apply_patch", "governed_propose_activity",
-			"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+		ref, err := svc.SubmitTask(ctx, a4c.SubmitTaskRequest{
+			Objective:    objective,
+			BudgetTokens: budgetTokens,
+			Strategy:     strategy,
+			Runtime:      runtime,
+			Model:        model,
 		})
-		wtMgr, _ := a4c.NewWorktreeManager(".", filepath.Join(dotDir, "worktrees"))
-
-		coord := a4c.NewTeamCoordinator(".", store, roster, memStore, gov, journal, &a4c.NativeGoTestRunner{}, nil)
-		coord.SetWorktreeManager(wtMgr)
-
-		inputs := make(map[string]any)
-		if runtime != "" {
-			inputs["runtime"] = runtime
-		}
-		if model != "" {
-			inputs["model"] = model
-		}
-
-		req, err := coord.SubmitTaskWithStrategy(objective, a4c.Budget{Allocated: budgetTokens}, inputs, strategy)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to enqueue task: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Task enqueued: %s\nStrategy: %s\nRuntime: %s\nModel: %s\nAssigned to: %s\nObjective: %s\nBudget: %.0f tokens\n",
-			req.ID, strategy, req.Runtime, req.Model, req.AgentID, req.Objective, req.Budget.Allocated)
+		fmt.Printf("Task enqueued: %s\nStrategy: %s\nState: %s\nObjective: %s\nBudget: %.0f tokens\n",
+			ref.TaskID, strategy, ref.State, objective, budgetTokens)
 
 	case "list":
-		var filter a4c.ActivityFilter
+		var stateFilter a4c.TaskLifecycleState
+		var runtimeFilter string
 		for i := 1; i < len(args); i++ {
-			if args[i] == "--status" && i+1 < len(args) {
-				filter.Status = a4c.ActivityStatus(args[i+1])
+			if (args[i] == "--state" || args[i] == "--status") && i+1 < len(args) {
+				stateFilter = a4c.TaskLifecycleState(args[i+1])
 				i++
-			} else if args[i] == "--agent" && i+1 < len(args) {
-				filter.AgentID = args[i+1]
+			} else if args[i] == "--runtime" && i+1 < len(args) {
+				runtimeFilter = args[i+1]
 				i++
 			}
 		}
-		matches := store.QueryActivities(filter)
-		fmt.Printf("Activities (%d matches):\n", len(matches))
-		for _, m := range matches {
-			fmt.Printf("[%s] Agent: %-8s Status: %-10s Objective: %s\n",
-				m.Request.ID, m.Request.AgentID, m.Status, m.Request.Objective)
+		tasks, err := svc.ListTasks(ctx, a4c.TaskFilter{
+			State:   stateFilter,
+			Runtime: runtimeFilter,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to list tasks: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Tasks (%d matches):\n", len(tasks))
+		for _, t := range tasks {
+			fmt.Printf("[%s] State: %-22s Agent: %-8s Tokens: %-6d Objective: %s\n",
+				t.TaskID, t.State, t.ActiveAgent, t.TotalTokens, t.Objective)
 		}
 
 	case "history":
@@ -283,6 +343,8 @@ func runTask(args []string) {
 			return
 		}
 		taskID := args[1]
+		dotDir, storeDir, _, memDir, journalDir := getPaths(".")
+		store, _ := a4c.NewDurableActivityStore(storeDir)
 		journal, _ := a4c.NewDurableIntentJournal(journalDir)
 		memStore, _ := a4c.NewDurableMemoryStore(memDir)
 		wtMgr, _ := a4c.NewWorktreeManager(".", filepath.Join(dotDir, "worktrees"))
@@ -292,7 +354,6 @@ func runTask(args []string) {
 			fmt.Fprintf(os.Stderr, "Error building task history: %v\n", err)
 			os.Exit(1)
 		}
-
 		fmt.Print(report.FormatHumanReadable())
 
 	case "inspect":
@@ -309,6 +370,9 @@ func runTask(args []string) {
 			fmt.Println("Usage: a4c task inspect <task-id> [--json]")
 			return
 		}
+
+		dotDir, storeDir, _, memDir, journalDir := getPaths(".")
+		store, _ := a4c.NewDurableActivityStore(storeDir)
 		journal, _ := a4c.NewDurableIntentJournal(journalDir)
 		memStore, _ := a4c.NewDurableMemoryStore(memDir)
 		wtMgr, _ := a4c.NewWorktreeManager(".", filepath.Join(dotDir, "worktrees"))
@@ -332,10 +396,174 @@ func runTask(args []string) {
 
 		fmt.Print(report.FormatInspect(structStore, "."))
 
+	case "diff":
+		if len(args) < 2 {
+			fmt.Println("Usage: a4c task diff <task-id> [--json]")
+			return
+		}
+		taskID := args[1]
+		jsonOutput := len(args) > 2 && args[2] == "--json"
+		diffRes, err := svc.GetTaskDiff(ctx, taskID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to get diff for task %s: %v\n", taskID, err)
+			os.Exit(1)
+		}
+		if jsonOutput {
+			out, _ := json.MarshalIndent(diffRes, "", "  ")
+			fmt.Println(string(out))
+			return
+		}
+		fmt.Printf("Diff for Task %s (Snapshot: %s, Base: %s):\n", diffRes.TaskID, diffRes.SnapshotID, diffRes.BaseBranch)
+		fmt.Printf("Files Changed: %d | +%d / -%d\n", diffRes.TotalFiles, diffRes.TotalAdds, diffRes.TotalDels)
+		for _, f := range diffRes.Files {
+			fmt.Printf("  - %-30s [%s] (+%d/-%d)\n", f.Path, f.Status, f.Additions, f.Deletions)
+		}
+		if diffRes.RawDiff != "" {
+			fmt.Println("\n" + diffRes.RawDiff)
+		}
+
+	case "feedback":
+		if len(args) < 3 {
+			fmt.Println("Usage: a4c task feedback <task-id> <feedback text> [--agent <agent>]")
+			return
+		}
+		taskID := args[1]
+		feedbackText := args[2]
+		targetAgent := "coder"
+		for i := 3; i < len(args); i++ {
+			if args[i] == "--agent" && i+1 < len(args) {
+				targetAgent = args[i+1]
+				i++
+			}
+		}
+		ref, err := svc.SubmitFeedback(ctx, a4c.FeedbackRequest{
+			TaskID:      taskID,
+			Feedback:    feedbackText,
+			TargetAgent: targetAgent,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to submit feedback: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Feedback submitted for task %s. State updated to: %s\n", ref.TaskID, ref.State)
+
+	case "accept":
+		if len(args) < 2 {
+			fmt.Println("Usage: a4c task accept <task-id> [comments]")
+			return
+		}
+		taskID := args[1]
+		comments := ""
+		if len(args) > 2 {
+			comments = strings.Join(args[2:], " ")
+		}
+		res, err := svc.AcceptTask(ctx, a4c.AcceptTaskRequest{
+			TaskID:   taskID,
+			Comments: comments,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to accept task: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Task %s accepted successfully at snapshot %s.\nWorking checkout untouched. Run 'a4c task integrate %s' to apply changes.\n",
+			res.TaskID, res.AcceptedSnapshot, res.TaskID)
+
+	case "integrate":
+		if len(args) < 2 {
+			fmt.Println("Usage: a4c task integrate <task-id>")
+			return
+		}
+		taskID := args[1]
+		res, err := svc.IntegrateTask(ctx, a4c.IntegrateTaskRequest{TaskID: taskID})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to integrate task: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Task %s integrated successfully.\nCommit: %s | Files modified: %d\n",
+			res.TaskID, res.IntegratedCommit, res.FilesChanged)
+
+	case "reject":
+		if len(args) < 3 {
+			fmt.Println("Usage: a4c task reject <task-id> <reason>")
+			return
+		}
+		taskID := args[1]
+		reason := strings.Join(args[2:], " ")
+		res, err := svc.RejectTask(ctx, a4c.RejectTaskRequest{
+			TaskID: taskID,
+			Reason: reason,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to reject task: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Task %s rejected at %s. Reason: %s\n", res.TaskID, res.RejectedAt.Format(time.RFC3339), res.Reason)
+
 	default:
-		fmt.Printf("Unknown task command %q. Usage: a4c task <submit|list|history|inspect>\n", subCmd)
+		fmt.Printf("Unknown task command %q. Usage: a4c task <submit|list|history|inspect|diff|feedback|accept|integrate|reject>\n", subCmd)
 	}
 }
+
+func runHost(args []string) {
+	fs := flag.NewFlagSet("host", flag.ExitOnError)
+	workDir := fs.String("dir", ".", "Workspace directory")
+	steps := fs.Int("steps", 0, "Max sequential steps (0 = daemon mode)")
+	pollMs := fs.Int("poll-ms", 250, "Poll interval in milliseconds")
+	_ = fs.Parse(args)
+
+	svc, err := buildService(*workDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize A4C service: %v\n", err)
+		os.Exit(1)
+	}
+
+	cfg := a4c.WorkerHostConfig{
+		WorkspaceDir: *workDir,
+		PollInterval: time.Duration(*pollMs) * time.Millisecond,
+		MaxSteps:     *steps,
+	}
+	host := a4c.NewWorkerHost(cfg, svc.Coordinator(), svc.Store(), svc.Journal())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Fprintln(os.Stderr, "\nReceived shutdown signal. Stopping worker host...")
+		host.Stop()
+		cancel()
+	}()
+
+	fmt.Printf("A4C Worker Host started (workspace: %s, steps: %d, poll: %dms)\n", *workDir, *steps, *pollMs)
+	if err := host.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintf(os.Stderr, "Worker host error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("A4C Worker Host stopped cleanly.")
+}
+
+func runMCP(args []string) {
+	workDir := "."
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--dir" && i+1 < len(args) {
+			workDir = args[i+1]
+			i++
+		}
+	}
+	svc, err := buildService(workDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize A4C service: %v\n", err)
+		os.Exit(1)
+	}
+	srv := a4cmcp.NewServer(svc)
+	if err := srv.ServeStdio(); err != nil {
+		fmt.Fprintf(os.Stderr, "MCP server exited with error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 
 
 

@@ -367,6 +367,14 @@ func (s *DurableActivityStore) Get(id string) (*ActivityRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	path := filepath.Join(s.dir, id+".json")
+	if data, err := os.ReadFile(path); err == nil {
+		var r ActivityRecord
+		if err := json.Unmarshal(data, &r); err == nil && r.Request.ID == id {
+			s.records[id] = &r
+		}
+	}
+
 	rec, exists := s.records[id]
 	if !exists {
 		return nil, ErrActivityNotFound
@@ -516,5 +524,10 @@ func (s *DurableActivityStore) QueryActivities(filter ActivityFilter) []*Activit
 		list = append(list, &cp)
 	}
 	return list
+}
+
+// ListAllActivities returns all activity records in order.
+func (s *DurableActivityStore) ListAllActivities() []*ActivityRecord {
+	return s.QueryActivities(ActivityFilter{})
 }
 

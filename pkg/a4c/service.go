@@ -602,13 +602,13 @@ func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRe
 	}
 
 	// File copy fallback if direct directory was used (e.g. in non-branch test mode)
-	if workDir != s.workspaceDir {
+	if workDir != s.workspaceDir && commitSHA == "" {
 		_ = filepath.Walk(workDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {
 				return nil
 			}
 			rel, _ := filepath.Rel(workDir, path)
-			if strings.HasPrefix(rel, ".git") || strings.HasPrefix(rel, ".a4c") {
+			if strings.HasPrefix(rel, ".git") || strings.HasPrefix(rel, ".a4c") || strings.HasPrefix(rel, ".codetopo") {
 				return nil
 			}
 			dest := filepath.Join(s.workspaceDir, rel)

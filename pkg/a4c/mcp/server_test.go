@@ -911,4 +911,78 @@ func TestMCPServer_GovernedStructuralTools(t *testing.T) {
 	}
 }
 
+func TestMCPServer_AblationOptions(t *testing.T) {
+	h := setupMCPHarness(t)
+	defer h.client.Close()
+
+	ctx := context.Background()
+
+	// Helper to get registered tool names for given options
+	toolsForOpts := func(opts a4cmcp.ServerOptions) map[string]bool {
+		srv := a4cmcp.NewServerWithOptions(h.service, opts)
+		cli, err := client.NewInProcessClient(srv.MCPServer())
+		if err != nil {
+			t.Fatalf("create in-process client: %v", err)
+		}
+		defer cli.Close()
+		if err := cli.Start(ctx); err != nil {
+			t.Fatalf("start client: %v", err)
+		}
+		initReq := mcp.InitializeRequest{
+			Params: mcp.InitializeParams{
+				ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
+				ClientInfo:      mcp.Implementation{Name: "ablation-tester", Version: "1.0.0"},
+			},
+		}
+		if _, err := cli.Initialize(ctx, initReq); err != nil {
+			t.Fatalf("init client: %v", err)
+		}
+		toolsRes, err := cli.ListTools(ctx, mcp.ListToolsRequest{})
+		if err != nil {
+			t.Fatalf("list tools: %v", err)
+		}
+		res := make(map[string]bool)
+		for _, tool := range toolsRes.Tools {
+			res[tool.Name] = true
+		}
+		return res
+	}
+
+	// 1. Minimal A4C: No YAWR, No CodeTopo
+	minTools := toolsForOpts(a4cmcp.ServerOptions{EnableYAWR: false, EnableCodeTopo: false})
+	if !minTools["team_begin_task"] || !minTools["team_status"] {
+		t.Errorf("expected team coordination tools in minimal A4C")
+	}
+	if minTools["governed_apply_patch"] || minTools["governed_run_tests"] {
+		t.Errorf("expected NO YAWR tools when EnableYAWR=false")
+	}
+	if minTools["governed_structural_search_symbols"] {
+		t.Errorf("expected NO CodeTopo tools when EnableCodeTopo=false")
+	}
+
+	// 2. A4C + YAWR (no CodeTopo)
+	yawrTools := toolsForOpts(a4cmcp.ServerOptions{EnableYAWR: true, EnableCodeTopo: false})
+	if !yawrTools["governed_apply_patch"] || !yawrTools["governed_run_tests"] {
+		t.Errorf("expected YAWR tools when EnableYAWR=true")
+	}
+	if yawrTools["governed_structural_search_symbols"] {
+		t.Errorf("expected NO CodeTopo tools when EnableCodeTopo=false")
+	}
+
+	// 3. A4C + CodeTopo (no YAWR)
+	ctTools := toolsForOpts(a4cmcp.ServerOptions{EnableYAWR: false, EnableCodeTopo: true})
+	if ctTools["governed_apply_patch"] || ctTools["governed_run_tests"] {
+		t.Errorf("expected NO YAWR tools when EnableYAWR=false")
+	}
+	if !ctTools["governed_structural_search_symbols"] {
+		t.Errorf("expected CodeTopo tools when EnableCodeTopo=true")
+	}
+
+	// 4. Current A4C (both enabled)
+	fullTools := toolsForOpts(a4cmcp.ServerOptions{EnableYAWR: true, EnableCodeTopo: true})
+	if !fullTools["governed_apply_patch"] || !fullTools["governed_structural_search_symbols"] {
+		t.Errorf("expected both YAWR and CodeTopo tools when both enabled")
+	}
+}
+
 

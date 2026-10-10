@@ -124,15 +124,21 @@ func main() {
 
 func runInstall(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: a4c install <copilot|opencode|antigravity|all> [--dir <path>]")
+		fmt.Println("Usage: a4c install <copilot|opencode|antigravity|all> [--dir <path>] [--no-yawr] [--no-codetopo]")
 		return
 	}
 	target := args[0]
 	workDir := "."
+	enableYAWR := true
+	enableCodeTopo := true
 	for i := 1; i < len(args); i++ {
 		if args[i] == "--dir" && i+1 < len(args) {
 			workDir = args[i+1]
 			i++
+		} else if args[i] == "--no-yawr" || args[i] == "--without-yawr" {
+			enableYAWR = false
+		} else if args[i] == "--no-codetopo" || args[i] == "--without-codetopo" {
+			enableCodeTopo = false
 		}
 	}
 
@@ -145,11 +151,15 @@ func runInstall(args []string) {
 		fmt.Printf("✅ Installed GitHub Copilot agents (.github/agents/a4c.agent.md, bob.agent.md, charlie.agent.md, .mcp.json) in %s\n", workDir)
 
 	case "opencode":
-		if err := a4c.ExportOpenCodeAgents(workDir); err != nil {
+		opts := a4c.ExportOptions{
+			EnableYAWR:     enableYAWR,
+			EnableCodeTopo: enableCodeTopo,
+		}
+		if err := a4c.ExportOpenCodeAgentsWithOptions(workDir, opts); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to install OpenCode agents: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("✅ Installed OpenCode agents (.opencode/agents/a4c.md, bob.md, charlie.md, opencode.json) in %s\n", workDir)
+		fmt.Printf("✅ Installed OpenCode agents (.opencode/agents/a4c.md, bob.md, charlie.md, opencode.json) in %s (YAWR: %t, CodeTopo: %t)\n", workDir, enableYAWR, enableCodeTopo)
 
 	case "antigravity":
 		if err := a4c.ExportAntigravityCustomization(workDir); err != nil {
@@ -160,7 +170,7 @@ func runInstall(args []string) {
 
 	case "all":
 		_ = a4c.ExportCopilotAgents(workDir)
-		_ = a4c.ExportOpenCodeAgents(workDir)
+		_ = a4c.ExportOpenCodeAgentsWithOptions(workDir, a4c.ExportOptions{EnableYAWR: enableYAWR, EnableCodeTopo: enableCodeTopo})
 		_ = a4c.ExportAntigravityCustomization(workDir)
 		fmt.Printf("✅ Installed all host-native agent definitions (Copilot, OpenCode, Antigravity) in %s\n", workDir)
 
@@ -654,6 +664,15 @@ func runHost(args []string) {
 func runMCP(args []string) {
 	workDir := "."
 	role := ""
+	enableYAWR := true
+	if os.Getenv("A4C_DISABLE_YAWR") == "1" || strings.ToLower(os.Getenv("A4C_ENABLE_YAWR")) == "false" {
+		enableYAWR = false
+	}
+	enableCodeTopo := true
+	if os.Getenv("A4C_DISABLE_CODETOPO") == "1" || strings.ToLower(os.Getenv("A4C_ENABLE_CODETOPO")) == "false" {
+		enableCodeTopo = false
+	}
+
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--dir" && i+1 < len(args) {
 			workDir = args[i+1]
@@ -661,6 +680,14 @@ func runMCP(args []string) {
 		} else if (args[i] == "--role" || args[i] == "--agent") && i+1 < len(args) {
 			role = args[i+1]
 			i++
+		} else if args[i] == "--no-yawr" || args[i] == "--without-yawr" {
+			enableYAWR = false
+		} else if args[i] == "--no-codetopo" || args[i] == "--without-codetopo" {
+			enableCodeTopo = false
+		} else if args[i] == "--enable-yawr=false" {
+			enableYAWR = false
+		} else if args[i] == "--enable-codetopo=false" {
+			enableCodeTopo = false
 		}
 	}
 	svc, err := buildService(workDir)
@@ -668,7 +695,11 @@ func runMCP(args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to initialize A4C service: %v\n", err)
 		os.Exit(1)
 	}
-	srv := a4cmcp.NewServerWithRole(svc, role)
+	srv := a4cmcp.NewServerWithOptions(svc, a4cmcp.ServerOptions{
+		Role:           role,
+		EnableYAWR:     enableYAWR,
+		EnableCodeTopo: enableCodeTopo,
+	})
 	if err := srv.ServeStdio(); err != nil {
 		fmt.Fprintf(os.Stderr, "MCP server exited with error: %v\n", err)
 		os.Exit(1)

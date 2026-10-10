@@ -174,12 +174,14 @@ func (m *WorktreeManager) AcquireWorktree(ctx context.Context, taskID, ownerAgen
 		}
 	}
 
-	// Bootstrap CodeTopo index for worktree if codetopo is available and primary repo is indexed
-	primaryDB := filepath.Join(m.rootDir, ".codetopo", "index.sqlite")
-	if _, statErr := os.Stat(primaryDB); statErr == nil {
-		if ctPath := FindCodeTopoCLI(); ctPath != "" {
-			cmdInit := exec.CommandContext(ctx, ctPath, "worktree", "init", "--root", worktreeDir)
-			_ = cmdInit.Run()
+	// Bootstrap CodeTopo index for worktree if codetopo is available, primary repo is indexed, and not explicitly disabled
+	if os.Getenv("A4C_DISABLE_CODETOPO") != "1" && strings.ToLower(os.Getenv("A4C_ENABLE_CODETOPO")) != "false" {
+		primaryDB := filepath.Join(m.rootDir, ".codetopo", "index.sqlite")
+		if _, statErr := os.Stat(primaryDB); statErr == nil {
+			if ctPath := FindCodeTopoCLI(); ctPath != "" {
+				cmdInit := exec.CommandContext(ctx, ctPath, "worktree", "init", "--root", worktreeDir)
+				_ = cmdInit.Run()
+			}
 		}
 	}
 

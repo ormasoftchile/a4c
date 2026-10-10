@@ -17,25 +17,61 @@ import (
 
 // Server wraps the mark3labs MCP server with A4C team service handlers.
 type Server struct {
-	mcpServer *server.MCPServer
-	service   a4c.TeamService
-	governed  *governed.Manager
-	role      string
+	mcpServer      *server.MCPServer
+	service        a4c.TeamService
+	governed       *governed.Manager
+	role           string
+	enableYAWR     bool
+	enableCodeTopo bool
 }
 
-// NewServer initializes an MCP server exposing canonical A4C team tools and YAWR-governed execution tools.
+// ServerOptions configures optional subsystems on the A4C MCP server.
+type ServerOptions struct {
+	Role           string
+	EnableYAWR     bool
+	EnableCodeTopo bool
+}
+
+// DefaultServerOptions inspects environment flags and defaults to enabling both YAWR and CodeTopo.
+func DefaultServerOptions(role string) ServerOptions {
+	enableYAWR := true
+	if os.Getenv("A4C_DISABLE_YAWR") == "1" || strings.ToLower(os.Getenv("A4C_ENABLE_YAWR")) == "false" {
+		enableYAWR = false
+	}
+	enableCodeTopo := true
+	if os.Getenv("A4C_DISABLE_CODETOPO") == "1" || strings.ToLower(os.Getenv("A4C_ENABLE_CODETOPO")) == "false" {
+		enableCodeTopo = false
+	}
+	return ServerOptions{
+		Role:           role,
+		EnableYAWR:     enableYAWR,
+		EnableCodeTopo: enableCodeTopo,
+	}
+}
+
+// NewServer initializes an MCP server exposing canonical A4C team tools and default subsystems.
 func NewServer(service a4c.TeamService) *Server {
-	return NewServerWithRole(service, "")
+	return NewServerWithOptions(service, DefaultServerOptions(""))
 }
 
 // NewServerWithRole initializes an MCP server filtered for a specific agent role boundary.
 func NewServerWithRole(service a4c.TeamService, role string) *Server {
-	govMgr, _ := governed.NewManagerWithRole(service, "", role)
+	return NewServerWithOptions(service, DefaultServerOptions(role))
+}
+
+// NewServerWithOptions initializes an MCP server with explicit subsystem toggles.
+func NewServerWithOptions(service a4c.TeamService, opts ServerOptions) *Server {
+	var govMgr *governed.Manager
+	if opts.EnableYAWR {
+		govMgr, _ = governed.NewManagerWithRole(service, "", opts.Role)
+	}
 	s := &Server{
-		mcpServer: server.NewMCPServer("a4c-team", "1.0.0"),
-		service:   service,
-		governed:  govMgr,
-		role:      role,
+		mcpServer:      server.NewMCPServer("a4c-team", "1.0.0"),
+		service:        service,
+		governed:       govMgr,
+		role:           opts.Role,
+		enableYAWR:     opts.EnableYAWR,
+		enableCodeTopo: opts.EnableCodeTopo,
 	}
 	s.registerTools()
 	return s
@@ -44,9 +80,11 @@ func NewServerWithRole(service a4c.TeamService, role string) *Server {
 // NewServerWithGoverned allows supplying an explicit governed Manager.
 func NewServerWithGoverned(service a4c.TeamService, gov *governed.Manager) *Server {
 	s := &Server{
-		mcpServer: server.NewMCPServer("a4c-team", "1.0.0"),
-		service:   service,
-		governed:  gov,
+		mcpServer:      server.NewMCPServer("a4c-team", "1.0.0"),
+		service:        service,
+		governed:       gov,
+		enableYAWR:     gov != nil,
+		enableCodeTopo: true,
 	}
 	s.registerTools()
 	return s
@@ -227,81 +265,87 @@ func (s *Server) registerTools() {
 		s.handleReviewResult,
 	)
 
-	// 13. governed_read_file (All agents)
-	addAgentTool(true, true, true,
-		mcp.NewTool("governed_read_file",
-			mcp.WithDescription("Read an authorized file strictly inside the task's isolated worktree using the embedded YAWR execution engine."),
-			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
-			mcp.WithString("path", mcp.Required(), mcp.Description("Relative file path within the task worktree")),
-		),
-		s.handleGovernedReadFile,
-	)
+	// 13-16. YAWR-governed execution tools (enabled unless explicitly disabled)
+	if s.enableYAWR {
+		// 13. governed_read_file (All agents)
+		addAgentTool(true, true, true,
+			mcp.NewTool("governed_read_file",
+				mcp.WithDescription("Read an authorized file strictly inside the task's isolated worktree using the embedded YAWR execution engine."),
+				mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
+				mcp.WithString("path", mcp.Required(), mcp.Description("Relative file path within the task worktree")),
+			),
+			s.handleGovernedReadFile,
+		)
 
-	// 14. governed_apply_patch (Coder only)
-	addAgentTool(false, true, false,
-		mcp.NewTool("governed_apply_patch",
-			mcp.WithDescription("Apply a snapshot-bound unified patch strictly inside the task worktree via YAWR's governed execution kernel. Recorded in durable dispatch store with replay detection."),
-			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
-			mcp.WithString("patch", mcp.Required(), mcp.Description("Unified diff patch content to apply")),
-			mcp.WithString("expected_snapshot", mcp.Description("Expected git commit SHA prior to mutation")),
-			mcp.WithString("idempotency_key", mcp.Description("Optional idempotency key for deduplication")),
-		),
-		s.handleGovernedApplyPatch,
-	)
+		// 14. governed_apply_patch (Coder only)
+		addAgentTool(false, true, false,
+			mcp.NewTool("governed_apply_patch",
+				mcp.WithDescription("Apply a snapshot-bound unified patch strictly inside the task worktree via YAWR's governed execution kernel. Recorded in durable dispatch store with replay detection."),
+				mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
+				mcp.WithString("patch", mcp.Required(), mcp.Description("Unified diff patch content to apply")),
+				mcp.WithString("expected_snapshot", mcp.Description("Expected git commit SHA prior to mutation")),
+				mcp.WithString("idempotency_key", mcp.Description("Optional idempotency key for deduplication")),
+			),
+			s.handleGovernedApplyPatch,
+		)
 
-	// 15. governed_git_inspect (Lead, Reviewer)
-	addAgentTool(true, false, true,
-		mcp.NewTool("governed_git_inspect",
-			mcp.WithDescription("Inspect git status, diff, log, or commit SHA strictly inside the task worktree using the embedded YAWR engine."),
-			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
-			mcp.WithString("subcommand", mcp.Required(), mcp.Description("Subcommand: diff, status, log, rev-parse"), mcp.Enum("diff", "status", "log", "rev-parse")),
-			mcp.WithString("target", mcp.Description("Optional commit, branch, or file target")),
-		),
-		s.handleGovernedGitInspect,
-	)
+		// 15. governed_git_inspect (Lead, Reviewer)
+		addAgentTool(true, false, true,
+			mcp.NewTool("governed_git_inspect",
+				mcp.WithDescription("Inspect git status, diff, log, or commit SHA strictly inside the task worktree using the embedded YAWR engine."),
+				mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
+				mcp.WithString("subcommand", mcp.Required(), mcp.Description("Subcommand: diff, status, log, rev-parse"), mcp.Enum("diff", "status", "log", "rev-parse")),
+				mcp.WithString("target", mcp.Description("Optional commit, branch, or file target")),
+			),
+			s.handleGovernedGitInspect,
+		)
 
-	// 16. governed_run_tests (Coder only)
-	addAgentTool(false, true, false,
-		mcp.NewTool("governed_run_tests",
-			mcp.WithDescription("Execute bounded go test procedures in the task worktree and collect structured validation evidence via YAWR."),
-			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
-			mcp.WithString("package", mcp.Description("Go package path to test (default: ./...)")),
-			mcp.WithBoolean("race", mcp.Description("Enable Go data race detector (default: true)")),
-			mcp.WithString("idempotency_key", mcp.Description("Optional idempotency key for deduplication")),
-		),
-		s.handleGovernedRunTests,
-	)
+		// 16. governed_run_tests (Coder only)
+		addAgentTool(false, true, false,
+			mcp.NewTool("governed_run_tests",
+				mcp.WithDescription("Execute bounded go test procedures in the task worktree and collect structured validation evidence via YAWR."),
+				mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
+				mcp.WithString("package", mcp.Description("Go package path to test (default: ./...)")),
+				mcp.WithBoolean("race", mcp.Description("Enable Go data race detector (default: true)")),
+				mcp.WithString("idempotency_key", mcp.Description("Optional idempotency key for deduplication")),
+			),
+			s.handleGovernedRunTests,
+		)
+	}
 
-	// 17. governed_structural_search_symbols (All agents)
-	addAgentTool(true, true, true,
-		mcp.NewTool("governed_structural_search_symbols",
-			mcp.WithDescription("Search code symbols (functions, structs, methods, interfaces) across repository or task worktree via CodeTopo structural index."),
-			mcp.WithString("query", mcp.Required(), mcp.Description("Symbol name query or search term")),
-			mcp.WithString("task_id", mcp.Description("Optional task identifier to query the task worktree's isolated index")),
-		),
-		s.handleGovernedStructuralSearchSymbols,
-	)
+	// 17-19. CodeTopo structural tools (enabled unless explicitly disabled)
+	if s.enableCodeTopo {
+		// 17. governed_structural_search_symbols (All agents)
+		addAgentTool(true, true, true,
+			mcp.NewTool("governed_structural_search_symbols",
+				mcp.WithDescription("Search code symbols (functions, structs, methods, interfaces) across repository or task worktree via CodeTopo structural index."),
+				mcp.WithString("query", mcp.Required(), mcp.Description("Symbol name query or search term")),
+				mcp.WithString("task_id", mcp.Description("Optional task identifier to query the task worktree's isolated index")),
+			),
+			s.handleGovernedStructuralSearchSymbols,
+		)
 
-	// 18. governed_structural_context_for (All agents)
-	addAgentTool(true, true, true,
-		mcp.NewTool("governed_structural_context_for",
-			mcp.WithDescription("Retrieve rich structural context (definition, signature, source snippet, container, callers, and sibling members) for a code symbol."),
-			mcp.WithString("symbol", mcp.Description("Name of the symbol (e.g. 'Cache', 'Clear')")),
-			mcp.WithInteger("node_id", mcp.Description("Optional exact node_id in the CodeTopo graph")),
-			mcp.WithString("task_id", mcp.Description("Optional task identifier to query the task worktree's isolated index")),
-		),
-		s.handleGovernedStructuralContextFor,
-	)
+		// 18. governed_structural_context_for (All agents)
+		addAgentTool(true, true, true,
+			mcp.NewTool("governed_structural_context_for",
+				mcp.WithDescription("Retrieve rich structural context (definition, signature, source snippet, container, callers, and sibling members) for a code symbol."),
+				mcp.WithString("symbol", mcp.Description("Name of the symbol (e.g. 'Cache', 'Clear')")),
+				mcp.WithInteger("node_id", mcp.Description("Optional exact node_id in the CodeTopo graph")),
+				mcp.WithString("task_id", mcp.Description("Optional task identifier to query the task worktree's isolated index")),
+			),
+			s.handleGovernedStructuralContextFor,
+		)
 
-	// 19. governed_structural_callers (All agents)
-	addAgentTool(true, true, true,
-		mcp.NewTool("governed_structural_callers",
-			mcp.WithDescription("Retrieve callers for a symbol by node_id using CodeTopo structural intelligence."),
-			mcp.WithInteger("node_id", mcp.Required(), mcp.Description("The unique node_id of the target symbol")),
-			mcp.WithString("task_id", mcp.Description("Optional task identifier to query the task worktree's isolated index")),
-		),
-		s.handleGovernedStructuralCallers,
-	)
+		// 19. governed_structural_callers (All agents)
+		addAgentTool(true, true, true,
+			mcp.NewTool("governed_structural_callers",
+				mcp.WithDescription("Retrieve callers for a symbol by node_id using CodeTopo structural intelligence."),
+				mcp.WithInteger("node_id", mcp.Required(), mcp.Description("The unique node_id of the target symbol")),
+				mcp.WithString("task_id", mcp.Description("Optional task identifier to query the task worktree's isolated index")),
+			),
+			s.handleGovernedStructuralCallers,
+		)
+	}
 }
 
 func (s *Server) handleDelegate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

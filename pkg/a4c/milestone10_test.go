@@ -272,7 +272,7 @@ func TestMilestone10_04_TimingDomainSeparation(t *testing.T) {
 		t.Fatalf("expected FormatHumanReadable to contain domain durations, got:\n%s", readable)
 	}
 
-	inspect := hist.FormatInspect(nil, dir)
+	inspect := hist.FormatInspect(dir)
 	if !strings.Contains(inspect, "wall-clock") || !strings.Contains(inspect, "tools") || !strings.Contains(inspect, "validation") {
 		t.Fatalf("expected FormatInspect to contain domain durations, got:\n%s", inspect)
 	}

@@ -65,7 +65,8 @@ type HumanLifecycleRecord struct {
 type SubmitTaskRequest struct {
 	Objective    string            `json:"objective"`
 	BudgetTokens float64           `json:"budget_tokens,omitempty"`
-	Strategy     ExecutionStrategy `json:"strategy,omitempty"` // direct, reviewed, team (default)
+	Strategy     ExecutionStrategy `json:"strategy,omitempty"` // direct (default), reviewed, team
+	Specialist   string            `json:"specialist,omitempty"`
 	Runtime      string            `json:"runtime,omitempty"`  // copilot, opencode, fake
 	Model        string            `json:"model,omitempty"`
 	Inputs       map[string]any    `json:"inputs,omitempty"`

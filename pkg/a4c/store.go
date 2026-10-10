@@ -382,6 +382,19 @@ func (s *DurableActivityStore) Get(id string) (*ActivityRecord, error) {
 	return rec, nil
 }
 
+// Update updates an existing activity record and persists it to disk.
+func (s *DurableActivityStore) Update(rec ActivityRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing, ok := s.records[rec.Request.ID]
+	if !ok {
+		return ErrActivityNotFound
+	}
+	*existing = rec
+	return s.persist(existing)
+}
+
 func (s *DurableActivityStore) HasPending() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

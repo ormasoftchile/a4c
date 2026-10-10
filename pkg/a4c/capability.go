@@ -30,15 +30,12 @@ func NewCapabilityRegistry() *CapabilityRegistry {
 	reg.RegisterProfile(CapabilityProfile{
 		ID:          ProfileArchitectureInvestigation,
 		Name:        "Architecture Investigation",
-		Description: "Read-only structural symbol search, caller analysis, file inspection, and activity delegation.",
+		Description: "Read-only file inspection, activity delegation, and memory proposals.",
 		AllowedTools: []string{
 			"governed_read_file",
 			"governed_propose_activity",
 			"governed_request_human_decision",
 			"governed_propose_memory",
-			"governed_structural_search_symbols",
-			"governed_structural_context_for",
-			"governed_structural_callers",
 		},
 	})
 
@@ -46,7 +43,7 @@ func NewCapabilityRegistry() *CapabilityRegistry {
 	reg.RegisterProfile(CapabilityProfile{
 		ID:          ProfileCodeImplementation,
 		Name:        "Code Implementation",
-		Description: "Targeted file inspection, governed file patching, and memory proposals. No structural search or unmediated git.",
+		Description: "Targeted file inspection, file modification in worktree, and memory proposals.",
 		AllowedTools: []string{
 			"governed_read_file",
 			"governed_apply_patch",
@@ -110,7 +107,7 @@ func (r *CapabilityRegistry) ListProfiles() []CapabilityProfile {
 }
 
 // ResolveProfile dynamically derives the appropriate capability profile for an activity,
-// enforcing that YAWR and PolicyGovernor remain the ultimate authority.
+// enforcing that PolicyGovernor remains the ultimate authority.
 func (r *CapabilityRegistry) ResolveProfile(
 	agentID string,
 	role string,
@@ -153,7 +150,7 @@ func (r *CapabilityRegistry) ResolveProfile(
 		}
 	}
 
-	// Filter allowed tools strictly through YAWR / Governor authority
+	// Filter allowed tools strictly through PolicyGovernor authority
 	if gov != nil {
 		var authorizedTools []string
 		for _, tool := range base.AllowedTools {

@@ -40,7 +40,6 @@ func setupMCPHarness(t *testing.T) *mcpHarness {
 	journalDir := filepath.Join(dotDir, "journal")
 	lifecycleDir := filepath.Join(dotDir, "lifecycle")
 	wtDir := filepath.Join(dotDir, "worktrees")
-	structDir := filepath.Join(dotDir, "structural")
 
 	store, err := a4c.NewDurableActivityStore(storeDir)
 	if err != nil {
@@ -66,10 +65,6 @@ func setupMCPHarness(t *testing.T) *mcpHarness {
 	if err != nil {
 		t.Fatalf("create worktrees: %v", err)
 	}
-	structStore, err := a4c.NewDurableStructuralStore(structDir)
-	if err != nil {
-		t.Fatalf("create structural store: %v", err)
-	}
 
 	gov := a4c.NewPolicyGovernor([]string{
 		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
@@ -78,7 +73,7 @@ func setupMCPHarness(t *testing.T) *mcpHarness {
 	coord := a4c.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, &a4c.NativeGoTestRunner{}, nil)
 	coord.SetWorktreeManager(wtMgr)
 
-	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr, structStore)
+	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr)
 	return createMCPHarnessWithRole(t, repoDir, svc, store, "")
 }
 
@@ -100,7 +95,6 @@ func setupMCPHarnessWithRole(t *testing.T, role string) *mcpHarness {
 	journalDir := filepath.Join(dotDir, "journal")
 	lifecycleDir := filepath.Join(dotDir, "lifecycle")
 	wtDir := filepath.Join(dotDir, "worktrees")
-	structDir := filepath.Join(dotDir, "structural")
 
 	store, err := a4c.NewDurableActivityStore(storeDir)
 	if err != nil {
@@ -126,10 +120,6 @@ func setupMCPHarnessWithRole(t *testing.T, role string) *mcpHarness {
 	if err != nil {
 		t.Fatalf("create worktrees: %v", err)
 	}
-	structStore, err := a4c.NewDurableStructuralStore(structDir)
-	if err != nil {
-		t.Fatalf("create structural store: %v", err)
-	}
 
 	gov := a4c.NewPolicyGovernor([]string{
 		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
@@ -138,7 +128,7 @@ func setupMCPHarnessWithRole(t *testing.T, role string) *mcpHarness {
 	coord := a4c.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, &a4c.NativeGoTestRunner{}, nil)
 	coord.SetWorktreeManager(wtMgr)
 
-	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr, structStore)
+	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr)
 	return createMCPHarnessWithRole(t, repoDir, svc, store, role)
 }
 
@@ -209,18 +199,18 @@ func TestMCPServer_ToolDiscovery(t *testing.T) {
 		"team_checkpoint":        false,
 		"team_complete_activity": false,
 		"team_review_result":     false,
-		"governed_read_file":     false,
-		"governed_apply_patch":   false,
-		"governed_git_inspect":   false,
-		"governed_run_tests":                 false,
-		"governed_structural_search_symbols": false,
-		"governed_structural_context_for":   false,
-		"governed_structural_callers":        false,
 	}
 
 	prohibitedTools := map[string]bool{
-		"team_accept":    true,
-		"team_integrate": true,
+		"team_accept":                         true,
+		"team_integrate":                      true,
+		"governed_read_file":                  true,
+		"governed_apply_patch":                true,
+		"governed_git_inspect":                true,
+		"governed_run_tests":                  true,
+		"governed_structural_search_symbols":  true,
+		"governed_structural_context_for":    true,
+		"governed_structural_callers":         true,
 	}
 
 	for _, tool := range toolsRes.Tools {
@@ -269,17 +259,14 @@ func TestMCPServer_RoleDiscovery_Coder(t *testing.T) {
 		"team_diff":              true,
 		"team_checkpoint":        true,
 		"team_complete_activity": true,
-		"governed_read_file":     true,
-		"governed_apply_patch":   true,
-		"governed_run_tests":                 true,
-		"governed_structural_search_symbols": true,
-		"governed_structural_context_for":   true,
-		"governed_structural_callers":        true,
 	}
 
 	prohibited := []string{
-		"team_review_result", "governed_git_inspect", "team_delegate",
-		"team_list", "team_feedback", "team_accept", "team_integrate",
+		"team_review_result", "team_delegate", "team_list", "team_feedback",
+		"team_context", "team_begin_task", "team_assign_activity",
+		"team_accept", "team_integrate",
+		"governed_read_file", "governed_apply_patch", "governed_git_inspect", "governed_run_tests",
+		"governed_structural_search_symbols", "governed_structural_context_for", "governed_structural_callers",
 	}
 
 	toolMap := make(map[string]bool)
@@ -314,21 +301,19 @@ func TestMCPServer_RoleDiscovery_Reviewer(t *testing.T) {
 	}
 
 	allowed := map[string]bool{
-		"team_status":          true,
-		"team_result":          true,
-		"team_diff":            true,
-		"team_checkpoint":      true,
-		"team_review_result":   true,
-		"governed_read_file":                 true,
-		"governed_git_inspect":               true,
-		"governed_structural_search_symbols": true,
-		"governed_structural_context_for":   true,
-		"governed_structural_callers":        true,
+		"team_status":        true,
+		"team_result":        true,
+		"team_diff":          true,
+		"team_checkpoint":    true,
+		"team_review_result": true,
 	}
 
 	prohibited := []string{
-		"governed_apply_patch", "governed_run_tests", "team_delegate",
-		"team_complete_activity", "team_accept", "team_integrate",
+		"team_delegate", "team_complete_activity", "team_list", "team_feedback",
+		"team_context", "team_begin_task", "team_assign_activity",
+		"team_accept", "team_integrate",
+		"governed_read_file", "governed_apply_patch", "governed_git_inspect", "governed_run_tests",
+		"governed_structural_search_symbols", "governed_structural_context_for", "governed_structural_callers",
 	}
 
 	toolMap := make(map[string]bool)
@@ -374,15 +359,12 @@ func TestMCPServer_RoleDiscovery_Lead(t *testing.T) {
 		"team_assign_activity":   true,
 		"team_checkpoint":        true,
 		"team_complete_activity": true,
-		"governed_read_file":                 true,
-		"governed_git_inspect":               true,
-		"governed_structural_search_symbols": true,
-		"governed_structural_context_for":   true,
-		"governed_structural_callers":        true,
 	}
 
 	prohibited := []string{
-		"governed_apply_patch", "governed_run_tests", "team_accept", "team_integrate",
+		"team_review_result", "team_accept", "team_integrate",
+		"governed_read_file", "governed_apply_patch", "governed_git_inspect", "governed_run_tests",
+		"governed_structural_search_symbols", "governed_structural_context_for", "governed_structural_callers",
 	}
 
 	toolMap := make(map[string]bool)
@@ -778,211 +760,5 @@ func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
 	}
 }
 
-func TestMCPServer_GovernedTools(t *testing.T) {
-	h := setupMCPHarness(t)
-	defer h.client.Close()
-
-	ctx := context.Background()
-
-	// 1. Begin a task to create worktree
-	beginRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_begin_task",
-			Arguments: map[string]any{
-				"objective": "Test governed execution tools",
-				"strategy":  "team",
-			},
-		},
-	})
-	if err != nil || beginRes.IsError {
-		t.Fatalf("team_begin_task failed: %v (%+v)", err, beginRes)
-	}
-	var bRes a4c.BeginTaskResult
-	_ = json.Unmarshal([]byte(beginRes.Content[0].(mcp.TextContent).Text), &bRes)
-
-	// Assign activity to Bob (coder) so mutating authority is granted
-	_, err = h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_assign_activity",
-			Arguments: map[string]any{
-				"task_id":   bRes.TaskID,
-				"agent":     "bob",
-				"role":      "coder",
-				"objective": "Implement test file",
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("assign activity failed: %v", err)
-	}
-
-	// 2. governed_read_file on README.md
-	readRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "governed_read_file",
-			Arguments: map[string]any{
-				"task_id": bRes.TaskID,
-				"path":    "README.md",
-			},
-		},
-	})
-	if err != nil || readRes.IsError {
-		t.Fatalf("governed_read_file failed: %v (%+v)", err, readRes)
-	}
-
-	// 3. governed_git_inspect status
-	gitRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "governed_git_inspect",
-			Arguments: map[string]any{
-				"task_id":    bRes.TaskID,
-				"subcommand": "status",
-			},
-		},
-	})
-	if err != nil || gitRes.IsError {
-		t.Fatalf("governed_git_inspect failed: %v (%+v)", err, gitRes)
-	}
-
-	// 4. governed_apply_patch as Bob
-	patchText := `diff --git a/sample.txt b/sample.txt
-new file mode 100644
---- /dev/null
-+++ b/sample.txt
-@@ -0,0 +1,2 @@
-+hello from governed patch
-+verified by yawr
-`
-	patchRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "governed_apply_patch",
-			Arguments: map[string]any{
-				"task_id":         bRes.TaskID,
-				"patch":           patchText,
-				"idempotency_key": "patch-key-1",
-			},
-		},
-	})
-	if err != nil || patchRes.IsError {
-		t.Fatalf("governed_apply_patch failed: %v (%+v)", err, patchRes)
-	}
-
-	// 5. Verify replay of the identical patch
-	patchReplayRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "governed_apply_patch",
-			Arguments: map[string]any{
-				"task_id":         bRes.TaskID,
-				"patch":           patchText,
-				"idempotency_key": "patch-key-1",
-			},
-		},
-	})
-	if err != nil || patchReplayRes.IsError {
-		t.Fatalf("governed_apply_patch replay failed: %v (%+v)", err, patchReplayRes)
-	}
-	var repOut map[string]any
-	_ = json.Unmarshal([]byte(patchReplayRes.Content[0].(mcp.TextContent).Text), &repOut)
-	if repOut["replayed"] != true {
-		t.Errorf("expected replayed=true on identical key retry, got %+v", repOut)
-	}
-}
-
-func TestMCPServer_GovernedStructuralTools(t *testing.T) {
-	h := setupMCPHarness(t)
-	defer h.client.Close()
-
-	ctx := context.Background()
-
-	// 1. Without index present, should return informative error over MCP (not crash)
-	res, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "governed_structural_search_symbols",
-			Arguments: map[string]any{
-				"query": "something",
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("unexpected transport error: %v", err)
-	}
-	if !res.IsError {
-		t.Errorf("expected error when codetopo index is missing, got: %+v", res)
-	}
-}
-
-func TestMCPServer_AblationOptions(t *testing.T) {
-	h := setupMCPHarness(t)
-	defer h.client.Close()
-
-	ctx := context.Background()
-
-	// Helper to get registered tool names for given options
-	toolsForOpts := func(opts a4cmcp.ServerOptions) map[string]bool {
-		srv := a4cmcp.NewServerWithOptions(h.service, opts)
-		cli, err := client.NewInProcessClient(srv.MCPServer())
-		if err != nil {
-			t.Fatalf("create in-process client: %v", err)
-		}
-		defer cli.Close()
-		if err := cli.Start(ctx); err != nil {
-			t.Fatalf("start client: %v", err)
-		}
-		initReq := mcp.InitializeRequest{
-			Params: mcp.InitializeParams{
-				ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
-				ClientInfo:      mcp.Implementation{Name: "ablation-tester", Version: "1.0.0"},
-			},
-		}
-		if _, err := cli.Initialize(ctx, initReq); err != nil {
-			t.Fatalf("init client: %v", err)
-		}
-		toolsRes, err := cli.ListTools(ctx, mcp.ListToolsRequest{})
-		if err != nil {
-			t.Fatalf("list tools: %v", err)
-		}
-		res := make(map[string]bool)
-		for _, tool := range toolsRes.Tools {
-			res[tool.Name] = true
-		}
-		return res
-	}
-
-	// 1. Minimal A4C: No YAWR, No CodeTopo
-	minTools := toolsForOpts(a4cmcp.ServerOptions{EnableYAWR: false, EnableCodeTopo: false})
-	if !minTools["team_begin_task"] || !minTools["team_status"] {
-		t.Errorf("expected team coordination tools in minimal A4C")
-	}
-	if minTools["governed_apply_patch"] || minTools["governed_run_tests"] {
-		t.Errorf("expected NO YAWR tools when EnableYAWR=false")
-	}
-	if minTools["governed_structural_search_symbols"] {
-		t.Errorf("expected NO CodeTopo tools when EnableCodeTopo=false")
-	}
-
-	// 2. A4C + YAWR (no CodeTopo)
-	yawrTools := toolsForOpts(a4cmcp.ServerOptions{EnableYAWR: true, EnableCodeTopo: false})
-	if !yawrTools["governed_apply_patch"] || !yawrTools["governed_run_tests"] {
-		t.Errorf("expected YAWR tools when EnableYAWR=true")
-	}
-	if yawrTools["governed_structural_search_symbols"] {
-		t.Errorf("expected NO CodeTopo tools when EnableCodeTopo=false")
-	}
-
-	// 3. A4C + CodeTopo (no YAWR)
-	ctTools := toolsForOpts(a4cmcp.ServerOptions{EnableYAWR: false, EnableCodeTopo: true})
-	if ctTools["governed_apply_patch"] || ctTools["governed_run_tests"] {
-		t.Errorf("expected NO YAWR tools when EnableYAWR=false")
-	}
-	if !ctTools["governed_structural_search_symbols"] {
-		t.Errorf("expected CodeTopo tools when EnableCodeTopo=true")
-	}
-
-	// 4. Current A4C (both enabled)
-	fullTools := toolsForOpts(a4cmcp.ServerOptions{EnableYAWR: true, EnableCodeTopo: true})
-	if !fullTools["governed_apply_patch"] || !fullTools["governed_structural_search_symbols"] {
-		t.Errorf("expected both YAWR and CodeTopo tools when both enabled")
-	}
-}
 
 

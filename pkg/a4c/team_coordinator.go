@@ -51,11 +51,8 @@ type TeamCoordinator struct {
 	revisionCount          int
 	lastEvidence           *ValidationEvidence
 	sessions               map[string]AgentSession
-	Handoff                *HandoffBuilder
-	Structural             StructuralProvider
-	Capabilities           *CapabilityRegistry
-	StructuralStore        *DurableStructuralStore
-	lastStructuralArtifact *StructuralContextArtifact
+	Handoff      *HandoffBuilder
+	Capabilities *CapabilityRegistry
 }
 
 func NewTeamCoordinator(
@@ -130,6 +127,13 @@ func (c *TeamCoordinator) RegisterProvider(name string, p AgentProvider) {
 	c.Providers[name] = p
 }
 
+// SetDefaultProvider sets the default agent provider.
+func (c *TeamCoordinator) SetDefaultProvider(p AgentProvider) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Provider = p
+}
+
 func (c *TeamCoordinator) resolveProvider(req *ActivityRequest) AgentProvider {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -142,7 +146,18 @@ func (c *TeamCoordinator) resolveProviderLocked(req *ActivityRequest) AgentProvi
 			return p
 		}
 	}
-	return c.Provider
+	if c.Provider != nil {
+		return c.Provider
+	}
+	if c.Providers != nil {
+		if fake, ok := c.Providers["fake"]; ok {
+			return fake
+		}
+		for _, p := range c.Providers {
+			return p
+		}
+	}
+	return nil
 }
 
 
@@ -151,27 +166,6 @@ func (c *TeamCoordinator) SetWorktreeManager(mgr *WorktreeManager) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.WorktreeMgr = mgr
-}
-
-// SetStructuralProvider sets the optional code graph intelligence provider (CodeTopo).
-func (c *TeamCoordinator) SetStructuralProvider(p StructuralProvider) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.Structural = p
-}
-
-// SetStructuralStore connects durable storage for shared structural context artifacts.
-func (c *TeamCoordinator) SetStructuralStore(s *DurableStructuralStore) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.StructuralStore = s
-}
-
-// SetStructuralArtifact caches and persists a shared structural artifact.
-func (c *TeamCoordinator) SetStructuralArtifact(art *StructuralContextArtifact) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.setStructuralArtifactLocked(art)
 }
 
 // AcquireWorkspaceLock explicitly acquires the exclusive OS kernel lock on .a4c/workspace.lock.
@@ -208,30 +202,6 @@ func (c *TeamCoordinator) Close() error {
 	return c.ReleaseWorkspaceLock()
 }
 
-func (c *TeamCoordinator) setStructuralArtifactLocked(art *StructuralContextArtifact) {
-	c.lastStructuralArtifact = art
-	if c.StructuralStore != nil && art != nil {
-		_ = c.StructuralStore.Save(art)
-	}
-}
-
-// GetStructuralArtifact retrieves a structural artifact by ID.
-func (c *TeamCoordinator) GetStructuralArtifact(id string) (*StructuralContextArtifact, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.getStructuralArtifactLocked(id)
-}
-
-func (c *TeamCoordinator) getStructuralArtifactLocked(id string) (*StructuralContextArtifact, error) {
-	if c.lastStructuralArtifact != nil && c.lastStructuralArtifact.ID == id {
-		return c.lastStructuralArtifact, nil
-	}
-	if c.StructuralStore != nil {
-		return c.StructuralStore.Get(id)
-	}
-	return nil, fmt.Errorf("structural artifact %q not found", id)
-}
-
 func (c *TeamCoordinator) getRootTaskID(req *ActivityRequest) string {
 	rootID := req.ID
 	curr := req
@@ -250,8 +220,25 @@ func (c *TeamCoordinator) resolveWorkspace(req *ActivityRequest) string {
 	if c.WorktreeMgr != nil {
 		rootID := c.getRootTaskID(req)
 		if wt, err := c.WorktreeMgr.GetWorktree(rootID); err == nil && wt.WorktreePath != "" {
-			return wt.WorktreePath
+			p := wt.WorktreePath
+			if !filepath.IsAbs(p) {
+				base, err := filepath.Abs(c.WorkspaceDir)
+				if err == nil {
+					p = filepath.Join(base, p)
+				} else {
+					p = filepath.Join(c.WorkspaceDir, p)
+				}
+			}
+			abs, err := filepath.Abs(p)
+			if err == nil {
+				return abs
+			}
+			return p
 		}
+	}
+	abs, err := filepath.Abs(c.WorkspaceDir)
+	if err == nil {
+		return abs
 	}
 	return c.WorkspaceDir
 }
@@ -281,7 +268,7 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 	}
 
 	if strategy == "" {
-		strategy = StrategyTeam
+		strategy = StrategyDirect
 	}
 
 	taskID := fmt.Sprintf("task-%d", time.Now().UnixNano())
@@ -295,6 +282,8 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 	}
 
 	var runtime, model string
+	specialist := "coder"
+	reviewer := "reviewer"
 	if inputs != nil {
 		if r, ok := inputs["runtime"].(string); ok {
 			runtime = r
@@ -302,14 +291,20 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 		if m, ok := inputs["model"].(string); ok {
 			model = m
 		}
+		if s, ok := inputs["specialist"].(string); ok && s != "" {
+			specialist = s
+		}
+		if r, ok := inputs["reviewer"].(string); ok && r != "" {
+			reviewer = r
+		}
 	}
 
 	switch strategy {
 	case StrategyDirect:
-		// Mode B / Direct: Single programmer handles the task directly under governance & native tests
+		// Zero-Coordinator Fast Path: Exactly one specialist coding session
 		req := ActivityRequest{
 			ID:        taskID,
-			AgentID:   "coder",
+			AgentID:   specialist,
 			Objective: objective,
 			Inputs:    inputs,
 			Budget:    budget,
@@ -324,13 +319,29 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 		return &req, nil
 
 	case StrategyReviewed:
-		// Programmer implements + Independent Reviewer verifies
+		// Specialist implements + Independent Reviewer verifies (zero coordinator sessions)
+		coderBudget := budget.Allocated * 0.7
+		if coderBudget < 35000 {
+			coderBudget = 35000
+		}
+		revBudget := budget.Allocated * 0.5
+		if revBudget < 30000 {
+			revBudget = 30000
+		}
+		revRuntime := runtime
+		if rr, ok := inputs["reviewer_runtime"].(string); ok && rr != "" {
+			revRuntime = rr
+		}
+		revModel := model
+		if rm, ok := inputs["reviewer_model"].(string); ok && rm != "" {
+			revModel = rm
+		}
 		coderReq := ActivityRequest{
 			ID:        taskID,
-			AgentID:   "coder",
+			AgentID:   specialist,
 			Objective: objective,
 			Inputs:    inputs,
-			Budget:    Budget{Allocated: budget.Allocated * 0.7},
+			Budget:    Budget{Allocated: coderBudget},
 			Strategy:  StrategyReviewed,
 			Runtime:   runtime,
 			Model:     model,
@@ -339,13 +350,13 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 		reviewerReq := ActivityRequest{
 			ID:        fmt.Sprintf("%s-rev", taskID),
 			ParentID:  taskID,
-			AgentID:   "reviewer",
+			AgentID:   reviewer,
 			Objective: fmt.Sprintf("Review implementation of: %s", objective),
-			Budget:    Budget{Allocated: budget.Allocated * 0.3},
+			Budget:    Budget{Allocated: revBudget},
 			DependsOn: []string{taskID},
 			Strategy:  StrategyReviewed,
-			Runtime:   runtime,
-			Model:     model,
+			Runtime:   revRuntime,
+			Model:     revModel,
 			CreatedAt: time.Now(),
 		}
 		if c.Governor != nil {
@@ -533,7 +544,6 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		Budget:           req.Budget,
 		Governor:         c.Governor,
 		IntentJournal:    c.Journal,
-		Structural:       c.Structural,
 		Profile:          &profile,
 		AllowedTools:     profile.AllowedTools,
 		MaxToolCalls:     effectiveLimits.MaxToolCalls,
@@ -565,7 +575,13 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	}
 
 	// 5. Initialize or resume independent agent session
-	session, err := c.resolveProviderLocked(req).CreateSession(ctx, config)
+	prov := c.resolveProviderLocked(req)
+	if prov == nil {
+		err := fmt.Errorf("coordinator: no agent provider configured for runtime %q", req.Runtime)
+		_ = c.Store.Fail(req.ID, err)
+		return nil, err
+	}
+	session, err := prov.CreateSession(ctx, config)
 	if err != nil {
 		_ = c.Store.Fail(req.ID, err)
 		return nil, fmt.Errorf("coordinator: failed to initialize session for %s: %w", ident.ID, err)
@@ -573,8 +589,12 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	defer session.Close()
 
 	// 6. Build prompt with injected verified team memory & role-appropriate context via HandoffBuilder
+	isReviewerRole := strings.EqualFold(ident.ID, "reviewer") ||
+		strings.EqualFold(ident.ID, "charlie") ||
+		strings.Contains(strings.ToLower(ident.Role), "reviewer")
+
 	diff := ""
-	if ident.ID == "reviewer" {
+	if isReviewerRole {
 		diff, _ = c.getWorkspaceDiff(ctx, activeWorkspace)
 		if c.lastEvidence == nil {
 			for _, depID := range req.DependsOn {
@@ -603,34 +623,25 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			c.lastEvidence.Duration.Round(time.Millisecond), c.lastEvidence.Valid, c.lastEvidence.OutputSummary)
 	}
 
-	// Resolve shared structural projection if available
-	var structProj string
-	structArt := c.lastStructuralArtifact
-	if req.StructuralArtifactID != "" {
-		if loaded, err := c.getStructuralArtifactLocked(req.StructuralArtifactID); err == nil && loaded != nil {
-			structArt = loaded
-		}
-	}
-	if structArt != nil {
-		switch ident.ID {
-		case "coder":
-			structProj = structArt.ProjectForCoder(40)
-		case "reviewer":
-			structProj = structArt.ProjectForReviewer(35)
+	var checkpoint *TaskCheckpoint
+	if req.Inputs != nil {
+		if chk, ok := req.Inputs["checkpoint"].(*TaskCheckpoint); ok {
+			checkpoint = chk
 		}
 	}
 
 	artifact := HandoffArtifact{
-		Objective:            req.Objective,
-		Role:                 fmt.Sprintf("%s (%s)", ident.Name, ident.Role),
-		AgentID:              ident.ID,
-		ActiveWorkspace:      activeWorkspace,
-		Diff:                 diff,
-		ValidationEvidence:   evidenceSummary,
-		VerifiedMemories:     c.Memory.FormatContext(),
-		Inputs:               req.Inputs,
-		StructuralProjection: structProj,
-		ProfileDescription:   profile.Format(),
+		Objective:          req.Objective,
+		Role:               fmt.Sprintf("%s (%s)", ident.Name, ident.Role),
+		AgentID:            ident.ID,
+		Strategy:           req.Strategy,
+		ActiveWorkspace:    activeWorkspace,
+		Diff:               diff,
+		ValidationEvidence: evidenceSummary,
+		VerifiedMemories:   c.Memory.FormatContext(),
+		Inputs:             req.Inputs,
+		ProfileDescription: profile.Format(),
+		Checkpoint:         checkpoint,
 	}
 
 	prompt := c.Handoff.BuildPrompt(artifact)
@@ -738,38 +749,20 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 	// 10. Process role-specific authoritative lifecycle
 	result := &ActivityResult{
-		ID:                   req.ID,
-		Status:               StatusCompleted,
-		Consumed:             consumed,
-		Metrics:              metrics,
-		CapabilityProfile:    &profile,
-		StructuralArtifactID: req.StructuralArtifactID,
+		ID:                req.ID,
+		Status:            StatusCompleted,
+		Consumed:          consumed,
+		Metrics:           metrics,
+		CapabilityProfile: &profile,
 		Outputs: map[string]any{
 			"summary":    resp.Content,
 			"session_id": session.SessionID(),
 		},
 	}
 
-	switch ident.ID {
-	case "lead":
-		// Auto-capture structural context artifact if structural provider is available
-		if c.Structural != nil && c.Structural.Available() {
-			freshness, _ := c.Structural.CheckFreshness(ctx, activeWorkspace)
-			snapSHA, _ := c.Snapshotter.ComputeSnapshot(activeWorkspace)
-			artID := fmt.Sprintf("struct-%s", req.ID)
-			art := &StructuralContextArtifact{
-				ID:                artID,
-				RepositoryID:      req.ID,
-				WorkspaceSnapshot: snapSHA,
-				IndexedSnapshot:   snapSHA,
-				Freshness:         freshness,
-				Completeness:      "complete",
-				CreatedAt:         time.Now(),
-			}
-			c.setStructuralArtifactLocked(art)
-			result.StructuralArtifactID = artID
-		}
+	isLead := strings.EqualFold(ident.ID, "lead") || strings.EqualFold(ident.Role, "lead") || strings.EqualFold(ident.ID, "alice")
 
+	if isLead {
 		// Authorize and enqueue delegated subtasks
 		proposalIDMap := make(map[string]string)
 		for idx, prop := range proposedActivities {
@@ -810,10 +803,25 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			authReq.CapabilityProfile = &childProfile
 			authReq.Runtime = req.Runtime
 			authReq.Model = req.Model
-			if result.StructuralArtifactID != "" {
-				authReq.StructuralArtifactID = result.StructuralArtifactID
-			} else if c.lastStructuralArtifact != nil {
-				authReq.StructuralArtifactID = c.lastStructuralArtifact.ID
+			if prop.Inputs != nil {
+				if r, ok := prop.Inputs["runtime"].(string); ok && r != "" {
+					authReq.Runtime = r
+				}
+				if m, ok := prop.Inputs["model"].(string); ok && m != "" {
+					authReq.Model = m
+				}
+			}
+			if req.Inputs != nil {
+				if rMap, ok := req.Inputs["agent_runtimes"].(map[string]string); ok {
+					if r, exists := rMap[prop.ProposedAgentID]; exists && r != "" {
+						authReq.Runtime = r
+					}
+				}
+				if mMap, ok := req.Inputs["agent_models"].(map[string]string); ok {
+					if m, exists := mMap[prop.ProposedAgentID]; exists && m != "" {
+						authReq.Model = m
+					}
+				}
 			}
 
 			// Idempotency check: don't double enqueue if already exists
@@ -827,8 +835,8 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		_ = c.Store.Complete(req.ID, *result)
 
 
-	case "coder":
-		// Deterministic native testing and evidence collection
+	} else if !isReviewerRole {
+		// Specialist implementer: deterministic native testing and evidence collection
 		beforeSnapshot, err := c.Snapshotter.ComputeSnapshot(activeWorkspace)
 		if err != nil {
 			_ = c.Store.Fail(req.ID, err)
@@ -860,7 +868,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			repairAttempts := 0
 			for repairAttempts < c.MaxRepair {
 				repairAttempts++
-				repairPrompt := fmt.Sprintf("Tests failed with exit code %d:\n%s\nPlease fix using governed_apply_patch.", exitCode, testOut)
+				repairPrompt := fmt.Sprintf("Tests failed with exit code %d:\n%s\nPlease fix the failure in the workspace and ensure all tests pass.", exitCode, testOut)
 				_, rErr := session.Send(ctx, repairPrompt)
 				if rErr != nil {
 					break
@@ -934,7 +942,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		_ = c.Store.Complete(req.ID, *result)
 
 
-	case "reviewer":
+	} else {
 		// Reviewer verification
 		approved := true
 		comments := "Changes meet specifications and native tests passed."
@@ -1070,7 +1078,6 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			authCoderReq.ParentID = req.ID
 			repairProfile := c.Capabilities.ResolveProfile("coder", "Senior Software Engineer", authCoderReq.Objective, nil, c.Governor)
 			authCoderReq.CapabilityProfile = &repairProfile
-			authCoderReq.StructuralArtifactID = req.StructuralArtifactID
 			if err := c.Store.Enqueue(*authCoderReq); err != nil {
 				return nil, err
 			}
@@ -1088,7 +1095,6 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 				authReviewReq.ParentID = req.ID
 				reReviewProfile := c.Capabilities.ResolveProfile("reviewer", "Code Reviewer & Quality Engineer", authReviewReq.Objective, nil, c.Governor)
 				authReviewReq.CapabilityProfile = &reReviewProfile
-				authReviewReq.StructuralArtifactID = req.StructuralArtifactID
 				authReviewReq.DependsOn = []string{revisionID}
 				_ = c.Store.Enqueue(*authReviewReq)
 			}
@@ -1111,9 +1117,6 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			}
 		}
 
-		_ = c.Store.Complete(req.ID, *result)
-
-	default:
 		_ = c.Store.Complete(req.ID, *result)
 	}
 

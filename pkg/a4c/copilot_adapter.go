@@ -2,7 +2,6 @@ package a4c
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -47,18 +46,6 @@ type RequestHumanDecisionParams struct {
 type ProposeMemoryParams struct {
 	Key     string `json:"key" jsonschema:"unique key for the convention or architectural constraint"`
 	Content string `json:"content" jsonschema:"the constraint or convention description"`
-}
-
-type StructuralSearchParams struct {
-	Query string `json:"query" jsonschema:"search pattern or symbol name to find in the code graph"`
-}
-
-type StructuralContextParams struct {
-	Name string `json:"name" jsonschema:"exact symbol name to inspect definition, signature, and context"`
-}
-
-type StructuralCallersParams struct {
-	NodeID int `json:"node_id" jsonschema:"node ID of the symbol to find callers and call sites for"`
 }
 
 type CopilotSessionAdapter struct {
@@ -143,6 +130,15 @@ func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*Agent
 			}
 			if data.OutputTokens != nil {
 				s.usage.CompletionTokens += int(*data.OutputTokens)
+			}
+			if data.CacheReadTokens != nil {
+				s.usage.CachedTokens += int(*data.CacheReadTokens)
+			}
+			if data.ReasoningTokens != nil {
+				s.usage.ReasoningTokens += int(*data.ReasoningTokens)
+			}
+			if data.Cost != nil {
+				s.usage.ReportedCostUSD += *data.Cost
 			}
 			s.usage.TotalTokens = s.usage.PromptTokens + s.usage.CompletionTokens
 			if s.config.Budget.Allocated > 0 && float64(s.usage.TotalTokens) > s.config.Budget.Allocated {
@@ -300,6 +296,38 @@ func (p *CopilotProvider) Capabilities() RuntimeCapabilities {
 	}
 }
 
+// HostCapabilities returns the explicit discoverable technical capabilities of GitHub Copilot CLI.
+func (p *CopilotProvider) HostCapabilities() HostCapabilities {
+	return HostCapabilities{
+		HostID:                "copilot",
+		DisplayName:           "GitHub Copilot CLI",
+		Version:               "1.0.95",
+		Available:             true,
+		SessionInvocation:     true,
+		WorktreeBinding:       true,
+		ContextInjection:      true,
+		CompletionCollection:  true,
+		SessionCancellation:   true,
+		ModelSelection:        true,
+		NativeSubagents:       false,
+		SessionResumption:     true,
+		StructuredTelemetry:   true,
+		ToolRestrictions:     true,
+		InteractiveAttachment: true,
+		DefaultModel:          p.model,
+		SupportedModels: []string{
+			"claude-opus-4.8",
+			"gpt-4o",
+			"claude-3.5-sonnet",
+			"auto",
+		},
+		Limitations: []string{
+			"CLI stdio protocol requires active GitHub account authentication",
+			"Native subagent spawning is not exposed via automation SDK session",
+		},
+	}
+}
+
 func (p *CopilotProvider) CreateSession(ctx context.Context, config AgentConfig) (AgentSession, error) {
 	return p.buildSession(ctx, "", config)
 }
@@ -327,13 +355,6 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		} {
 			if config.Governor == nil || config.Governor.AuthorizeToolInvocation(config.AgentID, t) == nil {
 				allowedSet[t] = true
-			}
-		}
-		if config.Structural != nil {
-			for _, st := range []string{"governed_structural_search_symbols", "governed_structural_context_for", "governed_structural_callers"} {
-				if config.Governor == nil || config.Governor.AuthorizeToolInvocation(config.AgentID, st) == nil {
-					allowedSet[st] = true
-				}
 			}
 		}
 	}
@@ -532,6 +553,8 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			return fmt.Sprintf("Convention proposed: [%s] %s", params.Key, params.Content), nil
 		})
 
+	mutating := isMutatingSpecialist(config.AgentID)
+
 	// 2. Strict permission handler that fails closed
 	permHandler := func(request copilot.PermissionRequest, invocation copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
 		if err := adapter.CheckBudget(); err != nil {
@@ -545,14 +568,23 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		case rpc.PermissionRequestCustomTool:
 			toolName = req.ToolName
 		}
-		if !allowedSet[toolName] {
-			feedback := fmt.Sprintf("Capability profile rejected tool: %q is not permitted in active profile", toolName)
-			return &rpc.PermissionDecisionReject{Feedback: &feedback}, nil
+
+		if !mutating {
+			// Reviewer is strictly read-only: deny mutation
+			if toolName == "write" || toolName == "edit" || toolName == "patch" || toolName == "governed_apply_patch" {
+				feedback := fmt.Sprintf("Reviewer boundary invariant: tool %q is mutating and prohibited for reviewer", toolName)
+				return &rpc.PermissionDecisionReject{Feedback: &feedback}, nil
+			}
+			return &rpc.PermissionDecisionApproveOnce{}, nil
 		}
+
+		// Mutating specialist in isolated worktree: permit native tools
 		if config.Governor != nil {
 			if err := config.Governor.AuthorizeToolInvocation(config.AgentID, toolName); err != nil {
-				feedback := fmt.Sprintf("Policy rejected tool: %v", err)
-				return &rpc.PermissionDecisionReject{Feedback: &feedback}, nil
+				if strings.HasPrefix(toolName, "governed_") {
+					feedback := fmt.Sprintf("Policy rejected tool: %v", err)
+					return &rpc.PermissionDecisionReject{Feedback: &feedback}, nil
+				}
 			}
 		}
 		return &rpc.PermissionDecisionApproveOnce{}, nil
@@ -587,103 +619,31 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		availableTools = append(availableTools, "governed_propose_memory")
 	}
 
-	if config.Structural != nil && config.Structural.Available() {
-		if allowedSet["governed_structural_search_symbols"] {
-			searchSymbolsTool := copilot.DefineTool("governed_structural_search_symbols", "Query code symbols matching search string via structural index",
-				func(params StructuralSearchParams, inv copilot.ToolInvocation) (any, error) {
-					tStart := time.Now()
-					defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
-
-					if err := checkToolLimits(); err != nil {
-						return nil, err
-					}
-					if config.Governor != nil {
-						if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_search_symbols"); err != nil {
-							return nil, err
-						}
-					}
-					if config.OnRecordMetric != nil {
-						config.OnRecordMetric("structural_queries", 1)
-					}
-					packet, err := config.Structural.SearchSymbols(ctx, params.Query)
-					if err != nil {
-						return nil, err
-					}
-					data, _ := json.Marshal(packet)
-					return string(data), nil
-				})
-			tools = append(tools, searchSymbolsTool)
-			availableTools = append(availableTools, "governed_structural_search_symbols")
-		}
-
-		if allowedSet["governed_structural_context_for"] {
-			contextForTool := copilot.DefineTool("governed_structural_context_for", "Get symbol definition, source snippet, container, and siblings via structural index",
-				func(params StructuralContextParams, inv copilot.ToolInvocation) (any, error) {
-					tStart := time.Now()
-					defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
-
-					if err := checkToolLimits(); err != nil {
-						return nil, err
-					}
-					if config.Governor != nil {
-						if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_context_for"); err != nil {
-							return nil, err
-						}
-					}
-					if config.OnRecordMetric != nil {
-						config.OnRecordMetric("structural_queries", 1)
-					}
-					packet, err := config.Structural.GetContextFor(ctx, params.Name)
-					if err != nil {
-						return nil, err
-					}
-					data, _ := json.Marshal(packet)
-					return string(data), nil
-				})
-			tools = append(tools, contextForTool)
-			availableTools = append(availableTools, "governed_structural_context_for")
-		}
-
-		if allowedSet["governed_structural_callers"] {
-			callersTool := copilot.DefineTool("governed_structural_callers", "Get call sites and callers for a symbol node ID via structural index",
-				func(params StructuralCallersParams, inv copilot.ToolInvocation) (any, error) {
-					tStart := time.Now()
-					defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
-
-					if err := checkToolLimits(); err != nil {
-						return nil, err
-					}
-					if config.Governor != nil {
-						if err := config.Governor.AuthorizeToolInvocation(config.AgentID, "governed_structural_callers"); err != nil {
-							return nil, err
-						}
-					}
-					if config.OnRecordMetric != nil {
-						config.OnRecordMetric("structural_queries", 1)
-					}
-					packet, err := config.Structural.GetCallers(ctx, params.NodeID)
-					if err != nil {
-						return nil, err
-					}
-					data, _ := json.Marshal(packet)
-					return string(data), nil
-				})
-			tools = append(tools, callersTool)
-			availableTools = append(availableTools, "governed_structural_callers")
-		}
+	modelToUse := p.model
+	if config.Model != "" {
+		modelToUse = config.Model
 	}
 
 	disableGit := false
+	var excludedTools []string
+	if !mutating {
+		excludedTools = []string{"write", "edit", "patch", "bash", "shell"}
+	}
+
 	sessionConfig := &copilot.SessionConfig{
 		SessionID:               sessionID,
-		Model:                   p.model,
+		Model:                   modelToUse,
+		WorkingDirectory:        config.WorkspaceDir,
 		Tools:                   tools,
-		AvailableTools:          availableTools,
+		ExcludedTools:          excludedTools,
 		EnableHostGitOperations: &disableGit,
 		OnPermissionRequest:     permHandler,
 		SystemMessage: &copilot.SystemMessageConfig{
 			Content: config.Charter,
 		},
+	}
+	if !mutating {
+		sessionConfig.AvailableTools = availableTools
 	}
 
 	copilotSession, err := p.client.CreateSession(ctx, sessionConfig)

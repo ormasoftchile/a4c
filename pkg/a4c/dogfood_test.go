@@ -565,33 +565,3 @@ func TestDogfood_07_TaskHistoryFormatting(t *testing.T) {
 		}
 	}
 }
-
-// TestDogfood_08_YAWREvidenceBridgeRecord verifies conversion to YAWR runtime EvidenceRecord.
-func TestDogfood_08_YAWREvidenceBridgeRecord(t *testing.T) {
-	now := time.Now()
-	evi := spike.ValidationEvidence{
-		EvidenceID:          "evi-yawr-808",
-		WorkspaceSnapshotID: "snap-abc-123",
-		Command:             []string{"go", "test", "./..."},
-		ExitCode:            0,
-		CompletedAt:         now,
-		Valid:               true,
-	}
-
-	yawrEvi := evi.ToYAWREvidence()
-	if yawrEvi.Name != "workspace_validation" {
-		t.Fatalf("expected Name workspace_validation, got %s", yawrEvi.Name)
-	}
-	if string(yawrEvi.Kind) != "snapshot" {
-		t.Fatalf("expected Kind snapshot, got %s", yawrEvi.Kind)
-	}
-	if yawrEvi.SHA256 != "snap-abc-123" {
-		t.Fatalf("expected SHA256 snap-abc-123, got %s", yawrEvi.SHA256)
-	}
-	if yawrEvi.Value != "exit_code=0" {
-		t.Fatalf("expected Value exit_code=0, got %s", yawrEvi.Value)
-	}
-	if !yawrEvi.CapturedAt.Equal(now) {
-		t.Fatalf("expected CapturedAt %v, got %v", now, yawrEvi.CapturedAt)
-	}
-}

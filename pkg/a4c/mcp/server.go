@@ -4,87 +4,31 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/ormasoftchile/a4c/pkg/a4c"
-	"github.com/ormasoftchile/a4c/pkg/a4c/governed"
-	"github.com/ormasoftchile/yawr/runtime/pkg/tool"
 )
 
 // Server wraps the mark3labs MCP server with A4C team service handlers.
 type Server struct {
-	mcpServer      *server.MCPServer
-	service        a4c.TeamService
-	governed       *governed.Manager
-	role           string
-	enableYAWR     bool
-	enableCodeTopo bool
+	mcpServer *server.MCPServer
+	service   a4c.TeamService
+	role      string
 }
 
-// ServerOptions configures optional subsystems on the A4C MCP server.
-type ServerOptions struct {
-	Role           string
-	EnableYAWR     bool
-	EnableCodeTopo bool
-}
-
-// DefaultServerOptions inspects environment flags and defaults to enabling both YAWR and CodeTopo.
-func DefaultServerOptions(role string) ServerOptions {
-	enableYAWR := true
-	if os.Getenv("A4C_DISABLE_YAWR") == "1" || strings.ToLower(os.Getenv("A4C_ENABLE_YAWR")) == "false" {
-		enableYAWR = false
-	}
-	enableCodeTopo := true
-	if os.Getenv("A4C_DISABLE_CODETOPO") == "1" || strings.ToLower(os.Getenv("A4C_ENABLE_CODETOPO")) == "false" {
-		enableCodeTopo = false
-	}
-	return ServerOptions{
-		Role:           role,
-		EnableYAWR:     enableYAWR,
-		EnableCodeTopo: enableCodeTopo,
-	}
-}
-
-// NewServer initializes an MCP server exposing canonical A4C team tools and default subsystems.
+// NewServer initializes an MCP server exposing canonical A4C team tools.
 func NewServer(service a4c.TeamService) *Server {
-	return NewServerWithOptions(service, DefaultServerOptions(""))
+	return NewServerWithRole(service, "")
 }
 
 // NewServerWithRole initializes an MCP server filtered for a specific agent role boundary.
 func NewServerWithRole(service a4c.TeamService, role string) *Server {
-	return NewServerWithOptions(service, DefaultServerOptions(role))
-}
-
-// NewServerWithOptions initializes an MCP server with explicit subsystem toggles.
-func NewServerWithOptions(service a4c.TeamService, opts ServerOptions) *Server {
-	var govMgr *governed.Manager
-	if opts.EnableYAWR {
-		govMgr, _ = governed.NewManagerWithRole(service, "", opts.Role)
-	}
 	s := &Server{
-		mcpServer:      server.NewMCPServer("a4c-team", "1.0.0"),
-		service:        service,
-		governed:       govMgr,
-		role:           opts.Role,
-		enableYAWR:     opts.EnableYAWR,
-		enableCodeTopo: opts.EnableCodeTopo,
-	}
-	s.registerTools()
-	return s
-}
-
-// NewServerWithGoverned allows supplying an explicit governed Manager.
-func NewServerWithGoverned(service a4c.TeamService, gov *governed.Manager) *Server {
-	s := &Server{
-		mcpServer:      server.NewMCPServer("a4c-team", "1.0.0"),
-		service:        service,
-		governed:       gov,
-		enableYAWR:     gov != nil,
-		enableCodeTopo: true,
+		mcpServer: server.NewMCPServer("a4c-team", "1.0.0"),
+		service:   service,
+		role:      role,
 	}
 	s.registerTools()
 	return s
@@ -264,88 +208,6 @@ func (s *Server) registerTools() {
 		),
 		s.handleReviewResult,
 	)
-
-	// 13-16. YAWR-governed execution tools (enabled unless explicitly disabled)
-	if s.enableYAWR {
-		// 13. governed_read_file (All agents)
-		addAgentTool(true, true, true,
-			mcp.NewTool("governed_read_file",
-				mcp.WithDescription("Read an authorized file strictly inside the task's isolated worktree using the embedded YAWR execution engine."),
-				mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
-				mcp.WithString("path", mcp.Required(), mcp.Description("Relative file path within the task worktree")),
-			),
-			s.handleGovernedReadFile,
-		)
-
-		// 14. governed_apply_patch (Coder only)
-		addAgentTool(false, true, false,
-			mcp.NewTool("governed_apply_patch",
-				mcp.WithDescription("Apply a snapshot-bound unified patch strictly inside the task worktree via YAWR's governed execution kernel. Recorded in durable dispatch store with replay detection."),
-				mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
-				mcp.WithString("patch", mcp.Required(), mcp.Description("Unified diff patch content to apply")),
-				mcp.WithString("expected_snapshot", mcp.Description("Expected git commit SHA prior to mutation")),
-				mcp.WithString("idempotency_key", mcp.Description("Optional idempotency key for deduplication")),
-			),
-			s.handleGovernedApplyPatch,
-		)
-
-		// 15. governed_git_inspect (Lead, Reviewer)
-		addAgentTool(true, false, true,
-			mcp.NewTool("governed_git_inspect",
-				mcp.WithDescription("Inspect git status, diff, log, or commit SHA strictly inside the task worktree using the embedded YAWR engine."),
-				mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
-				mcp.WithString("subcommand", mcp.Required(), mcp.Description("Subcommand: diff, status, log, rev-parse"), mcp.Enum("diff", "status", "log", "rev-parse")),
-				mcp.WithString("target", mcp.Description("Optional commit, branch, or file target")),
-			),
-			s.handleGovernedGitInspect,
-		)
-
-		// 16. governed_run_tests (Coder only)
-		addAgentTool(false, true, false,
-			mcp.NewTool("governed_run_tests",
-				mcp.WithDescription("Execute bounded go test procedures in the task worktree and collect structured validation evidence via YAWR."),
-				mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier")),
-				mcp.WithString("package", mcp.Description("Go package path to test (default: ./...)")),
-				mcp.WithBoolean("race", mcp.Description("Enable Go data race detector (default: true)")),
-				mcp.WithString("idempotency_key", mcp.Description("Optional idempotency key for deduplication")),
-			),
-			s.handleGovernedRunTests,
-		)
-	}
-
-	// 17-19. CodeTopo structural tools (enabled unless explicitly disabled)
-	if s.enableCodeTopo {
-		// 17. governed_structural_search_symbols (All agents)
-		addAgentTool(true, true, true,
-			mcp.NewTool("governed_structural_search_symbols",
-				mcp.WithDescription("Search code symbols (functions, structs, methods, interfaces) across repository or task worktree via CodeTopo structural index."),
-				mcp.WithString("query", mcp.Required(), mcp.Description("Symbol name query or search term")),
-				mcp.WithString("task_id", mcp.Description("Optional task identifier to query the task worktree's isolated index")),
-			),
-			s.handleGovernedStructuralSearchSymbols,
-		)
-
-		// 18. governed_structural_context_for (All agents)
-		addAgentTool(true, true, true,
-			mcp.NewTool("governed_structural_context_for",
-				mcp.WithDescription("Retrieve rich structural context (definition, signature, source snippet, container, callers, and sibling members) for a code symbol."),
-				mcp.WithString("symbol", mcp.Description("Name of the symbol (e.g. 'Cache', 'Clear')")),
-				mcp.WithInteger("node_id", mcp.Description("Optional exact node_id in the CodeTopo graph")),
-				mcp.WithString("task_id", mcp.Description("Optional task identifier to query the task worktree's isolated index")),
-			),
-			s.handleGovernedStructuralContextFor,
-		)
-
-		// 19. governed_structural_callers (All agents)
-		addAgentTool(true, true, true,
-			mcp.NewTool("governed_structural_callers",
-				mcp.WithDescription("Retrieve callers for a symbol by node_id using CodeTopo structural intelligence."),
-				mcp.WithInteger("node_id", mcp.Required(), mcp.Description("The unique node_id of the target symbol")),
-				mcp.WithString("task_id", mcp.Description("Optional task identifier to query the task worktree's isolated index")),
-			),
-			s.handleGovernedStructuralCallers,
-		)
-	}
 }
 
 func (s *Server) handleDelegate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -722,233 +584,6 @@ func jsonResult(data any) (*mcp.CallToolResult, error) {
 		return mcp.NewToolResultError(fmt.Sprintf("json serialization error: %v", err)), nil
 	}
 	return mcp.NewToolResultText(string(b)), nil
-}
-
-func (s *Server) handleGovernedReadFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if s.governed == nil {
-		return mcp.NewToolResultError("governed tool manager is not initialized"), nil
-	}
-	taskID, err := req.RequireString("task_id")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
-	}
-	path, err := req.RequireString("path")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'path': %v", err)), nil
-	}
-
-	res, err := s.governed.ReadFile(ctx, taskID, path)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("governed read_file failed: %v", err)), nil
-	}
-	if res.Status == tool.InvocationStatusDenied {
-		return mcp.NewToolResultError(fmt.Sprintf("governed read_file denied: %s", res.ErrorMessage)), nil
-	}
-	if res.Status == tool.InvocationStatusFailed {
-		return mcp.NewToolResultError(fmt.Sprintf("governed read_file failed: %s\n%s", res.ErrorMessage, res.Stderr)), nil
-	}
-
-	return jsonResult(map[string]any{
-		"status":         res.Status,
-		"classification": res.Classification,
-		"content":        res.Stdout,
-		"duration_ms":    res.DurationMs,
-	})
-}
-
-func (s *Server) handleGovernedApplyPatch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if s.governed == nil {
-		return mcp.NewToolResultError("governed tool manager is not initialized"), nil
-	}
-	taskID, err := req.RequireString("task_id")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
-	}
-	patch, err := req.RequireString("patch")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'patch': %v", err)), nil
-	}
-	expectedSnapshot := req.GetString("expected_snapshot", "")
-	idempotencyKey := req.GetString("idempotency_key", "")
-
-	res, err := s.governed.ApplyPatch(ctx, taskID, patch, expectedSnapshot, idempotencyKey)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("governed apply_patch failed: %v", err)), nil
-	}
-	if res.Status == tool.InvocationStatusDenied {
-		return mcp.NewToolResultError(fmt.Sprintf("governed apply_patch denied: %s", res.ErrorMessage)), nil
-	}
-	if res.Status == tool.InvocationStatusFailed {
-		return mcp.NewToolResultError(fmt.Sprintf("governed apply_patch failed: %s\n%s", res.ErrorMessage, res.Stderr)), nil
-	}
-
-	return jsonResult(map[string]any{
-		"status":          res.Status,
-		"classification":  res.Classification,
-		"occurrence_id":   res.OccurrenceID,
-		"idempotency_key": res.IdempotencyKey,
-		"replayed":        res.Replayed,
-		"stdout":          res.Stdout,
-		"duration_ms":     res.DurationMs,
-		"output":          res.Output,
-	})
-}
-
-func (s *Server) handleGovernedGitInspect(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if s.governed == nil {
-		return mcp.NewToolResultError("governed tool manager is not initialized"), nil
-	}
-	taskID, err := req.RequireString("task_id")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
-	}
-	subcommand, err := req.RequireString("subcommand")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'subcommand': %v", err)), nil
-	}
-	target := req.GetString("target", "")
-
-	res, err := s.governed.GitInspect(ctx, taskID, subcommand, target)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("governed git_inspect failed: %v", err)), nil
-	}
-	if res.Status == tool.InvocationStatusDenied {
-		return mcp.NewToolResultError(fmt.Sprintf("governed git_inspect denied: %s", res.ErrorMessage)), nil
-	}
-	if res.Status == tool.InvocationStatusFailed {
-		return mcp.NewToolResultError(fmt.Sprintf("governed git_inspect failed: %s\n%s", res.ErrorMessage, res.Stderr)), nil
-	}
-
-	return jsonResult(map[string]any{
-		"status":         res.Status,
-		"classification": res.Classification,
-		"stdout":         res.Stdout,
-		"duration_ms":    res.DurationMs,
-	})
-}
-
-func (s *Server) handleGovernedRunTests(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if s.governed == nil {
-		return mcp.NewToolResultError("governed tool manager is not initialized"), nil
-	}
-	taskID, err := req.RequireString("task_id")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
-	}
-	pkg := req.GetString("package", "./...")
-	race := req.GetBool("race", true)
-	idempotencyKey := req.GetString("idempotency_key", "")
-
-	res, err := s.governed.RunTests(ctx, taskID, pkg, race, idempotencyKey)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("governed run_tests failed: %v", err)), nil
-	}
-	if res.Status == tool.InvocationStatusDenied {
-		return mcp.NewToolResultError(fmt.Sprintf("governed run_tests denied: %s", res.ErrorMessage)), nil
-	}
-	if res.Status == tool.InvocationStatusFailed {
-		return mcp.NewToolResultError(fmt.Sprintf("governed run_tests failed: %s\n%s", res.ErrorMessage, res.Stderr)), nil
-	}
-
-	return jsonResult(map[string]any{
-		"status":          res.Status,
-		"classification":  res.Classification,
-		"occurrence_id":   res.OccurrenceID,
-		"replayed":        res.Replayed,
-		"stdout":          res.Stdout,
-		"exit_code":       res.ExitCode,
-		"duration_ms":     res.DurationMs,
-		"output":          res.Output,
-	})
-}
-
-func (s *Server) getStructuralProvider(taskID string) (*a4c.CodeTopoProvider, error) {
-	root := s.service.WorkspaceDir()
-	dbPath := filepath.Join(root, ".codetopo", "index.sqlite")
-
-	if taskID != "" {
-		if wtPath, err := s.service.GetWorktreePath(taskID); err == nil && wtPath != "" {
-			wtDB := filepath.Join(wtPath, ".codetopo", "index.sqlite")
-			if _, statErr := os.Stat(wtDB); statErr == nil {
-				root = wtPath
-				dbPath = wtDB
-			}
-		}
-	}
-
-	if _, err := os.Stat(dbPath); err != nil {
-		return nil, fmt.Errorf("codetopo index not found at %s; ensure repository is indexed", dbPath)
-	}
-
-	return a4c.NewCodeTopoProvider(root, dbPath)
-}
-
-func (s *Server) handleGovernedStructuralSearchSymbols(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	query, err := req.RequireString("query")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'query': %v", err)), nil
-	}
-	taskID := req.GetString("task_id", "")
-
-	provider, err := s.getStructuralProvider(taskID)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("structural provider unavailable: %v", err)), nil
-	}
-
-	packet, err := provider.SearchSymbols(ctx, query)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("structural symbol search failed: %v", err)), nil
-	}
-
-	return jsonResult(packet)
-}
-
-func (s *Server) handleGovernedStructuralContextFor(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	symbol := req.GetString("symbol", "")
-	nodeID := req.GetInt("node_id", 0)
-	taskID := req.GetString("task_id", "")
-
-	if symbol == "" && nodeID == 0 {
-		return mcp.NewToolResultError("either 'symbol' or 'node_id' must be provided"), nil
-	}
-
-	provider, err := s.getStructuralProvider(taskID)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("structural provider unavailable: %v", err)), nil
-	}
-
-	var packet *a4c.StructuralContextPacket
-	if nodeID > 0 {
-		packet, err = provider.GetContextByNodeID(ctx, nodeID)
-	} else {
-		packet, err = provider.GetContextFor(ctx, symbol)
-	}
-
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("structural context query failed: %v", err)), nil
-	}
-
-	return jsonResult(packet)
-}
-
-func (s *Server) handleGovernedStructuralCallers(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	nodeID := req.GetInt("node_id", 0)
-	if nodeID == 0 {
-		return mcp.NewToolResultError("missing required parameter 'node_id' (or node_id must be > 0)"), nil
-	}
-	taskID := req.GetString("task_id", "")
-
-	provider, err := s.getStructuralProvider(taskID)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("structural provider unavailable: %v", err)), nil
-	}
-
-	packet, err := provider.GetCallers(ctx, nodeID)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("structural callers query failed: %v", err)), nil
-	}
-
-	return jsonResult(packet)
 }
 
 

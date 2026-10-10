@@ -23,6 +23,9 @@ type TeamService interface {
 	IntegrateTask(ctx context.Context, req IntegrateTaskRequest) (*IntegrateResult, error)
 	RejectTask(ctx context.Context, req RejectTaskRequest) (*RejectResult, error)
 	ResumeTask(ctx context.Context, taskID string) error
+	ResumeTaskOnHost(ctx context.Context, req ResumeTaskRequest) (*TaskCheckpoint, error)
+	CaptureCheckpoint(ctx context.Context, taskID string) (*TaskCheckpoint, error)
+	EscalateTask(ctx context.Context, req EscalateTaskRequest) (*TaskRef, error)
 	ExecuteTask(ctx context.Context, taskID string, maxSteps int) ([]*ActivityResult, error)
 
 	// Host-Native Coordination Interface (Mode A)
@@ -48,7 +51,6 @@ type TeamServiceImpl struct {
 	memory         *DurableMemoryStore
 	journal        *DurableIntentJournal
 	wtMgr          *WorktreeManager
-	structStore    *DurableStructuralStore
 }
 
 // NewTeamService initializes a TeamServiceImpl over existing A4C durable subsystems.
@@ -61,7 +63,6 @@ func NewTeamService(
 	memory *DurableMemoryStore,
 	journal *DurableIntentJournal,
 	wtMgr *WorktreeManager,
-	structStore *DurableStructuralStore,
 ) *TeamServiceImpl {
 	if workspaceDir == "" {
 		workspaceDir = "."
@@ -75,7 +76,6 @@ func NewTeamService(
 		memory:         memory,
 		journal:        journal,
 		wtMgr:          wtMgr,
-		structStore:    structStore,
 	}
 }
 
@@ -129,7 +129,7 @@ func (s *TeamServiceImpl) SubmitTask(ctx context.Context, req SubmitTaskRequest)
 
 	strategy := req.Strategy
 	if strategy == "" {
-		strategy = StrategyTeam
+		strategy = StrategyDirect
 	}
 
 	budgetTokens := req.BudgetTokens
@@ -142,6 +142,9 @@ func (s *TeamServiceImpl) SubmitTask(ctx context.Context, req SubmitTaskRequest)
 		for k, v := range req.Inputs {
 			inputs[k] = v
 		}
+	}
+	if req.Specialist != "" {
+		inputs["specialist"] = req.Specialist
 	}
 	if req.Runtime != "" {
 		inputs["runtime"] = req.Runtime
@@ -608,7 +611,7 @@ func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRe
 				return nil
 			}
 			rel, _ := filepath.Rel(workDir, path)
-			if strings.HasPrefix(rel, ".git") || strings.HasPrefix(rel, ".a4c") || strings.HasPrefix(rel, ".codetopo") {
+			if strings.HasPrefix(rel, ".git") || strings.HasPrefix(rel, ".a4c") {
 				return nil
 			}
 			dest := filepath.Join(s.workspaceDir, rel)
@@ -661,18 +664,277 @@ func (s *TeamServiceImpl) RejectTask(ctx context.Context, req RejectTaskRequest)
 	}, nil
 }
 
-// ResumeTask resolves blocked decisions or uncommitted intents.
-func (s *TeamServiceImpl) ResumeTask(ctx context.Context, taskID string) error {
-	_, err := s.store.Get(taskID)
+// CaptureCheckpoint captures an authoritative task checkpoint from current worktree and durable stores.
+func (s *TeamServiceImpl) CaptureCheckpoint(ctx context.Context, taskID string) (*TaskCheckpoint, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rootRec, err := s.store.Get(taskID)
 	if err != nil {
-		return ErrTaskNotFound
+		return nil, ErrTaskNotFound
+	}
+
+	wtPath := s.workspaceDir
+	branchName := fmt.Sprintf("a4c/%s", taskID)
+	if s.wtMgr != nil {
+		if wt, err := s.wtMgr.GetWorktree(taskID); err == nil && wt != nil {
+			if wt.WorktreePath != "" {
+				wtPath = wt.WorktreePath
+			}
+			if wt.Branch != "" {
+				branchName = wt.Branch
+			}
+		}
+	}
+
+	// 1. Get git status summary & diff
+	gitStatusSummary := ""
+	cmdStat := exec.CommandContext(ctx, "git", "status", "--short")
+	cmdStat.Dir = s.absPath(wtPath)
+	if out, err := cmdStat.CombinedOutput(); err == nil {
+		gitStatusSummary = strings.TrimSpace(string(out))
+	}
+
+	currentSnap := s.resolveCurrentSnapshot(taskID)
+
+	// 2. Collect completed work & obligations from activity tree
+	subtasks := s.store.GetTaskTree(taskID)
+	var completedWork []string
+	var remainingObligations []string
+	var activeActivityID string
+	specialistID := rootRec.Request.AgentID
+	specialistRole := "specialist"
+	var lastValEvidence *ValidationEvidence
+
+	for _, sub := range subtasks {
+		if sub.Status == StatusCompleted {
+			summary := fmt.Sprintf("Activity %s (%s): %s", sub.Request.ID, sub.Request.AgentID, sub.Request.Objective)
+			if sub.Result != nil {
+				if sm, ok := sub.Result.Outputs["summary"].(string); ok && sm != "" {
+					summary += fmt.Sprintf(" — %s", sm)
+				}
+			}
+			completedWork = append(completedWork, summary)
+			if len(sub.Result.EvidenceIDs) > 0 {
+				lastValEvidence = &ValidationEvidence{
+					EvidenceID:          sub.Result.EvidenceIDs[len(sub.Result.EvidenceIDs)-1],
+					WorkspaceSnapshotID: currentSnap,
+					Valid:               true,
+					ExitCode:            0,
+				}
+			}
+		} else {
+			remainingObligations = append(remainingObligations, fmt.Sprintf("Pending activity %s (%s): %s", sub.Request.ID, sub.Request.AgentID, sub.Request.Objective))
+			if activeActivityID == "" {
+				activeActivityID = sub.Request.ID
+				specialistID = sub.Request.AgentID
+			}
+		}
+	}
+
+	if activeActivityID == "" {
+		activeActivityID = taskID
+	}
+
+	// 3. Collect accepted decisions from durable memory
+	var acceptedDecisions []string
+	if s.memory != nil {
+		for _, mem := range s.memory.ListVerified() {
+			acceptedDecisions = append(acceptedDecisions, fmt.Sprintf("%s: %s", mem.Key, mem.Content))
+		}
+	}
+
+	chk := &TaskCheckpoint{
+		TaskID:               taskID,
+		Objective:            rootRec.Request.Objective,
+		ActiveActivityID:     activeActivityID,
+		SpecialistID:         specialistID,
+		SpecialistRole:       specialistRole,
+		WorktreePath:         wtPath,
+		WorktreeBranch:       branchName,
+		CurrentSnapshotSHA:   currentSnap,
+		GitStatusSummary:     gitStatusSummary,
+		AcceptedDecisions:    acceptedDecisions,
+		CompletedWork:        completedWork,
+		RemainingObligations: remainingObligations,
+		ValidationEvidence:   lastValEvidence,
+		Strategy:             rootRec.Request.Strategy,
+		SourceRuntime:        rootRec.Request.Runtime,
+		Model:                rootRec.Request.Model,
+		UpdatedAt:            time.Now(),
+	}
+
+	return chk, nil
+}
+
+// ResumeTaskOnHost prepares an interrupted task for continuation on a target host/runtime.
+func (s *TeamServiceImpl) ResumeTaskOnHost(ctx context.Context, req ResumeTaskRequest) (*TaskCheckpoint, error) {
+	if req.TaskID == "" {
+		return nil, fmt.Errorf("service: task_id is required")
+	}
+
+	chk, err := s.CaptureCheckpoint(ctx, req.TaskID)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Update checkpoint with target runtime info
+	if req.Runtime != "" {
+		chk.TargetRuntime = req.Runtime
+	}
+	if req.Model != "" {
+		chk.Model = req.Model
+	}
+	if req.Specialist != "" {
+		chk.SpecialistID = req.Specialist
+	}
+	if req.Instructions != "" {
+		chk.ContinuationInstructions = req.Instructions
 	}
 
 	// Reconcile uncommitted intents if reconciler available
 	if s.journal != nil && s.coordinator != nil && s.coordinator.Reconciler != nil {
 		_, _ = s.journal.ReconcileUnfinished(ctx, s.coordinator.Reconciler)
 	}
-	return nil
+
+	// Find the activity to resume
+	targetActID := chk.ActiveActivityID
+	if targetActID == "" {
+		targetActID = req.TaskID
+	}
+
+	actRec, err := s.store.Get(targetActID)
+	if err == nil && actRec != nil {
+		// If activity was claimed or failed (e.g. host crashed mid-session), reset to pending so new host claims it
+		if actRec.Status == StatusClaimed || actRec.Status == StatusFailed || actRec.Status == StatusIndeterminate {
+			actRec.Status = StatusPending
+		}
+		if req.Runtime != "" {
+			actRec.Request.Runtime = req.Runtime
+		}
+		if req.Model != "" {
+			actRec.Request.Model = req.Model
+		}
+		if req.Specialist != "" {
+			actRec.Request.AgentID = req.Specialist
+		}
+		if actRec.Request.Inputs == nil {
+			actRec.Request.Inputs = make(map[string]any)
+		}
+		actRec.Request.Inputs["checkpoint"] = chk
+		if req.Instructions != "" {
+			actRec.Request.Inputs["continuation_instructions"] = req.Instructions
+		}
+		_ = s.store.Update(*actRec)
+	}
+
+	// Record resumption intent
+	if s.journal != nil {
+		_ = s.journal.RecordIntent(IntentRecord{
+			IntentID:   fmt.Sprintf("intent-%s-resume-%d", req.TaskID, time.Now().UnixNano()),
+			ActivityID: targetActID,
+			Action:     "resume_task",
+			Target:     req.Runtime,
+			Status:     IntentCommitted,
+		})
+	}
+
+	return chk, nil
+}
+
+// ResumeTask resolves blocked decisions or uncommitted intents, preparing the task to resume.
+func (s *TeamServiceImpl) ResumeTask(ctx context.Context, taskID string) error {
+	_, err := s.ResumeTaskOnHost(ctx, ResumeTaskRequest{TaskID: taskID})
+	return err
+}
+
+// EscalateTask transitions a task to reviewed or team collaboration without losing progress.
+func (s *TeamServiceImpl) EscalateTask(ctx context.Context, req EscalateTaskRequest) (*TaskRef, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if req.TaskID == "" {
+		return nil, fmt.Errorf("service: task_id is required")
+	}
+
+	rootRec, err := s.store.Get(req.TaskID)
+	if err != nil {
+		return nil, ErrTaskNotFound
+	}
+
+	if req.NewStrategy != StrategyReviewed && req.NewStrategy != StrategyTeam {
+		return nil, fmt.Errorf("service: invalid escalation strategy %q (must be reviewed or team)", req.NewStrategy)
+	}
+
+	rootRec.Request.Strategy = req.NewStrategy
+	_ = s.store.Update(*rootRec)
+
+	switch req.NewStrategy {
+	case StrategyReviewed:
+		// If not already present, enqueue independent reviewer
+		revID := fmt.Sprintf("%s-rev", req.TaskID)
+		if _, exists := s.store.Get(revID); exists != nil {
+			revAgent := req.Reviewer
+			if revAgent == "" {
+				revAgent = "reviewer"
+			}
+			revBudget := rootRec.Request.Budget.Allocated * 0.5
+			if revBudget < 30000 {
+				revBudget = 30000.0
+			}
+			revReq := ActivityRequest{
+				ID:        revID,
+				ParentID:  req.TaskID,
+				AgentID:   revAgent,
+				Objective: fmt.Sprintf("Review implementation of: %s", rootRec.Request.Objective),
+				Budget:    Budget{Allocated: revBudget},
+				DependsOn: []string{req.TaskID},
+				Strategy:  StrategyReviewed,
+				Runtime:   rootRec.Request.Runtime,
+				Model:     rootRec.Request.Model,
+				CreatedAt: time.Now(),
+			}
+			_ = s.store.Enqueue(revReq)
+		}
+
+	case StrategyTeam:
+		// Enqueue lead activity or team activities if needed
+		teamActID := fmt.Sprintf("%s-team-lead", req.TaskID)
+		if _, exists := s.store.Get(teamActID); exists != nil {
+			leadReq := ActivityRequest{
+				ID:        teamActID,
+				ParentID:  req.TaskID,
+				AgentID:   "lead",
+				Objective: fmt.Sprintf("Coordinate and complete: %s", rootRec.Request.Objective),
+				Budget:    Budget{Allocated: rootRec.Request.Budget.Allocated * 0.5},
+				Strategy:  StrategyTeam,
+				Runtime:   rootRec.Request.Runtime,
+				Model:     rootRec.Request.Model,
+				CreatedAt: time.Now(),
+			}
+			_ = s.store.Enqueue(leadReq)
+		}
+	}
+
+	if s.journal != nil {
+		_ = s.journal.RecordIntent(IntentRecord{
+			IntentID:   fmt.Sprintf("intent-%s-escalate-%d", req.TaskID, time.Now().UnixNano()),
+			ActivityID: req.TaskID,
+			Action:     "escalate_task",
+			Target:     string(req.NewStrategy),
+			Status:     IntentCommitted,
+		})
+	}
+
+	state, _, _ := s.deriveTaskState(req.TaskID)
+	return &TaskRef{
+		TaskID:    req.TaskID,
+		State:     state,
+		CreatedAt: rootRec.Request.CreatedAt,
+	}, nil
 }
 
 // ExecuteTask executes up to maxSteps for activities under this task tree.
@@ -1048,10 +1310,14 @@ func (s *TeamServiceImpl) BeginTask(ctx context.Context, req BeginTaskRequest) (
 		req.BudgetTokens = 50000.0
 	}
 	if req.Strategy == "" {
-		req.Strategy = StrategyTeam
+		req.Strategy = StrategyDirect
 	}
 	if req.Coordinator == "" {
-		req.Coordinator = "alice"
+		if req.Strategy == StrategyDirect {
+			req.Coordinator = "coder"
+		} else {
+			req.Coordinator = "alice"
+		}
 	}
 
 	branchName := fmt.Sprintf("a4c/%s", taskID)

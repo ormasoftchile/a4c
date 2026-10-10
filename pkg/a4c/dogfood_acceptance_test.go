@@ -86,7 +86,6 @@ func TestIndependentAcceptance_TaskInspectVerification(t *testing.T) {
 	store, _ := spike.NewDurableActivityStore(filepath.Join(dotDir, "activities"))
 	journal, _ := spike.NewDurableIntentJournal(filepath.Join(dotDir, "journal"))
 	mem, _ := spike.NewDurableMemoryStore(filepath.Join(dotDir, "memory"))
-	structStore, _ := spike.NewDurableStructuralStore(filepath.Join(dotDir, "structural"))
 
 	reg := spike.NewCapabilityRegistry()
 	leadProf, _ := reg.GetProfile(spike.ProfileArchitectureInvestigation)
@@ -146,15 +145,6 @@ func TestIndependentAcceptance_TaskInspectVerification(t *testing.T) {
 		},
 		EvidenceIDs: []string{"evi-test-snapshot-123"},
 		Outputs:     map[string]any{"summary": "Added inspect sub-command"},
-	})
-
-	_ = structStore.Save(&spike.StructuralContextArtifact{
-		ID:                "struct-art-inspect",
-		RepositoryID:      "test-inspect-root",
-		WorkspaceSnapshot: "sha-snap-999",
-		Freshness:         spike.FreshnessCurrent,
-		RelevantFiles:     []string{"cmd/a4c/main.go", "pkg/a4c/history.go"},
-		CreatedAt:         time.Now(),
 	})
 
 	_ = journal.RecordIntent(spike.IntentRecord{

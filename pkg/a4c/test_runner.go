@@ -27,11 +27,11 @@ func (r *NativeGoTestRunner) RunTests(ctx context.Context, workspaceDir string) 
 }
 
 type GovernedExecutionCoordinator struct {
-	Store        *DurableActivityStore
-	Agent        *ProgrammerAgent
-	Snapshotter  *WorkspaceSnapshotter
-	TestRunner   TestRunner
-	MaxRepair    int
+	Store       *DurableActivityStore
+	Agent       *ProgrammerAgent
+	Snapshotter *WorkspaceSnapshotter
+	TestRunner  TestRunner
+	MaxRepair   int
 }
 
 func NewGovernedCoordinator(store *DurableActivityStore, agent *ProgrammerAgent, runner TestRunner) *GovernedExecutionCoordinator {
@@ -44,7 +44,7 @@ func NewGovernedCoordinator(store *DurableActivityStore, agent *ProgrammerAgent,
 	}
 }
 
-// ExecuteNext processes one pending activity through the full governed lifecycle.
+// ExecuteNext processes one pending activity through the native verification lifecycle.
 func (c *GovernedExecutionCoordinator) ExecuteNext(ctx context.Context) (*ActivityResult, error) {
 	req, err := c.Store.ClaimNext()
 	if err != nil {
@@ -68,7 +68,7 @@ func (c *GovernedExecutionCoordinator) ExecuteNext(ctx context.Context) (*Activi
 		return nil, err
 	}
 
-	// 3. Execute native tests (Zero LLM hallucination)
+	// 3. Execute native tests
 	exitCode, testOut, err := c.TestRunner.RunTests(ctx, c.Agent.WorkspaceDir)
 	if err != nil {
 		_ = c.Store.Fail(req.ID, err)
@@ -156,3 +156,4 @@ func (c *GovernedExecutionCoordinator) ExecuteNext(ctx context.Context) (*Activi
 
 	return res, nil
 }
+

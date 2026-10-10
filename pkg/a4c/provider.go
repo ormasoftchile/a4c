@@ -38,7 +38,6 @@ type AgentConfig struct {
 	OnSubmitReview         func(ReviewResult)             `json:"-"`
 	OnRequestHumanDecision func(HumanDecisionRequest)     `json:"-"`
 	OnProposeMemory        func(key, content string)      `json:"-"`
-	Structural             StructuralProvider             `json:"-"`
 	OnRecordMetric         func(metric string, delta int) `json:"-"`
 	Profile                *CapabilityProfile             `json:"profile,omitempty"`
 	AllowedTools           []string                       `json:"allowed_tools,omitempty"`

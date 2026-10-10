@@ -2,10 +2,7 @@ package a4c
 
 import (
 	"errors"
-	"fmt"
 	"time"
-
-	"github.com/ormasoftchile/yawr/runtime/pkg/evidence"
 )
 
 var (
@@ -256,13 +253,41 @@ type ValidationEvidence struct {
 	Valid               bool          `json:"valid"`
 }
 
-// ToYAWREvidence bridges a4c validation evidence into YAWR runtime's native EvidenceRecord.
-func (v ValidationEvidence) ToYAWREvidence() evidence.EvidenceRecord {
-	return evidence.EvidenceRecord{
-		Name:       "workspace_validation",
-		Kind:       evidence.EvidenceKindSnapshot,
-		SHA256:     v.WorkspaceSnapshotID,
-		CapturedAt: v.CompletedAt,
-		Value:      fmt.Sprintf("exit_code=%d", v.ExitCode),
-	}
+// TaskCheckpoint captures authoritative task and engineering state for cross-host continuation.
+type TaskCheckpoint struct {
+	TaskID               string              `json:"task_id"`
+	Objective            string              `json:"objective"`
+	ActiveActivityID     string              `json:"active_activity_id,omitempty"`
+	SpecialistID         string              `json:"specialist_id"`
+	SpecialistRole       string              `json:"specialist_role,omitempty"`
+	WorktreePath         string              `json:"worktree_path"`
+	WorktreeBranch       string              `json:"worktree_branch"`
+	CurrentSnapshotSHA   string              `json:"current_snapshot_sha"`
+	GitStatusSummary     string              `json:"git_status_summary,omitempty"`
+	AcceptedDecisions    []string            `json:"accepted_decisions,omitempty"`
+	CompletedWork        []string            `json:"completed_work,omitempty"`
+	RemainingObligations []string            `json:"remaining_obligations,omitempty"`
+	ValidationEvidence   *ValidationEvidence `json:"validation_evidence,omitempty"`
+	Strategy             ExecutionStrategy   `json:"strategy"`
+	SourceRuntime            string              `json:"source_runtime,omitempty"`
+	TargetRuntime            string              `json:"target_runtime,omitempty"`
+	Model                    string              `json:"model,omitempty"`
+	ContinuationInstructions string              `json:"continuation_instructions,omitempty"`
+	UpdatedAt                time.Time           `json:"updated_at"`
 }
+
+type ResumeTaskRequest struct {
+	TaskID       string `json:"task_id"`
+	Runtime      string `json:"runtime,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Specialist   string `json:"specialist,omitempty"`
+	Instructions string `json:"instructions,omitempty"`
+}
+
+type EscalateTaskRequest struct {
+	TaskID      string            `json:"task_id"`
+	NewStrategy ExecutionStrategy `json:"new_strategy"` // "reviewed" or "team"
+	Reviewer    string            `json:"reviewer,omitempty"`
+	Reason      string            `json:"reason,omitempty"`
+}
+

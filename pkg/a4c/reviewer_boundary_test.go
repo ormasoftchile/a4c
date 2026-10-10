@@ -29,7 +29,6 @@ func TestReviewerBoundaryEnforcement(t *testing.T) {
 	journalDir := filepath.Join(dotDir, "journal")
 	lifecycleDir := filepath.Join(dotDir, "lifecycle")
 	wtDir := filepath.Join(dotDir, "worktrees")
-	structDir := filepath.Join(dotDir, "structural")
 
 	store, err := a4c.NewDurableActivityStore(storeDir)
 	if err != nil {
@@ -55,10 +54,6 @@ func TestReviewerBoundaryEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create worktrees: %v", err)
 	}
-	structStore, err := a4c.NewDurableStructuralStore(structDir)
-	if err != nil {
-		t.Fatalf("create struct store: %v", err)
-	}
 
 	gov := a4c.NewPolicyGovernor([]string{
 		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
@@ -67,7 +62,7 @@ func TestReviewerBoundaryEnforcement(t *testing.T) {
 	coord := a4c.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, &a4c.NativeGoTestRunner{}, nil)
 	coord.SetWorktreeManager(wtMgr)
 
-	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr, structStore)
+	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr)
 	ctx := context.Background()
 
 	// 1. Begin task

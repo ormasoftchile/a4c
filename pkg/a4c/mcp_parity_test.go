@@ -65,13 +65,12 @@ func TestMilestone14_CLI_MCP_Parity(t *testing.T) {
 	memory, _ := a4c.NewDurableMemoryStore(filepath.Join(dotDir, "memory"))
 	journal, _ := a4c.NewDurableIntentJournal(filepath.Join(dotDir, "journal"))
 	wtMgr, _ := a4c.NewWorktreeManager(repoDir, filepath.Join(dotDir, "worktrees"))
-	structStore, _ := a4c.NewDurableStructuralStore(filepath.Join(dotDir, "structural"))
 
 	gov := a4c.NewPolicyGovernor([]string{"governed_read_file", "governed_apply_patch", "governed_submit_review"})
 	coord := a4c.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, &a4c.NativeGoTestRunner{}, nil)
 	coord.SetWorktreeManager(wtMgr)
 
-	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr, structStore)
+	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr)
 	mcpServer := a4cmcp.NewServer(svc)
 
 	cli, err := client.NewInProcessClient(mcpServer.MCPServer())

@@ -166,7 +166,7 @@ func TestMilestone11_02_SingleWriter_ConcurrentReadOnlyAccess(t *testing.T) {
 				return
 			}
 			// Inspect formatting
-			formatted := hist.FormatInspect(nil, dir)
+			formatted := hist.FormatInspect(dir)
 			if !strings.Contains(formatted, taskID) {
 				errCh <- fmt.Errorf("expected formatted inspect to contain task id")
 				return
@@ -606,7 +606,7 @@ func TestMilestone11_08_AccurateDurationReportingAndInspection(t *testing.T) {
 		t.Fatalf("expected human readable to contain 'provider wait:', got:\n%s", human)
 	}
 
-	inspect := hist.FormatInspect(nil, dir)
+	inspect := hist.FormatInspect(dir)
 	if !strings.Contains(inspect, "provider wait:") {
 		t.Fatalf("expected inspect to contain 'provider wait:', got:\n%s", inspect)
 	}

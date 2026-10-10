@@ -67,6 +67,36 @@ func (p *OpenCodeProvider) Capabilities() RuntimeCapabilities {
 	}
 }
 
+// HostCapabilities returns the explicit discoverable technical capabilities of OpenCode.
+func (p *OpenCodeProvider) HostCapabilities() HostCapabilities {
+	return HostCapabilities{
+		HostID:                "opencode",
+		DisplayName:           "OpenCode Headless Server",
+		Version:               "1.18.35",
+		Available:             true,
+		SessionInvocation:     true,
+		WorktreeBinding:       true,
+		ContextInjection:      true,
+		CompletionCollection:  true,
+		SessionCancellation:   true,
+		ModelSelection:        true,
+		NativeSubagents:       false,
+		SessionResumption:     true,
+		StructuredTelemetry:   true,
+		ToolRestrictions:     true,
+		InteractiveAttachment: false,
+		DefaultModel:          p.defaultModel,
+		SupportedModels: []string{
+			"opencode-go/mimo-v2.5",
+			"opencode-go/mimo-v2",
+		},
+		Limitations: []string{
+			"Requires running headless server (opencode serve)",
+			"Native subagents are not exposed through public headless HTTP API",
+		},
+	}
+}
+
 // ParseModelIdentifier splits a model string like "opencode-go/mimo-v2.5" into providerID and modelID.
 func ParseModelIdentifier(model string) (string, string) {
 	if model == "" {
@@ -91,6 +121,12 @@ func (p *OpenCodeProvider) ResumeSession(ctx context.Context, sessionID string, 
 }
 
 func (p *OpenCodeProvider) buildSession(ctx context.Context, existingID string, config AgentConfig) (AgentSession, error) {
+	if config.WorkspaceDir != "" {
+		if absDir, err := filepath.Abs(config.WorkspaceDir); err == nil {
+			config.WorkspaceDir = absDir
+		}
+	}
+
 	modelStr := config.Model
 	if modelStr == "" {
 		modelStr = p.defaultModel
@@ -165,14 +201,40 @@ func (p *OpenCodeProvider) buildSession(ctx context.Context, existingID string, 
 	return adapter, nil
 }
 
+func isMutatingSpecialist(agentID string) bool {
+	id := strings.ToLower(agentID)
+	if id == "lead" || id == "alice" || id == "reviewer" || id == "charlie" || strings.Contains(id, "review") {
+		return false
+	}
+	return true
+}
+
 func (p *OpenCodeProvider) buildPermissionRules(config AgentConfig) []map[string]string {
-	// Base P0 security boundary: all native mutations and shell executions strictly denied at session level
-	rules := []map[string]string{
-		{"permission": "bash", "pattern": "*", "action": "deny"},
+	if !isMutatingSpecialist(config.AgentID) {
+		// Non-mutating roles (lead, reviewer): strictly read-only session
+		return []map[string]string{
+			{"permission": "bash", "pattern": "*", "action": "deny"},
+			{"permission": "task", "pattern": "*", "action": "deny"},
+			{"permission": "write", "pattern": "*", "action": "deny"},
+			{"permission": "edit", "pattern": "*", "action": "deny"},
+			{"permission": "patch", "pattern": "*", "action": "deny"},
+			{"permission": "webfetch", "pattern": "*", "action": "deny"},
+			{"permission": "websearch", "pattern": "*", "action": "deny"},
+			{"permission": "question", "pattern": "*", "action": "deny"},
+			{"permission": "skill", "pattern": "*", "action": "deny"},
+			{"permission": "read", "pattern": "*", "action": "allow"},
+			{"permission": "glob", "pattern": "*", "action": "allow"},
+			{"permission": "grep", "pattern": "*", "action": "allow"},
+		}
+	}
+
+	// Specialists and implementers: allow native tools inside isolated worktree
+	return []map[string]string{
+		{"permission": "bash", "pattern": "*", "action": "allow"},
 		{"permission": "task", "pattern": "*", "action": "deny"},
-		{"permission": "write", "pattern": "*", "action": "deny"},
-		{"permission": "edit", "pattern": "*", "action": "deny"},
-		{"permission": "patch", "pattern": "*", "action": "deny"},
+		{"permission": "write", "pattern": "*", "action": "allow"},
+		{"permission": "edit", "pattern": "*", "action": "allow"},
+		{"permission": "patch", "pattern": "*", "action": "allow"},
 		{"permission": "webfetch", "pattern": "*", "action": "deny"},
 		{"permission": "websearch", "pattern": "*", "action": "deny"},
 		{"permission": "question", "pattern": "*", "action": "deny"},
@@ -181,7 +243,6 @@ func (p *OpenCodeProvider) buildPermissionRules(config AgentConfig) []map[string
 		{"permission": "glob", "pattern": "*", "action": "allow"},
 		{"permission": "grep", "pattern": "*", "action": "allow"},
 	}
-	return rules
 }
 
 // OpenCodeSessionAdapter implements AgentSession for an OpenCode session.
@@ -291,14 +352,19 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 	modelID := s.modelID
 	s.mu.Unlock()
 
-	// Tool toggles: strictly deny bash, task, and all mutations.
-	// In Governed Proposal Mode (Zero-Authority Runtime), OpenCode is strictly read-only.
+	isReviewer := strings.EqualFold(s.config.AgentID, "reviewer") ||
+		strings.EqualFold(s.config.AgentID, "charlie") ||
+		strings.Contains(strings.ToLower(s.config.AgentID), "review")
+	mutating := isMutatingSpecialist(s.config.AgentID)
+
+	// Specialists & coders use native editing and bash tools directly inside the isolated worktree.
+	// Non-mutating roles (lead, reviewer) are strictly read-only.
 	toolsMap := map[string]bool{
-		"bash":      false,
+		"bash":      mutating,
 		"task":      false,
-		"write":     false,
-		"edit":      false,
-		"patch":     false,
+		"write":     mutating,
+		"edit":      mutating,
+		"patch":     mutating,
 		"webfetch":  false,
 		"websearch": false,
 		"question":  false,
@@ -309,22 +375,9 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 	}
 
 	promptText := prompt
-	isCoder := s.config.AgentID == "coder" || strings.Contains(s.config.AgentID, "coder")
-	if isCoder {
-		promptText += "\n\n[GOVERNANCE INSTRUCTION FOR CODER]:\n" +
-			"You operate in Governed Proposal Mode with zero native write permissions.\n" +
-			"To modify files, output patch blocks formatted as:\n" +
-			"[PROPOSE_PATCH: path=\"relative/path/to/file.ext\"]\n" +
-			"```\n" +
-			"<file content>\n" +
-			"```\n" +
-			"[END_PATCH]\n" +
-			"A4C PolicyGovernor and DurableIntentJournal will pre-authorize, record durable intent, and safely apply the changes."
-	}
-	if s.config.AgentID == "reviewer" {
-		promptText += "\n\n[INSTRUCTION]: If approving the changes, include [REVIEW_APPROVED] in your response. If rejecting, include [REVIEW_REJECTED: reason]."
-	}
-	if s.config.AgentID == "lead" {
+	if isReviewer {
+		promptText += "\n\n[INSTRUCTION]: Inspect the changes strictly read-only. If approving, include [REVIEW_APPROVED] in your response. If rejecting, include [REVIEW_REJECTED: reason]."
+	} else if strings.EqualFold(s.config.AgentID, "lead") || strings.EqualFold(s.config.AgentID, "alice") {
 		promptText += "\n\n[INSTRUCTION]: Delegate tasks using a JSON block: ```json\n{\"proposals\": [{\"proposal_id\": \"...\", \"proposed_agent_id\": \"coder\", \"objective\": \"...\", \"budget_tokens\": 20000}]}\n```"
 	}
 

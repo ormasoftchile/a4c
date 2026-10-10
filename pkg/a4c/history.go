@@ -347,10 +347,8 @@ func (r *TaskHistoryReport) FormatHumanReadable() string {
 	return sb.String()
 }
 
-// FormatInspect renders a compact inspection view of a task. structStore and workDir
-// are optional; they are used to resolve structural artifact freshness. The workspace
-// snapshot is computed at most once per call.
-func (r *TaskHistoryReport) FormatInspect(structStore *DurableStructuralStore, workDir string) string {
+// FormatInspect renders a compact inspection view of a task.
+func (r *TaskHistoryReport) FormatInspect(workDir string) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Task:       %s\n", r.TaskID))
 	sb.WriteString(fmt.Sprintf("Objective:  %s\n", r.OriginalObjective))
@@ -397,19 +395,6 @@ func (r *TaskHistoryReport) FormatInspect(structStore *DurableStructuralStore, w
 		sb.WriteString("Durations:  n/a\n")
 	}
 
-	var snap string
-	snapDone := false
-	currentSnapshot := func() string {
-		if !snapDone {
-			snapDone = true
-			if workDir != "" {
-				if s, err := NewWorkspaceSnapshotter().ComputeSnapshot(workDir); err == nil {
-					snap = s
-				}
-			}
-		}
-		return snap
-	}
 
 	byParent := make(map[string][]ActivityHistoryEntry)
 	known := make(map[string]bool)
@@ -465,10 +450,6 @@ func (r *TaskHistoryReport) FormatInspect(structStore *DurableStructuralStore, w
 		if len(a.EvidenceIDs) > 0 {
 			sb.WriteString(fmt.Sprintf("%s    Validation evidence: %s\n", indent, strings.Join(a.EvidenceIDs, ", ")))
 		}
-		if a.StructuralArtifactID != "" {
-			sb.WriteString(fmt.Sprintf("%s    Structural context: %s (%s)\n", indent, a.StructuralArtifactID,
-				structuralFreshness(structStore, a.StructuralArtifactID, currentSnapshot)))
-		}
 		if a.Error != "" {
 			sb.WriteString(fmt.Sprintf("%s    Error: %s\n", indent, a.Error))
 		}
@@ -505,30 +486,4 @@ func (r *TaskHistoryReport) FormatInspect(structStore *DurableStructuralStore, w
 		}
 	}
 	return sb.String()
-}
-
-// structuralFreshness resolves CURRENT/STALE/UNKNOWN for an artifact. It compares the
-// artifact's indexed snapshot with the current workspace snapshot when available and
-// otherwise falls back to the recorded freshness.
-func structuralFreshness(store *DurableStructuralStore, id string, currentSnapshot func() string) IndexFreshness {
-	if store == nil {
-		return FreshnessUnknown
-	}
-	art, err := store.Get(id)
-	if err != nil || art == nil {
-		return FreshnessUnknown
-	}
-	if art.IndexedSnapshot != "" {
-		if cur := currentSnapshot(); cur != "" {
-			if cur == art.IndexedSnapshot {
-				return FreshnessCurrent
-			}
-			return FreshnessStale
-		}
-	}
-	switch art.Freshness {
-	case FreshnessCurrent, FreshnessStale:
-		return art.Freshness
-	}
-	return FreshnessUnknown
 }

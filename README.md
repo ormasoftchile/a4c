@@ -3,7 +3,7 @@
 **A4C** turns your existing coding agent into a **persistent, coordinated personal software engineering team**.
 
 Operating on the principle:
-> **The host runs the agents. A4C makes them a persistent, coordinated engineering team. YAWR governs consequential execution.**
+> **The host runs the agents. A4C makes them a persistent, coordinated personal software engineering team with Git worktree isolation and independent verification.**
 
 A4C was inspired by **Squad** (the engineering team agent that operates inside GitHub Copilot). Instead of acting as a competing standalone conversational application, A4C operates natively inside **GitHub Copilot CLI**, **OpenCode**, and **Antigravity**.
 
@@ -35,7 +35,7 @@ A4C Durable Coordination & State Layer (.a4c)
        └──► team_integrate        (conflict-verified base repository merge)
        │
        ▼
-YAWR Governed Execution & CodeTopo Structural Intelligence
+Git Worktree Isolation & Host-Native Command/Test Execution
 ```
 
 ### Critical Architectural Invariants

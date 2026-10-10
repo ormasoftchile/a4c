@@ -40,7 +40,12 @@ Commands:
   install <copilot|opencode|all>        Install host-native agent definitions (.github/agents, .opencode/agents)
   doctor [--dir path] [--json]          Diagnose environment, host agents, and durable stores
   team list                             List persistent team members and permissions
-  task submit <obj> [budget] [--strategy s] [--runtime r] [--model m] Submit a task (strategy: direct|reviewed|team)
+  task submit <obj> [budget] [--strategy s] [--specialist s] [--runtime r] [--model m] Submit a task (default: direct)
+  task start <obj> [budget] [--strategy s] [--specialist s] [--runtime r] [--model m] [--steps N] Submit and immediately execute task
+  task run [task-id] [--steps N] [--runtime r] [--model m] Execute pending task activities
+  task resume <task-id> [--runtime r] [--model m] [--specialist s] [--run] Resume interrupted task on another host
+  task escalate <task-id> <reviewed|team> [--reviewer r] Escalate task to reviewed or team collaboration
+  task checkpoint <task-id> [--json]    Capture authoritative task checkpoint
   task list [--state s] [--status s] [--agent a] [--runtime r] Query tasks or activities
   task history <task-id>                Display full audit history and DAG for a task
   task inspect <task-id> [--json]       Inspect a task; output machine-readable JSON with --json
@@ -60,7 +65,7 @@ Commands:
 
 Flags:
   --real-copilot                        Connect to official GitHub Copilot CLI via Go SDK
-  --strategy direct|reviewed|team       Execution strategy (default: team)
+  --strategy direct|reviewed|team       Execution strategy (default: direct)
   --steps N                             Maximum sequential steps to execute (default: 10)
   --dir path                            Workspace root directory (default: current directory)
 `)
@@ -124,21 +129,15 @@ func main() {
 
 func runInstall(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: a4c install <copilot|opencode|antigravity|all> [--dir <path>] [--no-yawr] [--no-codetopo]")
+		fmt.Println("Usage: a4c install <copilot|opencode|antigravity|all> [--dir <path>]")
 		return
 	}
 	target := args[0]
 	workDir := "."
-	enableYAWR := true
-	enableCodeTopo := true
 	for i := 1; i < len(args); i++ {
 		if args[i] == "--dir" && i+1 < len(args) {
 			workDir = args[i+1]
 			i++
-		} else if args[i] == "--no-yawr" || args[i] == "--without-yawr" {
-			enableYAWR = false
-		} else if args[i] == "--no-codetopo" || args[i] == "--without-codetopo" {
-			enableCodeTopo = false
 		}
 	}
 
@@ -151,15 +150,11 @@ func runInstall(args []string) {
 		fmt.Printf("✅ Installed GitHub Copilot agents (.github/agents/a4c.agent.md, bob.agent.md, charlie.agent.md, .mcp.json) in %s\n", workDir)
 
 	case "opencode":
-		opts := a4c.ExportOptions{
-			EnableYAWR:     enableYAWR,
-			EnableCodeTopo: enableCodeTopo,
-		}
-		if err := a4c.ExportOpenCodeAgentsWithOptions(workDir, opts); err != nil {
+		if err := a4c.ExportOpenCodeAgents(workDir); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to install OpenCode agents: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("✅ Installed OpenCode agents (.opencode/agents/a4c.md, bob.md, charlie.md, opencode.json) in %s (YAWR: %t, CodeTopo: %t)\n", workDir, enableYAWR, enableCodeTopo)
+		fmt.Printf("✅ Installed OpenCode agents (.opencode/agents/a4c.md, bob.md, charlie.md, opencode.json) in %s\n", workDir)
 
 	case "antigravity":
 		if err := a4c.ExportAntigravityCustomization(workDir); err != nil {
@@ -170,7 +165,7 @@ func runInstall(args []string) {
 
 	case "all":
 		_ = a4c.ExportCopilotAgents(workDir)
-		_ = a4c.ExportOpenCodeAgentsWithOptions(workDir, a4c.ExportOptions{EnableYAWR: enableYAWR, EnableCodeTopo: enableCodeTopo})
+		_ = a4c.ExportOpenCodeAgents(workDir)
 		_ = a4c.ExportAntigravityCustomization(workDir)
 		fmt.Printf("✅ Installed all host-native agent definitions (Copilot, OpenCode, Antigravity) in %s\n", workDir)
 
@@ -227,7 +222,6 @@ func runInit(args []string) {
 	dirs := []string{
 		dotDir, storeDir, rosterDir, memDir, journalDir,
 		filepath.Join(dotDir, "worktrees"),
-		filepath.Join(dotDir, "structural"),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0755); err != nil {
@@ -305,7 +299,6 @@ func buildService(workDir string) (*a4c.TeamServiceImpl, error) {
 	dotDir, storeDir, rosterDir, memDir, journalDir := getPaths(workDir)
 	lifecycleDir := filepath.Join(dotDir, "lifecycle")
 	wtDir := filepath.Join(dotDir, "worktrees")
-	structDir := filepath.Join(dotDir, "structural")
 
 	store, err := a4c.NewDurableActivityStore(storeDir)
 	if err != nil {
@@ -331,10 +324,6 @@ func buildService(workDir string) (*a4c.TeamServiceImpl, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open worktree manager: %w", err)
 	}
-	structStore, err := a4c.NewDurableStructuralStore(structDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open structural store: %w", err)
-	}
 
 	gov := a4c.NewPolicyGovernor([]string{
 		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
@@ -343,12 +332,90 @@ func buildService(workDir string) (*a4c.TeamServiceImpl, error) {
 	coord := a4c.NewTeamCoordinator(workDir, store, roster, memStore, gov, journal, &a4c.NativeGoTestRunner{}, nil)
 	coord.SetWorktreeManager(wtMgr)
 
-	return a4c.NewTeamService(workDir, store, lifecycleStore, coord, roster, memStore, journal, wtMgr, structStore), nil
+	return a4c.NewTeamService(workDir, store, lifecycleStore, coord, roster, memStore, journal, wtMgr), nil
+}
+
+func specialistOrFallback(s, fallback string) string {
+	if s != "" {
+		return s
+	}
+	return fallback
+}
+
+func configureProviderForCoordinator(coord *a4c.TeamCoordinator, runtime string, model string, realCopilot bool, opencodeEndpoint string) (func(), error) {
+	var cleanupFuncs []func()
+	cleanup := func() {
+		for _, f := range cleanupFuncs {
+			f()
+		}
+	}
+
+	// 1. Auto-discover and register all available hosts into coord.Providers for seamless cross-host routing
+	// OpenCode
+	endpoint := opencodeEndpoint
+	if endpoint == "" {
+		endpoint = "http://127.0.0.1:4096"
+	}
+	op := a4c.NewOpenCodeProvider(endpoint, model, nil)
+	cleanupFuncs = append(cleanupFuncs, func() { op.Close() })
+	coord.RegisterProvider("opencode", op)
+
+	// GitHub Copilot
+	if cp, err := a4c.NewCopilotProvider(""); err == nil {
+		cleanupFuncs = append(cleanupFuncs, func() { cp.Close() })
+		coord.RegisterProvider("copilot", cp)
+	}
+
+	// Antigravity CLI
+	if agy, err := a4c.NewAntigravityProvider(model); err == nil {
+		coord.RegisterProvider("antigravity", agy)
+		coord.RegisterProvider("agy", agy)
+	}
+
+	// In-memory fake provider
+	fake := a4c.NewFakeProvider()
+	coord.RegisterProvider("fake", fake)
+
+	// 2. Select default provider based on runtime parameter
+	switch runtime {
+	case "copilot":
+		if cp, ok := coord.Providers["copilot"]; ok {
+			coord.SetDefaultProvider(cp)
+		} else {
+			return cleanup, fmt.Errorf("copilot provider requested but unavailable")
+		}
+	case "opencode":
+		coord.SetDefaultProvider(op)
+	case "antigravity", "agy":
+		if agy, ok := coord.Providers["antigravity"]; ok {
+			coord.SetDefaultProvider(agy)
+		} else {
+			return cleanup, fmt.Errorf("antigravity provider requested but agy binary not found")
+		}
+	case "fake":
+		coord.SetDefaultProvider(fake)
+	case "":
+		if realCopilot {
+			if cp, ok := coord.Providers["copilot"]; ok {
+				coord.SetDefaultProvider(cp)
+			} else {
+				coord.SetDefaultProvider(op)
+			}
+		} else if _, ok := coord.Providers["opencode"]; ok {
+			coord.SetDefaultProvider(op)
+		} else {
+			coord.SetDefaultProvider(fake)
+		}
+	default:
+		return cleanup, fmt.Errorf("unknown runtime provider %q (expected copilot, opencode, antigravity, or fake)", runtime)
+	}
+
+	return cleanup, nil
 }
 
 func runTask(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: a4c task <submit|list|history|inspect|diff|feedback|accept|integrate|reject> [options]")
+		fmt.Println("Usage: a4c task <submit|start|run|resume|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject> [options]")
 		return
 	}
 
@@ -379,14 +446,19 @@ func runTask(args []string) {
 	switch subCmd {
 	case "submit":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task submit <objective> [budget_tokens] [--strategy direct|reviewed|team] [--runtime copilot|opencode] [--model <model>]")
+			fmt.Println("Usage: a4c task submit <objective> [budget_tokens] [--strategy direct|reviewed|team] [--specialist <agent>] [--runtime copilot|opencode] [--model <model>]")
 			return
 		}
 		objective := args[1]
 		budgetTokens := 50000.0
-		strategy := a4c.StrategyTeam
+		strategy := a4c.StrategyDirect
 		runtime := ""
 		model := ""
+		specialist := ""
+
+		reviewerRuntime := ""
+		reviewerModel := ""
+		agentRuntimes := make(map[string]string)
 
 		for i := 2; i < len(args); i++ {
 			if args[i] == "--strategy" && i+1 < len(args) {
@@ -398,17 +470,47 @@ func runTask(args []string) {
 			} else if args[i] == "--model" && i+1 < len(args) {
 				model = args[i+1]
 				i++
+			} else if args[i] == "--reviewer-runtime" && i+1 < len(args) {
+				reviewerRuntime = args[i+1]
+				i++
+			} else if args[i] == "--reviewer-model" && i+1 < len(args) {
+				reviewerModel = args[i+1]
+				i++
+			} else if args[i] == "--agent-runtimes" && i+1 < len(args) {
+				for _, p := range strings.Split(args[i+1], ",") {
+					parts := strings.SplitN(p, "=", 2)
+					if len(parts) == 2 {
+						agentRuntimes[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+					}
+				}
+				i++
+			} else if args[i] == "--specialist" && i+1 < len(args) {
+				specialist = args[i+1]
+				i++
 			} else if b, err := strconv.ParseFloat(args[i], 64); err == nil {
 				budgetTokens = b
 			}
+		}
+
+		submitInputs := make(map[string]any)
+		if reviewerRuntime != "" {
+			submitInputs["reviewer_runtime"] = reviewerRuntime
+		}
+		if reviewerModel != "" {
+			submitInputs["reviewer_model"] = reviewerModel
+		}
+		if len(agentRuntimes) > 0 {
+			submitInputs["agent_runtimes"] = agentRuntimes
 		}
 
 		ref, err := svc.SubmitTask(ctx, a4c.SubmitTaskRequest{
 			Objective:    objective,
 			BudgetTokens: budgetTokens,
 			Strategy:     strategy,
+			Specialist:   specialist,
 			Runtime:      runtime,
 			Model:        model,
+			Inputs:       submitInputs,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to enqueue task: %v\n", err)
@@ -416,6 +518,345 @@ func runTask(args []string) {
 		}
 		fmt.Printf("Task enqueued: %s\nStrategy: %s\nState: %s\nObjective: %s\nBudget: %.0f tokens\n",
 			ref.TaskID, strategy, ref.State, objective, budgetTokens)
+
+	case "start":
+		if len(args) < 2 {
+			fmt.Println("Usage: a4c task start <objective> [budget_tokens] [--strategy direct|reviewed|team] [--specialist <agent>] [--runtime copilot|opencode|antigravity] [--model <model>] [--reviewer-runtime <r>] [--reviewer-model <m>] [--agent-runtimes a1=r1,a2=r2] [--steps N]")
+			return
+		}
+		objective := args[1]
+		budgetTokens := 50000.0
+		strategy := a4c.StrategyDirect
+		runtime := ""
+		model := ""
+		reviewerRuntime := ""
+		reviewerModel := ""
+		startAgentRuntimes := make(map[string]string)
+		specialist := ""
+		steps := 10
+		realCopilot := false
+		opencodeEndpoint := ""
+
+		for i := 2; i < len(args); i++ {
+			if args[i] == "--strategy" && i+1 < len(args) {
+				strategy = a4c.ExecutionStrategy(args[i+1])
+				i++
+			} else if args[i] == "--runtime" && i+1 < len(args) {
+				runtime = args[i+1]
+				i++
+			} else if args[i] == "--model" && i+1 < len(args) {
+				model = args[i+1]
+				i++
+			} else if args[i] == "--reviewer-runtime" && i+1 < len(args) {
+				reviewerRuntime = args[i+1]
+				i++
+			} else if args[i] == "--reviewer-model" && i+1 < len(args) {
+				reviewerModel = args[i+1]
+				i++
+			} else if args[i] == "--agent-runtimes" && i+1 < len(args) {
+				for _, p := range strings.Split(args[i+1], ",") {
+					parts := strings.SplitN(p, "=", 2)
+					if len(parts) == 2 {
+						startAgentRuntimes[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+					}
+				}
+				i++
+			} else if args[i] == "--specialist" && i+1 < len(args) {
+				specialist = args[i+1]
+				i++
+			} else if args[i] == "--steps" && i+1 < len(args) {
+				if s, err := strconv.Atoi(args[i+1]); err == nil {
+					steps = s
+				}
+				i++
+			} else if args[i] == "--real-copilot" {
+				realCopilot = true
+			} else if args[i] == "--opencode-endpoint" && i+1 < len(args) {
+				opencodeEndpoint = args[i+1]
+				i++
+			} else if b, err := strconv.ParseFloat(args[i], 64); err == nil {
+				budgetTokens = b
+			}
+		}
+
+		startInputs := make(map[string]any)
+		if reviewerRuntime != "" {
+			startInputs["reviewer_runtime"] = reviewerRuntime
+		}
+		if reviewerModel != "" {
+			startInputs["reviewer_model"] = reviewerModel
+		}
+		if len(startAgentRuntimes) > 0 {
+			startInputs["agent_runtimes"] = startAgentRuntimes
+		}
+
+		ref, err := svc.SubmitTask(ctx, a4c.SubmitTaskRequest{
+			Objective:    objective,
+			BudgetTokens: budgetTokens,
+			Strategy:     strategy,
+			Specialist:   specialist,
+			Runtime:      runtime,
+			Model:        model,
+			Inputs:       startInputs,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to submit task: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Task started: %s\nStrategy: %s\nObjective: %s\nExecuting with %s (max %d steps)...\n",
+			ref.TaskID, strategy, objective, specialistOrFallback(specialist, "coder"), steps)
+
+		cleanup, err := configureProviderForCoordinator(svc.Coordinator(), runtime, model, realCopilot, opencodeEndpoint)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Provider initialization warning: %v\n", err)
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+
+		results, err := svc.ExecuteTask(ctx, ref.TaskID, steps)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Task execution encountered error: %v\n", err)
+		}
+
+		fmt.Printf("\nExecuted %d activities for task %s:\n", len(results), ref.TaskID)
+		for _, res := range results {
+			agentID := ""
+			if rec, err := svc.Store().Get(res.ID); err == nil && rec != nil {
+				agentID = rec.Request.AgentID
+			}
+			fmt.Printf("  -> [%s] Agent: %-10s Status: %-12s Consumed: %.0f tokens\n",
+				res.ID, agentID, res.Status, res.Consumed.Consumed)
+		}
+
+		taskDetails, err := svc.GetTask(ctx, ref.TaskID)
+		if err == nil {
+			fmt.Printf("\nCurrent State: %s\nWorktree: %s (Branch: %s)\n",
+				taskDetails.State, taskDetails.WorktreePath, taskDetails.WorktreeBranch)
+			if taskDetails.State == a4c.TaskStateAwaitingHumanReview {
+				fmt.Printf("Changes ready for inspection. Run 'a4c task diff %s' or 'a4c task accept %s'.\n", ref.TaskID, ref.TaskID)
+			}
+		}
+
+	case "run":
+		taskID := ""
+		steps := 10
+		runtime := ""
+		model := ""
+		realCopilot := false
+		opencodeEndpoint := ""
+
+		for i := 1; i < len(args); i++ {
+			if args[i] == "--steps" && i+1 < len(args) {
+				if s, err := strconv.Atoi(args[i+1]); err == nil {
+					steps = s
+				}
+				i++
+			} else if args[i] == "--runtime" && i+1 < len(args) {
+				runtime = args[i+1]
+				i++
+			} else if args[i] == "--model" && i+1 < len(args) {
+				model = args[i+1]
+				i++
+			} else if args[i] == "--real-copilot" {
+				realCopilot = true
+			} else if args[i] == "--opencode-endpoint" && i+1 < len(args) {
+				opencodeEndpoint = args[i+1]
+				i++
+			} else if !strings.HasPrefix(args[i], "--") && taskID == "" {
+				taskID = args[i]
+			}
+		}
+
+		cleanup, err := configureProviderForCoordinator(svc.Coordinator(), runtime, model, realCopilot, opencodeEndpoint)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Provider initialization warning: %v\n", err)
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+
+		var results []*a4c.ActivityResult
+		if taskID != "" {
+			results, err = svc.ExecuteTask(ctx, taskID, steps)
+		} else {
+			for s := 0; s < steps; s++ {
+				if !svc.Store().HasClaimable() {
+					break
+				}
+				res, stepErr := svc.Coordinator().Step(ctx)
+				if stepErr != nil {
+					err = stepErr
+					break
+				}
+				if res == nil {
+					break
+				}
+				results = append(results, res)
+			}
+		}
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Execution encountered error: %v\n", err)
+		}
+
+		fmt.Printf("Executed %d activities:\n", len(results))
+		for _, res := range results {
+			agentID := ""
+			if rec, err := svc.Store().Get(res.ID); err == nil && rec != nil {
+				agentID = rec.Request.AgentID
+			}
+			fmt.Printf("  -> [%s] Agent: %-10s Status: %-12s Consumed: %.0f tokens\n",
+				res.ID, agentID, res.Status, res.Consumed.Consumed)
+		}
+
+	case "resume":
+		if len(args) < 2 {
+			fmt.Println("Usage: a4c task resume <task-id> [--runtime <r>] [--model <m>] [--specialist <s>] [--instructions <text>] [--run] [--steps N]")
+			return
+		}
+		taskID := args[1]
+		runtime := ""
+		model := ""
+		specialist := ""
+		instructions := ""
+		runImmediately := false
+		steps := 10
+		realCopilot := false
+		opencodeEndpoint := ""
+
+		for i := 2; i < len(args); i++ {
+			if args[i] == "--runtime" && i+1 < len(args) {
+				runtime = args[i+1]
+				i++
+			} else if args[i] == "--model" && i+1 < len(args) {
+				model = args[i+1]
+				i++
+			} else if args[i] == "--specialist" && i+1 < len(args) {
+				specialist = args[i+1]
+				i++
+			} else if args[i] == "--instructions" && i+1 < len(args) {
+				instructions = args[i+1]
+				i++
+			} else if args[i] == "--run" {
+				runImmediately = true
+			} else if args[i] == "--real-copilot" {
+				realCopilot = true
+			} else if args[i] == "--opencode-endpoint" && i+1 < len(args) {
+				opencodeEndpoint = args[i+1]
+				i++
+			} else if args[i] == "--steps" && i+1 < len(args) {
+				if s, err := strconv.Atoi(args[i+1]); err == nil {
+					steps = s
+				}
+				i++
+			}
+		}
+
+		chk, err := svc.ResumeTaskOnHost(ctx, a4c.ResumeTaskRequest{
+			TaskID:       taskID,
+			Runtime:      runtime,
+			Model:        model,
+			Specialist:   specialist,
+			Instructions: instructions,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to resume task %s: %v\n", taskID, err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Task %s resumed successfully.\n", taskID)
+		fmt.Printf("  Worktree:        %s (Branch: %s)\n", chk.WorktreePath, chk.WorktreeBranch)
+		fmt.Printf("  Active Activity: %s (Specialist: %s)\n", chk.ActiveActivityID, chk.SpecialistID)
+		if chk.TargetRuntime != "" {
+			fmt.Printf("  Target Runtime:  %s (Model: %s)\n", chk.TargetRuntime, chk.Model)
+		}
+		if chk.GitStatusSummary != "" {
+			fmt.Printf("  Git Status:\n    %s\n", strings.ReplaceAll(chk.GitStatusSummary, "\n", "\n    "))
+		}
+		if len(chk.CompletedWork) > 0 {
+			fmt.Printf("  Completed Work:  %d items\n", len(chk.CompletedWork))
+		}
+		if len(chk.RemainingObligations) > 0 {
+			fmt.Printf("  Remaining:       %d obligations\n", len(chk.RemainingObligations))
+		}
+
+		if runImmediately {
+			fmt.Printf("\nExecuting resumed task %s...\n", taskID)
+			cleanup, cErr := configureProviderForCoordinator(svc.Coordinator(), runtime, model, realCopilot, opencodeEndpoint)
+			if cErr != nil {
+				fmt.Fprintf(os.Stderr, "Provider warning: %v\n", cErr)
+			}
+			if cleanup != nil {
+				defer cleanup()
+			}
+			results, xErr := svc.ExecuteTask(ctx, taskID, steps)
+			if xErr != nil {
+				fmt.Fprintf(os.Stderr, "Execution warning: %v\n", xErr)
+			}
+			fmt.Printf("Executed %d activities upon resumption.\n", len(results))
+		}
+
+	case "escalate":
+		if len(args) < 3 {
+			fmt.Println("Usage: a4c task escalate <task-id> <reviewed|team> [--reviewer <agent>]")
+			return
+		}
+		taskID := args[1]
+		newStrategy := a4c.ExecutionStrategy(args[2])
+		reviewer := ""
+
+		for i := 3; i < len(args); i++ {
+			if args[i] == "--reviewer" && i+1 < len(args) {
+				reviewer = args[i+1]
+				i++
+			}
+		}
+
+		ref, err := svc.EscalateTask(ctx, a4c.EscalateTaskRequest{
+			TaskID:      taskID,
+			NewStrategy: newStrategy,
+			Reviewer:    reviewer,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to escalate task: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Task %s escalated to strategy %q. Current State: %s\n", ref.TaskID, newStrategy, ref.State)
+
+	case "checkpoint":
+		if len(args) < 2 {
+			fmt.Println("Usage: a4c task checkpoint <task-id> [--json]")
+			return
+		}
+		taskID := args[1]
+		chk, err := svc.CaptureCheckpoint(ctx, taskID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to capture checkpoint for task %s: %v\n", taskID, err)
+			os.Exit(1)
+		}
+		if len(args) > 2 && args[2] == "--json" {
+			b, _ := json.MarshalIndent(chk, "", "  ")
+			fmt.Println(string(b))
+		} else {
+			fmt.Printf("Checkpoint for Task %s:\n", chk.TaskID)
+			fmt.Printf("  Branch:      %s\n", chk.WorktreeBranch)
+			fmt.Printf("  Worktree:    %s\n", chk.WorktreePath)
+			fmt.Printf("  Specialist:  %s (%s)\n", chk.SpecialistID, chk.SpecialistRole)
+			if chk.GitStatusSummary != "" {
+				fmt.Printf("  Git Status:\n    %s\n", strings.ReplaceAll(chk.GitStatusSummary, "\n", "\n    "))
+			} else {
+				fmt.Printf("  Git Status:  clean\n")
+			}
+			fmt.Printf("  Completed Work (%d):\n", len(chk.CompletedWork))
+			for _, w := range chk.CompletedWork {
+				fmt.Printf("    * %s\n", w)
+			}
+			fmt.Printf("  Remaining Obligations (%d):\n", len(chk.RemainingObligations))
+			for _, o := range chk.RemainingObligations {
+				fmt.Printf("    - %s\n", o)
+			}
+		}
 
 	case "list":
 		var stateFilter a4c.TaskLifecycleState
@@ -482,7 +923,6 @@ func runTask(args []string) {
 		journal, _ := a4c.NewDurableIntentJournal(journalDir)
 		memStore, _ := a4c.NewDurableMemoryStore(memDir)
 		wtMgr, _ := a4c.NewWorktreeManager(workDir, filepath.Join(dotDir, "worktrees"))
-		structStore, _ := a4c.NewDurableStructuralStore(filepath.Join(dotDir, "structural"))
 
 		report, err := a4c.BuildTaskHistory(taskID, store, journal, wtMgr, memStore)
 		if err != nil {
@@ -500,7 +940,7 @@ func runTask(args []string) {
 			return
 		}
 
-		fmt.Print(report.FormatInspect(structStore, workDir))
+		fmt.Print(report.FormatInspect(workDir))
 
 	case "diff":
 		if len(args) < 2 {
@@ -617,11 +1057,44 @@ func runTask(args []string) {
 		fmt.Printf("Task %s rejected at %s. Reason: %s\n", res.TaskID, res.RejectedAt.Format(time.RFC3339), res.Reason)
 
 	default:
-		fmt.Printf("Unknown task command %q. Usage: a4c task <submit|list|history|inspect|diff|feedback|accept|integrate|reject>\n", subCmd)
+		fmt.Printf("Unknown task command %q. Usage: a4c task <submit|start|run|resume|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject>\n", subCmd)
 	}
 }
 
 func runHost(args []string) {
+	if len(args) > 0 && (args[0] == "capabilities" || args[0] == "list") {
+		jsonOutput := false
+		for _, a := range args[1:] {
+			if a == "--json" {
+				jsonOutput = true
+			}
+		}
+		rep := a4c.RunDoctor(".")
+		if jsonOutput {
+			b, _ := json.MarshalIndent(rep.Hosts, "", "  ")
+			fmt.Println(string(b))
+		} else {
+			fmt.Println("Universal Host Capabilities & Limitations:")
+			for _, h := range rep.Hosts {
+				avail := "Available"
+				if !h.Available {
+					avail = "Unavailable"
+				}
+				fmt.Printf("\n• %s (%s) — %s\n", h.DisplayName, h.HostID, avail)
+				fmt.Printf("  Default Model:        %s\n", h.DefaultModel)
+				fmt.Printf("  Direct Mode:          %t\n", h.SessionInvocation)
+				fmt.Printf("  Reviewed Mode:        %t\n", h.ToolRestrictions)
+				fmt.Printf("  Cross-Host Resume:    %t\n", h.SessionResumption)
+				fmt.Printf("  Structured Telemetry: %t\n", h.StructuredTelemetry)
+				fmt.Printf("  Native Subagents:     %t\n", h.NativeSubagents)
+				if len(h.Limitations) > 0 {
+					fmt.Printf("  Limitations:          %s\n", strings.Join(h.Limitations, "; "))
+				}
+			}
+		}
+		return
+	}
+
 	fs := flag.NewFlagSet("host", flag.ExitOnError)
 	workDir := fs.String("dir", ".", "Workspace directory")
 	steps := fs.Int("steps", 0, "Max sequential steps (0 = daemon mode)")
@@ -664,14 +1137,6 @@ func runHost(args []string) {
 func runMCP(args []string) {
 	workDir := "."
 	role := ""
-	enableYAWR := true
-	if os.Getenv("A4C_DISABLE_YAWR") == "1" || strings.ToLower(os.Getenv("A4C_ENABLE_YAWR")) == "false" {
-		enableYAWR = false
-	}
-	enableCodeTopo := true
-	if os.Getenv("A4C_DISABLE_CODETOPO") == "1" || strings.ToLower(os.Getenv("A4C_ENABLE_CODETOPO")) == "false" {
-		enableCodeTopo = false
-	}
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--dir" && i+1 < len(args) {
@@ -680,14 +1145,6 @@ func runMCP(args []string) {
 		} else if (args[i] == "--role" || args[i] == "--agent") && i+1 < len(args) {
 			role = args[i+1]
 			i++
-		} else if args[i] == "--no-yawr" || args[i] == "--without-yawr" {
-			enableYAWR = false
-		} else if args[i] == "--no-codetopo" || args[i] == "--without-codetopo" {
-			enableCodeTopo = false
-		} else if args[i] == "--enable-yawr=false" {
-			enableYAWR = false
-		} else if args[i] == "--enable-codetopo=false" {
-			enableCodeTopo = false
 		}
 	}
 	svc, err := buildService(workDir)
@@ -695,11 +1152,7 @@ func runMCP(args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to initialize A4C service: %v\n", err)
 		os.Exit(1)
 	}
-	srv := a4cmcp.NewServerWithOptions(svc, a4cmcp.ServerOptions{
-		Role:           role,
-		EnableYAWR:     enableYAWR,
-		EnableCodeTopo: enableCodeTopo,
-	})
+	srv := a4cmcp.NewServerWithRole(svc, role)
 	if err := srv.ServeStdio(); err != nil {
 		fmt.Fprintf(os.Stderr, "MCP server exited with error: %v\n", err)
 		os.Exit(1)
@@ -882,9 +1335,6 @@ func runLoop(args []string) {
 	}
 	if wtMgr, err := a4c.NewWorktreeManager(*workDir, filepath.Join(dotDir, "worktrees")); err == nil {
 		coord.SetWorktreeManager(wtMgr)
-	}
-	if structStore, err := a4c.NewDurableStructuralStore(filepath.Join(dotDir, "structural")); err == nil {
-		coord.SetStructuralStore(structStore)
 	}
 
 	fmt.Printf("Starting governed team loop (max steps: %d)...\n", *maxSteps)

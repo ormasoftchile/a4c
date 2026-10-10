@@ -1,6 +1,6 @@
 ---
 name: a4c
-description: "Governed personal engineering team (Alice Lead, Bob Coder, Charlie Reviewer) powered by A4C durable state and YAWR governance."
+description: "Personal engineering team (Alice Lead, Bob Coder, Charlie Reviewer) powered by A4C durable state."
 ---
 
 # A4C Engineering Team

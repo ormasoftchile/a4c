@@ -32,7 +32,6 @@ func TestCrossHostContinuity(t *testing.T) {
 	journalDir := filepath.Join(dotDir, "journal")
 	lifecycleDir := filepath.Join(dotDir, "lifecycle")
 	wtDir := filepath.Join(dotDir, "worktrees")
-	structDir := filepath.Join(dotDir, "structural")
 
 	store, err := a4c.NewDurableActivityStore(storeDir)
 	if err != nil {
@@ -58,11 +57,6 @@ func TestCrossHostContinuity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create worktrees: %v", err)
 	}
-	structStore, err := a4c.NewDurableStructuralStore(structDir)
-	if err != nil {
-		t.Fatalf("create structural store: %v", err)
-	}
-
 	gov := a4c.NewPolicyGovernor([]string{
 		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
 		"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
@@ -76,7 +70,7 @@ func TestCrossHostContinuity(t *testing.T) {
 	// PHASE 1: GITHUB COPILOT HOST SESSION
 	// =========================================================================
 	// Simulate Copilot-native coordinator service instance
-	copilotSvc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr, structStore)
+	copilotSvc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr)
 
 	// Step 1: Alice inspects environment context in Copilot
 	copilotCtx, err := copilotSvc.GetTeamContext(ctx)
@@ -200,7 +194,7 @@ func (g *PaymentGateway) ProcessPayment(req PaymentRequest) bool {
 
 	openCodeCoord := a4c.NewTeamCoordinator(repoDir, openCodeStore, openCodeRoster, openCodeMemory, gov, openCodeJournal, &a4c.NativeGoTestRunner{}, nil)
 	openCodeCoord.SetWorktreeManager(openCodeWtMgr)
-	openCodeSvc := a4c.NewTeamService(repoDir, openCodeStore, openCodeLifecycle, openCodeCoord, openCodeRoster, openCodeMemory, openCodeJournal, openCodeWtMgr, structStore)
+	openCodeSvc := a4c.NewTeamService(repoDir, openCodeStore, openCodeLifecycle, openCodeCoord, openCodeRoster, openCodeMemory, openCodeJournal, openCodeWtMgr)
 
 	// Step 7: OpenCode inspects existing team context
 	opencodeCtx, err := openCodeSvc.GetTeamContext(ctx)

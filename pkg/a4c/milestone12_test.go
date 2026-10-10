@@ -219,13 +219,13 @@ func TestMilestone12_04_SessionCreation_ToolContainmentRules(t *testing.T) {
 	defer provider.Close()
 
 	ctx := context.Background()
-	coderConfig := spike.AgentConfig{
-		AgentID: "coder",
-		Charter: "Software Engineer",
+	reviewerConfig := spike.AgentConfig{
+		AgentID: "reviewer",
+		Charter: "Quality Engineer",
 		Model:   "opencode-go/mimo-v2.5",
 	}
 
-	sess, err := provider.CreateSession(ctx, coderConfig)
+	sess, err := provider.CreateSession(ctx, reviewerConfig)
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestMilestone12_04_SessionCreation_ToolContainmentRules(t *testing.T) {
 		t.Fatalf("expected non-empty permission rules in session, got: %v", created["permission"])
 	}
 
-	// Verify that bash and task are explicitly denied
+	// Verify that reviewer has bash and task explicitly denied
 	bashDenied := false
 	taskDenied := false
 	for _, p := range perms {
@@ -260,7 +260,7 @@ func TestMilestone12_04_SessionCreation_ToolContainmentRules(t *testing.T) {
 	}
 
 	if !bashDenied {
-		t.Errorf("security violation: 'bash' permission rule was NOT denied")
+		t.Errorf("security violation: 'bash' permission rule was NOT denied for reviewer")
 	}
 	if !taskDenied {
 		t.Errorf("security violation: 'task' permission rule was NOT denied")
@@ -306,11 +306,11 @@ func TestMilestone12_05_PromptExecution_And_UsageParsing(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected tools toggle map in message, got %v", received["tools"])
 	}
-	if toolsMap["bash"] != false {
-		t.Errorf("message-level containment failed: 'bash' not disabled in tools map")
-	}
 	if toolsMap["task"] != false {
 		t.Errorf("message-level containment failed: 'task' not disabled in tools map")
+	}
+	if toolsMap["bash"] != true {
+		t.Errorf("expected native bash to be enabled for coder")
 	}
 	mock.mu.Unlock()
 
@@ -750,14 +750,14 @@ func TestMilestone12_17_ScopedTools_CoderGovernedProposalMode(t *testing.T) {
 	defer mock.mu.Unlock()
 	msg := mock.receivedMessages[0]
 	tools := msg["tools"].(map[string]any)
-	if tools["write"] != false {
-		t.Errorf("expected write=false for coder under Governed Proposal Mode")
+	if tools["write"] != true {
+		t.Errorf("expected write=true for coder under native worktree execution")
 	}
-	if tools["edit"] != false {
-		t.Errorf("expected edit=false for coder under Governed Proposal Mode")
+	if tools["edit"] != true {
+		t.Errorf("expected edit=true for coder under native worktree execution")
 	}
-	if tools["bash"] != false {
-		t.Errorf("security violation: bash must remain false for coder")
+	if tools["bash"] != true {
+		t.Errorf("expected bash=true for coder under native worktree execution")
 	}
 }
 

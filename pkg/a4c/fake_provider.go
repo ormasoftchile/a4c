@@ -215,3 +215,26 @@ func (p *FakeProvider) ResumeSession(ctx context.Context, sessionID string, conf
 	}
 	return session, nil
 }
+
+func (p *FakeProvider) HostCapabilities() HostCapabilities {
+	return HostCapabilities{
+		HostID:               "fake",
+		DisplayName:          "In-Memory Test Simulator",
+		Version:              "test",
+		Available:            true,
+		SessionInvocation:    true,
+		WorktreeBinding:      true,
+		ContextInjection:     true,
+		CompletionCollection: true,
+		SessionCancellation:  true,
+		ModelSelection:       true,
+		NativeSubagents:      false,
+		SessionResumption:    true,
+		StructuredTelemetry:  true,
+		ToolRestrictions:     true,
+		DefaultModel:         "simulated",
+		Limitations: []string{
+			"Simulated in-memory provider for unit tests and local benchmarks",
+		},
+	}
+}

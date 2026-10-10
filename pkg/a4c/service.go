@@ -118,7 +118,7 @@ func (s *TeamServiceImpl) GetWorktreePath(taskID string) (string, error) {
 	if rec == nil || rec.WorktreePath == "" {
 		return s.workspaceDir, nil
 	}
-	return rec.WorktreePath, nil
+	return s.absPath(rec.WorktreePath), nil
 }
 
 // SubmitTask enqueues a new assignment under the configured execution strategy.
@@ -1317,6 +1317,26 @@ func (s *TeamServiceImpl) RecordReview(ctx context.Context, req RecordReviewRequ
 	current := s.resolveCurrentSnapshot(req.TaskID)
 
 	// A review is bound to the exact content snapshot the reviewer examined.
+	// Allow "HEAD" or worktree git commit SHA to resolve to the current snapshot identity.
+	if strings.EqualFold(req.SnapshotSHA, "head") {
+		req.SnapshotSHA = current
+	} else if req.SnapshotSHA != "" && current != "" && req.SnapshotSHA != current {
+		wtPath := s.absPath(s.workspaceDir)
+		if s.wtMgr != nil {
+			if rec, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && rec != nil {
+				wtPath = s.absPath(rec.WorktreePath)
+			}
+		}
+		cmdRev := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+		cmdRev.Dir = wtPath
+		if out, err := cmdRev.CombinedOutput(); err == nil {
+			gitHead := strings.TrimSpace(string(out))
+			if strings.HasPrefix(gitHead, req.SnapshotSHA) || strings.HasPrefix(req.SnapshotSHA, gitHead) {
+				req.SnapshotSHA = current
+			}
+		}
+	}
+
 	if req.SnapshotSHA != "" && current != "" && req.SnapshotSHA != current {
 		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
 			"op": "review", "task_id": req.TaskID, "outcome": "denied",

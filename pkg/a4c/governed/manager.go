@@ -268,7 +268,8 @@ func (m *Manager) ReadFile(ctx context.Context, taskID, relPath string) (*tool.I
 			"task_id": taskID,
 			"path":    relPath,
 		},
-		Authority: auth,
+		Authority:      auth,
+		IdempotencyKey: fmt.Sprintf("read-%s-%s-%d", taskID, relPath, time.Now().UnixNano()),
 	}
 	return m.invoker.Invoke(ctx, req)
 }
@@ -309,7 +310,8 @@ func (m *Manager) GitInspect(ctx context.Context, taskID, subcommand, target str
 			"subcommand": subcommand,
 			"target":     target,
 		},
-		Authority: auth,
+		Authority:      auth,
+		IdempotencyKey: fmt.Sprintf("inspect-%s-%s-%d", taskID, subcommand, time.Now().UnixNano()),
 	}
 	return m.invoker.Invoke(ctx, req)
 }
@@ -319,6 +321,10 @@ func (m *Manager) RunTests(ctx context.Context, taskID, pkg string, race bool, i
 	auth, err := m.BuildAuthority(ctx, taskID)
 	if err != nil {
 		return nil, err
+	}
+
+	if idempotencyKey == "" {
+		idempotencyKey = fmt.Sprintf("test-%s-%d", taskID, time.Now().UnixNano())
 	}
 
 	req := tool.InvocationRequest{
@@ -577,9 +583,9 @@ func (r *governedRuntime) executeGitInspect(ctx context.Context, worktreePath, s
 
 	switch strings.ToLower(strings.TrimSpace(subcommand)) {
 	case "diff":
-		cmdArgs = []string{"diff"}
+		cmdArgs = []string{"diff", "HEAD"}
 		if target != "" {
-			cmdArgs = append(cmdArgs, target)
+			cmdArgs = append(cmdArgs, "--", target)
 		}
 	case "status":
 		cmdArgs = []string{"status", "--porcelain"}

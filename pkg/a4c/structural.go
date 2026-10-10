@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -94,24 +95,30 @@ type CodeTopoProvider struct {
 	totalQueryDuration  time.Duration
 }
 
-// NewCodeTopoProvider initializes a provider with discovery of codetopo binary and database.
-func NewCodeTopoProvider(repoRoot string, dbPath string) (*CodeTopoProvider, error) {
-	cliPath := os.Getenv("CODETOPO_CLI_PATH")
-	if cliPath == "" {
-		if path, err := exec.LookPath("codetopo"); err == nil {
-			cliPath = path
-		} else {
-			// Check standard install locations
-			home, _ := os.UserHomeDir()
-			candidate := filepath.Join(home, ".local", "bin", "codetopo")
-			if _, statErr := os.Stat(candidate); statErr == nil {
-				cliPath = candidate
-			}
+// FindCodeTopoCLI locates the codetopo binary via env, PATH, or standard install paths.
+func FindCodeTopoCLI() string {
+	if cliPath := os.Getenv("CODETOPO_CLI_PATH"); cliPath != "" {
+		if _, statErr := os.Stat(cliPath); statErr == nil {
+			return cliPath
 		}
 	}
+	if path, err := exec.LookPath("codetopo"); err == nil {
+		return path
+	}
+	// Check standard install locations
+	home, _ := os.UserHomeDir()
+	candidate := filepath.Join(home, ".local", "bin", "codetopo")
+	if _, statErr := os.Stat(candidate); statErr == nil {
+		return candidate
+	}
+	return ""
+}
 
+// NewCodeTopoProvider initializes a provider with discovery of codetopo binary and database.
+func NewCodeTopoProvider(repoRoot string, dbPath string) (*CodeTopoProvider, error) {
+	cliPath := FindCodeTopoCLI()
 	if cliPath == "" {
-		return nil, fmt.Errorf("codetopo binary not found in PATH or CODETOPO_CLI_PATH")
+		return nil, fmt.Errorf("codetopo binary not found in PATH, CODETOPO_CLI_PATH, or ~/.local/bin")
 	}
 
 	if dbPath == "" {
@@ -225,6 +232,14 @@ func (p *CodeTopoProvider) GetContextFor(ctx context.Context, symbolName string)
 	return p.runQuery(ctx, "context_by_name", params)
 }
 
+// GetContextByNodeID invokes codetopo query context_for to retrieve symbol definition and context by node ID.
+func (p *CodeTopoProvider) GetContextByNodeID(ctx context.Context, nodeID int) (*StructuralContextPacket, error) {
+	params := map[string]any{
+		"node_id": nodeID,
+	}
+	return p.runQuery(ctx, "context_for", params)
+}
+
 // GetCallers invokes codetopo query callers_approx to retrieve call sites.
 func (p *CodeTopoProvider) GetCallers(ctx context.Context, nodeID int) (*StructuralContextPacket, error) {
 	params := map[string]any{
@@ -277,6 +292,35 @@ func (p *CodeTopoProvider) runQuery(ctx context.Context, tool string, params map
 	}
 
 	p.parseToolOutput(tool, out, packet)
+
+	// Disambiguate context_by_name if ambiguous candidates were returned
+	if tool == "context_by_name" && len(packet.Symbols) == 0 {
+		var raw map[string]any
+		if json.Unmarshal(out, &raw) == nil {
+			if candidates, ok := raw["candidates"].([]any); ok && len(candidates) > 0 {
+				bestNodeID := 0
+				for _, c := range candidates {
+					if cm, ok := c.(map[string]any); ok {
+						fp := getString(cm, "file_path")
+						nid := int(getFloat(cm, "node_id"))
+						if strings.HasPrefix(fp, p.repoRoot) || bestNodeID == 0 {
+							bestNodeID = nid
+						}
+					}
+				}
+				if bestNodeID > 0 {
+					subParams := map[string]any{"node_id": bestNodeID}
+					if subJSON, sErr := json.Marshal(subParams); sErr == nil {
+						subCmd := exec.CommandContext(ctx, p.cliPath, "query", "--db", p.dbPath, "context_for", string(subJSON))
+						if subOut, sErr := subCmd.CombinedOutput(); sErr == nil {
+							p.parseToolOutput("context_for", subOut, packet)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return packet, nil
 }
 
@@ -335,14 +379,42 @@ func (p *CodeTopoProvider) parseToolOutput(tool string, out []byte, packet *Stru
 				}
 			}
 		}
+		if callers, ok := raw["callers"].([]any); ok {
+			for _, r := range callers {
+				if rm, ok := r.(map[string]any); ok {
+					cName := getString(rm, "caller")
+					if cName == "" {
+						cName = getString(rm, "caller_name")
+					}
+					fPath := getString(rm, "file")
+					if fPath == "" {
+						fPath = getString(rm, "file_path")
+					}
+					packet.Callers = append(packet.Callers, StructuralCaller{
+						CallerName: cName,
+						FilePath:   fPath,
+						Line:       int(getFloat(rm, "line")),
+						Confidence: getFloat(rm, "confidence"),
+					})
+				}
+			}
+		}
 
 	case "callers_approx":
 		if res, ok := raw["results"].([]any); ok {
 			for _, r := range res {
 				if rm, ok := r.(map[string]any); ok {
+					cName := getString(rm, "caller")
+					if cName == "" {
+						cName = getString(rm, "caller_name")
+					}
+					fPath := getString(rm, "file")
+					if fPath == "" {
+						fPath = getString(rm, "file_path")
+					}
 					packet.Callers = append(packet.Callers, StructuralCaller{
-						CallerName: getString(rm, "caller"),
-						FilePath:   getString(rm, "file"),
+						CallerName: cName,
+						FilePath:   fPath,
 						Line:       int(getFloat(rm, "line")),
 						Confidence: getFloat(rm, "confidence"),
 					})

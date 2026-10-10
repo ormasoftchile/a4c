@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -268,6 +270,37 @@ func (s *Server) registerTools() {
 			mcp.WithString("idempotency_key", mcp.Description("Optional idempotency key for deduplication")),
 		),
 		s.handleGovernedRunTests,
+	)
+
+	// 17. governed_structural_search_symbols (All agents)
+	addAgentTool(true, true, true,
+		mcp.NewTool("governed_structural_search_symbols",
+			mcp.WithDescription("Search code symbols (functions, structs, methods, interfaces) across repository or task worktree via CodeTopo structural index."),
+			mcp.WithString("query", mcp.Required(), mcp.Description("Symbol name query or search term")),
+			mcp.WithString("task_id", mcp.Description("Optional task identifier to query the task worktree's isolated index")),
+		),
+		s.handleGovernedStructuralSearchSymbols,
+	)
+
+	// 18. governed_structural_context_for (All agents)
+	addAgentTool(true, true, true,
+		mcp.NewTool("governed_structural_context_for",
+			mcp.WithDescription("Retrieve rich structural context (definition, signature, source snippet, container, callers, and sibling members) for a code symbol."),
+			mcp.WithString("symbol", mcp.Description("Name of the symbol (e.g. 'Cache', 'Clear')")),
+			mcp.WithInteger("node_id", mcp.Description("Optional exact node_id in the CodeTopo graph")),
+			mcp.WithString("task_id", mcp.Description("Optional task identifier to query the task worktree's isolated index")),
+		),
+		s.handleGovernedStructuralContextFor,
+	)
+
+	// 19. governed_structural_callers (All agents)
+	addAgentTool(true, true, true,
+		mcp.NewTool("governed_structural_callers",
+			mcp.WithDescription("Retrieve callers for a symbol by node_id using CodeTopo structural intelligence."),
+			mcp.WithInteger("node_id", mcp.Required(), mcp.Description("The unique node_id of the target symbol")),
+			mcp.WithString("task_id", mcp.Description("Optional task identifier to query the task worktree's isolated index")),
+		),
+		s.handleGovernedStructuralCallers,
 	)
 }
 
@@ -784,4 +817,94 @@ func (s *Server) handleGovernedRunTests(ctx context.Context, req mcp.CallToolReq
 		"output":          res.Output,
 	})
 }
+
+func (s *Server) getStructuralProvider(taskID string) (*a4c.CodeTopoProvider, error) {
+	root := s.service.WorkspaceDir()
+	dbPath := filepath.Join(root, ".codetopo", "index.sqlite")
+
+	if taskID != "" {
+		if wtPath, err := s.service.GetWorktreePath(taskID); err == nil && wtPath != "" {
+			wtDB := filepath.Join(wtPath, ".codetopo", "index.sqlite")
+			if _, statErr := os.Stat(wtDB); statErr == nil {
+				root = wtPath
+				dbPath = wtDB
+			}
+		}
+	}
+
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, fmt.Errorf("codetopo index not found at %s; ensure repository is indexed", dbPath)
+	}
+
+	return a4c.NewCodeTopoProvider(root, dbPath)
+}
+
+func (s *Server) handleGovernedStructuralSearchSymbols(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	query, err := req.RequireString("query")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'query': %v", err)), nil
+	}
+	taskID := req.GetString("task_id", "")
+
+	provider, err := s.getStructuralProvider(taskID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("structural provider unavailable: %v", err)), nil
+	}
+
+	packet, err := provider.SearchSymbols(ctx, query)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("structural symbol search failed: %v", err)), nil
+	}
+
+	return jsonResult(packet)
+}
+
+func (s *Server) handleGovernedStructuralContextFor(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	symbol := req.GetString("symbol", "")
+	nodeID := req.GetInt("node_id", 0)
+	taskID := req.GetString("task_id", "")
+
+	if symbol == "" && nodeID == 0 {
+		return mcp.NewToolResultError("either 'symbol' or 'node_id' must be provided"), nil
+	}
+
+	provider, err := s.getStructuralProvider(taskID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("structural provider unavailable: %v", err)), nil
+	}
+
+	var packet *a4c.StructuralContextPacket
+	if nodeID > 0 {
+		packet, err = provider.GetContextByNodeID(ctx, nodeID)
+	} else {
+		packet, err = provider.GetContextFor(ctx, symbol)
+	}
+
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("structural context query failed: %v", err)), nil
+	}
+
+	return jsonResult(packet)
+}
+
+func (s *Server) handleGovernedStructuralCallers(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	nodeID := req.GetInt("node_id", 0)
+	if nodeID == 0 {
+		return mcp.NewToolResultError("missing required parameter 'node_id' (or node_id must be > 0)"), nil
+	}
+	taskID := req.GetString("task_id", "")
+
+	provider, err := s.getStructuralProvider(taskID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("structural provider unavailable: %v", err)), nil
+	}
+
+	packet, err := provider.GetCallers(ctx, nodeID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("structural callers query failed: %v", err)), nil
+	}
+
+	return jsonResult(packet)
+}
+
 

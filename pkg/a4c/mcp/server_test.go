@@ -212,7 +212,10 @@ func TestMCPServer_ToolDiscovery(t *testing.T) {
 		"governed_read_file":     false,
 		"governed_apply_patch":   false,
 		"governed_git_inspect":   false,
-		"governed_run_tests":     false,
+		"governed_run_tests":                 false,
+		"governed_structural_search_symbols": false,
+		"governed_structural_context_for":   false,
+		"governed_structural_callers":        false,
 	}
 
 	prohibitedTools := map[string]bool{
@@ -268,7 +271,10 @@ func TestMCPServer_RoleDiscovery_Coder(t *testing.T) {
 		"team_complete_activity": true,
 		"governed_read_file":     true,
 		"governed_apply_patch":   true,
-		"governed_run_tests":     true,
+		"governed_run_tests":                 true,
+		"governed_structural_search_symbols": true,
+		"governed_structural_context_for":   true,
+		"governed_structural_callers":        true,
 	}
 
 	prohibited := []string{
@@ -313,8 +319,11 @@ func TestMCPServer_RoleDiscovery_Reviewer(t *testing.T) {
 		"team_diff":            true,
 		"team_checkpoint":      true,
 		"team_review_result":   true,
-		"governed_read_file":   true,
-		"governed_git_inspect": true,
+		"governed_read_file":                 true,
+		"governed_git_inspect":               true,
+		"governed_structural_search_symbols": true,
+		"governed_structural_context_for":   true,
+		"governed_structural_callers":        true,
 	}
 
 	prohibited := []string{
@@ -365,8 +374,11 @@ func TestMCPServer_RoleDiscovery_Lead(t *testing.T) {
 		"team_assign_activity":   true,
 		"team_checkpoint":        true,
 		"team_complete_activity": true,
-		"governed_read_file":     true,
-		"governed_git_inspect":   true,
+		"governed_read_file":                 true,
+		"governed_git_inspect":               true,
+		"governed_structural_search_symbols": true,
+		"governed_structural_context_for":   true,
+		"governed_structural_callers":        true,
 	}
 
 	prohibited := []string{
@@ -875,4 +887,28 @@ new file mode 100644
 		t.Errorf("expected replayed=true on identical key retry, got %+v", repOut)
 	}
 }
+
+func TestMCPServer_GovernedStructuralTools(t *testing.T) {
+	h := setupMCPHarness(t)
+	defer h.client.Close()
+
+	ctx := context.Background()
+
+	// 1. Without index present, should return informative error over MCP (not crash)
+	res, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "governed_structural_search_symbols",
+			Arguments: map[string]any{
+				"query": "something",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Errorf("expected error when codetopo index is missing, got: %+v", res)
+	}
+}
+
 

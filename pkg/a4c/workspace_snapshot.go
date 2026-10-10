@@ -35,8 +35,9 @@ func NewWorkspaceSnapshotter() *WorkspaceSnapshotter {
 func NewStrictWorkspaceSnapshotter() *WorkspaceSnapshotter {
 	return &WorkspaceSnapshotter{
 		ignoredDirs: map[string]bool{
-			".git": true,
-			".a4c": true,
+			".git":      true,
+			".a4c":      true,
+			".codetopo": true,
 		},
 	}
 }

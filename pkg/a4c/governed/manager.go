@@ -552,6 +552,15 @@ func (r *governedRuntime) executeApplyPatch(ctx context.Context, taskID, worktre
 	statusOut, _ := cmdStatus.CombinedOutput()
 	newSnap, _ := a4c.NewStrictWorkspaceSnapshotter().ComputeSnapshot(worktreePath)
 
+	// Synchronize CodeTopo index for worktree if worktree index exists
+	wtDB := filepath.Join(worktreePath, ".codetopo", "index.sqlite")
+	if _, statErr := os.Stat(wtDB); statErr == nil {
+		if ctPath := a4c.FindCodeTopoCLI(); ctPath != "" {
+			cmdSync := exec.CommandContext(ctx, ctPath, "worktree", "sync", "--root", worktreePath)
+			_ = cmdSync.Run()
+		}
+	}
+
 	return &tool.ToolResult{
 		ExitCode: 0,
 		Stdout:   fmt.Sprintf("Patch applied cleanly in worktree %s\n%s", worktreePath, string(statusOut)),

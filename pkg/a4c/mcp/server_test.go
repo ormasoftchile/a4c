@@ -533,9 +533,10 @@ func TestMCPServer_AcceptAndIntegrateLifecycle(t *testing.T) {
 
 	// Now perform authenticated human CLI acceptance
 	accResult, err := h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{
-		TaskID:     ref.TaskID,
-		Comments:   "Approved by operator CLI",
-		AcceptedBy: "human_cli",
+		TaskID:        ref.TaskID,
+		Comments:      "Approved by operator CLI",
+		AcceptedBy:    "human_cli",
+		IsInteractive: true,
 	})
 	if err != nil {
 		t.Fatalf("human CLI AcceptTask failed: %v", err)
@@ -738,9 +739,10 @@ func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
 
 	// Now perform authenticated human CLI acceptance
 	_, err = h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{
-		TaskID:     beginResult.TaskID,
-		Comments:   "Approved for merge by human engineer via CLI",
-		AcceptedBy: "human_cli",
+		TaskID:        beginResult.TaskID,
+		Comments:      "Approved for merge by human engineer via CLI",
+		AcceptedBy:    "human_cli",
+		IsInteractive: true,
 	})
 	if err != nil {
 		t.Fatalf("human CLI AcceptTask failed: %v", err)

@@ -199,9 +199,10 @@ func TestTeamService_AcceptTask_DoesNotModifyWorkingCheckout(t *testing.T) {
 
 	// Explicitly accept task
 	accRes, err := h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{
-		TaskID:     ref.TaskID,
-		Comments:   "LGTM!",
-		AcceptedBy: "human_cli",
+		TaskID:        ref.TaskID,
+		Comments:      "LGTM!",
+		AcceptedBy:    "human_cli",
+		IsInteractive: true,
 	})
 	if err != nil {
 		t.Fatalf("AcceptTask failed: %v", err)
@@ -279,7 +280,7 @@ func TestTeamService_IntegrateTask_SuccessAndGuards(t *testing.T) {
 	}
 
 	// Accept task
-	accRes, err := h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{TaskID: ref.TaskID, Comments: "Approved", AcceptedBy: "human_cli"})
+	accRes, err := h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{TaskID: ref.TaskID, Comments: "Approved", AcceptedBy: "human_cli", IsInteractive: true})
 	if err != nil {
 		t.Fatalf("AcceptTask failed: %v", err)
 	}

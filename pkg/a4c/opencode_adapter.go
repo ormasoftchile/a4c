@@ -432,6 +432,9 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 	waitDur := time.Since(tStart)
 
 	if err != nil {
+		if pe := ClassifyProviderError("opencode", modelID, err, ""); pe != nil {
+			return nil, pe
+		}
 		return nil, fmt.Errorf("opencode: send request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -443,6 +446,40 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 	if resp.StatusCode != http.StatusOK {
 		var errData any
 		_ = json.NewDecoder(resp.Body).Decode(&errData)
+		rawErr := fmt.Sprintf("status %d: %v", resp.StatusCode, errData)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, &ProviderError{
+				Kind:        ProviderFailureRateLimited,
+				HostID:      "opencode",
+				Model:       modelID,
+				Message:     rawErr,
+				Retryable:   true,
+				OriginalErr: errors.New(rawErr),
+			}
+		}
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, &ProviderError{
+				Kind:        ProviderFailureAuthInvalid,
+				HostID:      "opencode",
+				Model:       modelID,
+				Message:     rawErr,
+				Retryable:   false,
+				OriginalErr: errors.New(rawErr),
+			}
+		}
+		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusBadGateway {
+			return nil, &ProviderError{
+				Kind:        ProviderFailureTemporaryOutage,
+				HostID:      "opencode",
+				Model:       modelID,
+				Message:     rawErr,
+				Retryable:   true,
+				OriginalErr: errors.New(rawErr),
+			}
+		}
+		if pe := ClassifyProviderError("opencode", modelID, errors.New(rawErr), rawErr); pe != nil {
+			return nil, pe
+		}
 		return nil, fmt.Errorf("opencode: message request status %d: %v", resp.StatusCode, errData)
 	}
 

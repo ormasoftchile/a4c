@@ -283,6 +283,9 @@ func (s *AntigravitySessionAdapter) Send(ctx context.Context, prompt string) (*A
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		if pe := ClassifyProviderError("antigravity", model, err, stderrBuf.String()); pe != nil {
+			return nil, pe
+		}
 		return nil, fmt.Errorf("antigravity: execution failed (%v): %s", err, stderrBuf.String())
 	}
 

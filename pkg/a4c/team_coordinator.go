@@ -157,6 +157,44 @@ func (c *TeamCoordinator) SetDefaultProvider(p AgentProvider) {
 	c.Provider = p
 }
 
+// ListHostCapabilities reports discoverable technical capabilities across all registered providers.
+func (c *TeamCoordinator) ListHostCapabilities() []HostCapabilities {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var result []HostCapabilities
+	for name, p := range c.Providers {
+		result = append(result, GetHostCapability(p, name))
+	}
+	if len(result) == 0 && c.Provider != nil {
+		result = append(result, GetHostCapability(c.Provider, "default"))
+	}
+	return result
+}
+
+// IsHostAvailable checks whether a specific host runtime is registered and operational.
+func (c *TeamCoordinator) IsHostAvailable(hostID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if hostID == "" {
+		return true
+	}
+	// If no providers are configured at all in the coordinator (e.g. lightweight unit tests)
+	if len(c.Providers) == 0 && c.Provider == nil {
+		return true
+	}
+	if c.Providers != nil {
+		if p, ok := c.Providers[hostID]; ok && p != nil {
+			caps := GetHostCapability(p, hostID)
+			return caps.Available
+		}
+	}
+	if c.Provider != nil {
+		caps := GetHostCapability(c.Provider, hostID)
+		return caps.Available
+	}
+	return false
+}
+
 func (c *TeamCoordinator) resolveProvider(req *ActivityRequest) AgentProvider {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -560,10 +598,27 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	effectiveLimits.MaxRevisions = maxRevs
 	c.Handoff.MaxDiffLines = effectiveLimits.MaxDiffLines
 
+	isReviewerRole := strings.EqualFold(ident.ID, "reviewer") ||
+		strings.EqualFold(ident.ID, "charlie") ||
+		strings.Contains(strings.ToLower(ident.Role), "reviewer")
+
+	sessionWorkspace := activeWorkspace
+	var cleanupReviewWorkspace func()
+	if isReviewerRole {
+		dispWS, cleanup, err := c.createDisposableReviewWorkspace(activeWorkspace, rootID)
+		if err == nil {
+			sessionWorkspace = dispWS
+			cleanupReviewWorkspace = cleanup
+		}
+	}
+	if cleanupReviewWorkspace != nil {
+		defer cleanupReviewWorkspace()
+	}
+
 	config := AgentConfig{
 		AgentID:          ident.ID,
 		Charter:          ident.Charter,
-		WorkspaceDir:     activeWorkspace,
+		WorkspaceDir:     sessionWorkspace,
 		Budget:           req.Budget,
 		Governor:         c.Governor,
 		IntentJournal:    c.Journal,
@@ -586,6 +641,13 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		},
 		OnSubmitReview: func(rev ReviewResult) {
 			rev.ActivityID = req.ID
+			if rev.Verdict == "" {
+				if rev.Approved {
+					rev.Verdict = ReviewVerdictApproved
+				} else {
+					rev.Verdict = ReviewVerdictRejected
+				}
+			}
 			reviewResult = &rev
 		},
 		OnRequestHumanDecision: func(dec HumanDecisionRequest) {
@@ -601,21 +663,48 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	prov := c.resolveProviderLocked(req)
 	if prov == nil {
 		err := fmt.Errorf("coordinator: no agent provider configured for runtime %q", req.Runtime)
-		_ = c.Store.Fail(req.ID, err)
-		return nil, err
+		pe := &ProviderError{
+			Kind:        ProviderFailureTemporaryOutage,
+			HostID:      req.Runtime,
+			Message:     err.Error(),
+			OriginalErr: err,
+		}
+		intResult := ActivityResult{
+			ID:     req.ID,
+			Status: StatusInterrupted,
+			Outputs: map[string]any{
+				"error":                err.Error(),
+				"interruption_reason":  string(pe.Kind),
+				"interruption_message": pe.Message,
+				"host_id":              req.Runtime,
+			},
+		}
+		_ = c.Store.InterruptWithResult(req.ID, intResult, pe)
+		return &intResult, pe
 	}
 	session, err := prov.CreateSession(ctx, config)
 	if err != nil {
+		if pe := ClassifyProviderError(req.Runtime, req.Model, err, ""); pe != nil {
+			intResult := ActivityResult{
+				ID:     req.ID,
+				Status: StatusInterrupted,
+				Outputs: map[string]any{
+					"error":                err.Error(),
+					"interruption_reason":  string(pe.Kind),
+					"interruption_message": pe.Message,
+					"host_id":              pe.HostID,
+					"model":                pe.Model,
+				},
+			}
+			_ = c.Store.InterruptWithResult(req.ID, intResult, pe)
+			return &intResult, pe
+		}
 		_ = c.Store.Fail(req.ID, err)
 		return nil, fmt.Errorf("coordinator: failed to initialize session for %s: %w", ident.ID, err)
 	}
 	defer session.Close()
 
 	// 6. Build prompt with injected verified team memory & role-appropriate context via HandoffBuilder
-	isReviewerRole := strings.EqualFold(ident.ID, "reviewer") ||
-		strings.EqualFold(ident.ID, "charlie") ||
-		strings.Contains(strings.ToLower(ident.Role), "reviewer")
-
 	diff := ""
 	evStatus := "none"
 	if isReviewerRole {
@@ -656,7 +745,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	var preReviewSnap string
 	var snapErr error
 	if isReviewerRole {
-		preReviewSnap, snapErr = c.Snapshotter.ComputeSnapshot(activeWorkspace)
+		preReviewSnap, snapErr = c.Snapshotter.ComputeSnapshot(sessionWorkspace)
 	}
 
 	startWall := time.Now()
@@ -666,11 +755,9 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 	var reviewerMutated bool
 	if isReviewerRole && snapErr == nil && preReviewSnap != "" {
-		postReviewSnap, postSnapErr := c.Snapshotter.ComputeSnapshot(activeWorkspace)
+		postReviewSnap, postSnapErr := c.Snapshotter.ComputeSnapshot(sessionWorkspace)
 		if postSnapErr == nil && preReviewSnap != postReviewSnap {
-			// Unauthorized mutation detected! Rollback unapproved changes
-			_ = exec.Command("git", "-C", activeWorkspace, "reset", "--hard", "HEAD").Run()
-			_ = exec.Command("git", "-C", activeWorkspace, "clean", "-fd", "-e", ".a4c").Run()
+			// Unauthorized mutation detected! Mark review mutated without touching authoritative activeWorkspace.
 			reviewerMutated = true
 		}
 	}
@@ -706,6 +793,32 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	}
 
 	if err != nil {
+		pe, isProviderFail := AsProviderFailure(err)
+		if !isProviderFail {
+			pe = ClassifyProviderError(req.Runtime, req.Model, err, "")
+			if pe != nil {
+				isProviderFail = true
+			}
+		}
+
+		if isProviderFail {
+			intResult := ActivityResult{
+				ID:       req.ID,
+				Status:   StatusInterrupted,
+				Consumed: consumed,
+				Metrics:  metrics,
+				Outputs: map[string]any{
+					"error":                err.Error(),
+					"interruption_reason":  string(pe.Kind),
+					"interruption_message": pe.Message,
+					"host_id":              pe.HostID,
+					"model":                pe.Model,
+				},
+			}
+			_ = c.Store.InterruptWithResult(req.ID, intResult, pe)
+			return &intResult, pe
+		}
+
 		failResult := ActivityResult{
 			ID:       req.ID,
 			Status:   StatusFailed,
@@ -940,12 +1053,17 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		}
 		evidence := ValidationEvidence{
 			EvidenceID:          fmt.Sprintf("evi-%s-%d", req.ID, time.Now().UnixNano()),
+			ActivityID:          req.ID,
+			TaskID:              rootID,
+			WorkspaceDir:        activeWorkspace,
 			WorkspaceSnapshotID: afterSnapshot,
-			Command:             []string{"go", "test", "./..."},
-			ExitCode:            0,
+			Command:             []string{"go", "test", "-short", "./..."},
+			ExitCode:            exitCode,
 			OutputSummary:       outSummary,
 			Duration:            valDuration,
-			Valid:               true,
+			HostID:              req.Runtime,
+			AgentID:             ident.ID,
+			Valid:               exitCode == 0,
 			StartedAt:           valStart,
 			CompletedAt:         time.Now(),
 		}
@@ -954,6 +1072,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		result.Outputs["snapshot_id"] = afterSnapshot
 		result.Outputs["test_output_summary"] = outSummary
 		result.Outputs["validation_duration_ms"] = valDuration.Milliseconds()
+		result.Outputs["validation_evidence"] = evidence
 
 		// Promote coder-proposed memories because native tests passed
 		for _, m := range proposedMemories {
@@ -972,32 +1091,99 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 
 	} else {
-		// Reviewer verification
-		approved := true
-		comments := "Changes meet specifications and native tests passed."
-		if reviewResult != nil {
-			approved = reviewResult.Approved
-			comments = reviewResult.Comments
-		}
+		// Reviewer verification: Fail-Closed Contract
+		var (
+			verdict  ReviewVerdict = ReviewVerdictIncomplete
+			approved               = false
+			comments               = "Incomplete: reviewer execution finished without producing an explicit review verdict."
+		)
 
-		if reviewerMutated {
+		if err != nil {
+			// Reviewer session errored, timed out, or was canceled
+			verdict = ReviewVerdictIncomplete
 			approved = false
-			comments = "Rejected: reviewer attempted unauthorized workspace mutations; changes were automatically rolled back."
+			comments = fmt.Sprintf("Incomplete: reviewer execution failed: %v", err)
+		} else if reviewerMutated {
+			// Reviewer attempted unauthorized workspace modifications
+			verdict = ReviewVerdictRejected
+			approved = false
+			comments = "Rejected: reviewer attempted unauthorized workspace mutations."
 			result.Outputs["reviewer_mutation_detected"] = true
+		} else if reviewResult == nil {
+			// Reviewer completed without providing any verdict
+			verdict = ReviewVerdictIncomplete
+			approved = false
+			comments = "Incomplete: reviewer completed without producing an explicit review verdict."
 		} else {
-			ev, status := c.resolveValidationEvidence(req, activeWorkspace)
-			c.lastEvidence = ev
-			if status == "MISSING" || ev == nil || !ev.Valid {
+			// Reviewer produced an explicit verdict
+			switch reviewResult.Verdict {
+			case ReviewVerdictRejected:
+				verdict = ReviewVerdictRejected
 				approved = false
-				comments = "Rejected: no valid native test evidence exists for these changes."
-			} else if status == "STALE" {
+				comments = reviewResult.Comments
+			case ReviewVerdictApproved:
+				// Explicit approval from reviewer: verify validation evidence and snapshot integrity
+				ev, status := c.resolveValidationEvidence(req, activeWorkspace)
+				c.lastEvidence = ev
+				switch status {
+				case "MISSING":
+					verdict = ReviewVerdictRejected
+					approved = false
+					comments = "Rejected: no valid native test evidence exists for these changes."
+				case "STALE":
+					verdict = ReviewVerdictRejected
+					approved = false
+					comments = fmt.Sprintf("Rejected: test evidence %s is STALE (workspace modified after validation).", ev.EvidenceID)
+				case "FAILED":
+					verdict = ReviewVerdictRejected
+					approved = false
+					comments = fmt.Sprintf("Rejected: test evidence %s records a failing test (exit code %d).", ev.EvidenceID, ev.ExitCode)
+				case "INCOMPLETE":
+					verdict = ReviewVerdictIncomplete
+					approved = false
+					comments = "Incomplete: validation evidence metadata is incomplete or unverifiable."
+				case "VALID":
+					if ev != nil && ev.Valid && ev.ExitCode == 0 {
+						verdict = ReviewVerdictApproved
+						approved = true
+						comments = reviewResult.Comments
+					} else {
+						verdict = ReviewVerdictRejected
+						approved = false
+						comments = "Rejected: test evidence is invalid or recorded non-zero exit code."
+					}
+				default:
+					verdict = ReviewVerdictIncomplete
+					approved = false
+					comments = fmt.Sprintf("Incomplete: unrecognized validation evidence status %s.", status)
+				}
+			case ReviewVerdictIncomplete:
+				verdict = ReviewVerdictIncomplete
 				approved = false
-				comments = fmt.Sprintf("Rejected: test evidence %s is STALE (workspace modified after validation).", ev.EvidenceID)
+				comments = reviewResult.Comments
+			default:
+				if !reviewResult.Approved {
+					verdict = ReviewVerdictRejected
+					approved = false
+					comments = reviewResult.Comments
+				} else {
+					verdict = ReviewVerdictIncomplete
+					approved = false
+					comments = "Incomplete: reviewer returned unrecognized verdict."
+				}
 			}
 		}
 
+		result.Outputs["verdict"] = string(verdict)
 		result.Outputs["approved"] = approved
 		result.Outputs["review_comments"] = comments
+		result.Outputs["reviewed_snapshot"] = preReviewSnap
+		if req.Runtime != "" {
+			result.Outputs["host_id"] = req.Runtime
+		}
+		if req.Model != "" {
+			result.Outputs["model"] = req.Model
+		}
 		if reviewResult != nil && len(reviewResult.Blockers) > 0 {
 			result.Outputs["blockers"] = reviewResult.Blockers
 		}
@@ -1200,34 +1386,60 @@ func (c *TeamCoordinator) getWorkspaceDiff(ctx context.Context, dir string) (str
 }
 
 // resolveValidationEvidence searches the dependency graph and activity tree for valid test evidence.
-// It returns the found ValidationEvidence (if any) and a status string: "VALID", "STALE", or "MISSING".
+// It returns the found ValidationEvidence (if any) and a status string: "VALID", "STALE", "FAILED", "INCOMPLETE", or "MISSING".
 func (c *TeamCoordinator) resolveValidationEvidence(req *ActivityRequest, activeWorkspace string) (*ValidationEvidence, string) {
-	// Helper to extract evidence from an activity record
-	extractEvidence := func(rec *ActivityRecord) *ValidationEvidence {
-		if rec == nil || rec.Result == nil || len(rec.Result.EvidenceIDs) == 0 {
-			return nil
+	// Helper to extract authoritative evidence from an activity record
+	extractEvidence := func(rec *ActivityRecord) (*ValidationEvidence, string) {
+		if rec == nil || rec.Result == nil {
+			return nil, "MISSING"
 		}
-		snapID, _ := rec.Result.Outputs["snapshot_id"].(string)
-		outSum, _ := rec.Result.Outputs["test_output_summary"].(string)
-		if snapID == "" && len(rec.Result.EvidenceIDs) > 0 {
-			if evMap, ok := rec.Result.Outputs["validation_evidence"].(map[string]any); ok {
-				if s, ok := evMap["workspace_snapshot_id"].(string); ok {
-					snapID = s
+		if len(rec.Result.EvidenceIDs) == 0 && rec.Result.Outputs["validation_evidence"] == nil {
+			return nil, "MISSING"
+		}
+
+		var ev *ValidationEvidence
+		if rawEv, ok := rec.Result.Outputs["validation_evidence"]; ok && rawEv != nil {
+			switch v := rawEv.(type) {
+			case *ValidationEvidence:
+				ev = v
+			case ValidationEvidence:
+				ev = &v
+			case map[string]any:
+				b, _ := json.Marshal(v)
+				var parsed ValidationEvidence
+				if err := json.Unmarshal(b, &parsed); err == nil {
+					ev = &parsed
 				}
 			}
 		}
-		return &ValidationEvidence{
-			EvidenceID:          rec.Result.EvidenceIDs[len(rec.Result.EvidenceIDs)-1],
-			WorkspaceSnapshotID: snapID,
-			Command:             []string{"go", "test", "./..."},
-			ExitCode:            0,
-			OutputSummary:       outSum,
-			Valid:               true,
+
+		if ev == nil {
+			return nil, "INCOMPLETE"
 		}
+
+		// Require actual authoritative execution fields
+		if ev.EvidenceID == "" || ev.WorkspaceSnapshotID == "" || len(ev.Command) == 0 || ev.CompletedAt.IsZero() {
+			return ev, "INCOMPLETE"
+		}
+
+		// Detect failed tests
+		if ev.ExitCode != 0 || !ev.Valid {
+			return ev, "FAILED"
+		}
+
+		// Verify snapshot freshness against active workspace
+		if err := c.Snapshotter.ValidateAgainstEvidence(activeWorkspace, *ev); err != nil {
+			return ev, "STALE"
+		}
+
+		return ev, "VALID"
 	}
 
 	// 1. If in-memory lastEvidence is already available, validate it against active workspace
-	if c.lastEvidence != nil && c.lastEvidence.Valid {
+	if c.lastEvidence != nil {
+		if c.lastEvidence.ExitCode != 0 || !c.lastEvidence.Valid {
+			return c.lastEvidence, "FAILED"
+		}
 		if err := c.Snapshotter.ValidateAgainstEvidence(activeWorkspace, *c.lastEvidence); err == nil {
 			return c.lastEvidence, "VALID"
 		}
@@ -1237,11 +1449,8 @@ func (c *TeamCoordinator) resolveValidationEvidence(req *ActivityRequest, active
 	// 2. Search direct dependencies first
 	for _, depID := range req.DependsOn {
 		if depRec, err := c.Store.Get(depID); err == nil && depRec != nil {
-			if ev := extractEvidence(depRec); ev != nil {
-				if err := c.Snapshotter.ValidateAgainstEvidence(activeWorkspace, *ev); err == nil {
-					return ev, "VALID"
-				}
-				return ev, "STALE"
+			if ev, status := extractEvidence(depRec); status != "MISSING" {
+				return ev, status
 			}
 		}
 	}
@@ -1265,11 +1474,8 @@ func (c *TeamCoordinator) resolveValidationEvidence(req *ActivityRequest, active
 		if rec.Request.ID == req.ID {
 			continue // skip self
 		}
-		if ev := extractEvidence(rec); ev != nil {
-			if err := c.Snapshotter.ValidateAgainstEvidence(activeWorkspace, *ev); err == nil {
-				return ev, "VALID"
-			}
-			return ev, "STALE"
+		if ev, status := extractEvidence(rec); status != "MISSING" {
+			return ev, status
 		}
 	}
 
@@ -1282,8 +1488,6 @@ func (c *TeamCoordinator) ClearValidationEvidenceForTest() {
 	defer c.mu.Unlock()
 	c.lastEvidence = nil
 }
-
-
 
 // parseTextDirectives extracts structured directives from model text output as fallback.
 func (c *TeamCoordinator) parseTextDirectives(
@@ -1331,6 +1535,7 @@ func (c *TeamCoordinator) parseTextDirectives(
 		*rev = &ReviewResult{
 			ActivityID: activityID,
 			ReviewerID: agentID,
+			Verdict:    ReviewVerdictRejected,
 			Approved:   false,
 			Comments:   comments,
 			Timestamp:  time.Now(),
@@ -1339,6 +1544,7 @@ func (c *TeamCoordinator) parseTextDirectives(
 		*rev = &ReviewResult{
 			ActivityID: activityID,
 			ReviewerID: agentID,
+			Verdict:    ReviewVerdictApproved,
 			Approved:   true,
 			Comments:   "Approved via model directive",
 			Timestamp:  time.Now(),
@@ -1371,4 +1577,70 @@ func (c *TeamCoordinator) parseTextDirectives(
 			}
 		}
 	}
+}
+
+// createDisposableReviewWorkspace provisions an isolated, disposable copy of the workspace
+// specifically for reviewer execution. This ensures the authoritative implementation worktree
+// is never modified, reset, or cleaned as a side-effect of reviewing.
+func (c *TeamCoordinator) createDisposableReviewWorkspace(src string, taskID string) (string, func(), error) {
+	if src == "" {
+		src = "."
+	}
+	absSrc, err := filepath.Abs(src)
+	if err != nil {
+		absSrc = src
+	}
+
+	dispDir, err := os.MkdirTemp("", fmt.Sprintf("a4c-review-%s-*", strings.ReplaceAll(taskID, "/", "-")))
+	if err != nil {
+		return "", nil, fmt.Errorf("coordinator: create disposable review dir: %w", err)
+	}
+
+	cleanup := func() {
+		_ = os.RemoveAll(dispDir)
+	}
+
+	err = filepath.Walk(absSrc, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == absSrc {
+			return nil
+		}
+		rel, err := filepath.Rel(absSrc, path)
+		if err != nil {
+			return err
+		}
+		// Skip internal metadata and transient files
+		if info.IsDir() && (info.Name() == ".a4c" || info.Name() == ".codetopo" || info.Name() == "disposable-reviews") {
+			return filepath.SkipDir
+		}
+
+		target := filepath.Join(dispDir, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode()|0700)
+		}
+
+		// Handle symlink
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(linkTarget, target)
+		}
+
+		// Regular file
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
+	if err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("coordinator: copy to disposable review workspace: %w", err)
+	}
+
+	return dispDir, cleanup, nil
 }

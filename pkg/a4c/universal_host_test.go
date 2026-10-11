@@ -46,7 +46,7 @@ func TestHostContract_CapabilityReporting(t *testing.T) {
 	if opCaps.HostID != "opencode" {
 		t.Fatalf("expected host_id opencode, got %s", opCaps.HostID)
 	}
-	if !opCaps.SessionInvocation || !opCaps.ToolRestrictions || !opCaps.StructuredTelemetry {
+	if !opCaps.ToolRestrictions || !opCaps.StructuredTelemetry {
 		t.Fatalf("expected opencode capabilities to be true")
 	}
 

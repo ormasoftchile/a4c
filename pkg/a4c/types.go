@@ -27,6 +27,7 @@ const (
 	StatusFailed        ActivityStatus = "failed"
 	StatusIndeterminate ActivityStatus = "indeterminate"
 	StatusAwaitingHuman ActivityStatus = "awaiting_human"
+	StatusInterrupted   ActivityStatus = "interrupted"
 )
 
 // Budget models consumable tokens or compute cost with reserved vs consumed tracking.
@@ -207,15 +208,28 @@ type HumanDecisionRequest struct {
 	ResolvedAt   *time.Time          `json:"resolved_at,omitempty"`
 }
 
+// ReviewVerdict represents an explicit, typed peer review outcome.
+type ReviewVerdict string
+
+const (
+	ReviewVerdictApproved   ReviewVerdict = "approved"
+	ReviewVerdictRejected   ReviewVerdict = "rejected"
+	ReviewVerdictIncomplete ReviewVerdict = "incomplete"
+)
+
 // ReviewResult encapsulates deterministic peer review artifacts.
 type ReviewResult struct {
-	ActivityID string    `json:"activity_id"`
-	ReviewerID string    `json:"reviewer_id"`
-	Approved   bool      `json:"approved"`
-	Comments   string    `json:"comments"`
-	Blockers   []string  `json:"blockers,omitempty"`
-	EvidenceID string    `json:"evidence_id,omitempty"`
-	Timestamp  time.Time `json:"timestamp"`
+	ActivityID       string        `json:"activity_id"`
+	ReviewerID       string        `json:"reviewer_id"`
+	Verdict          ReviewVerdict `json:"verdict"` // "approved", "rejected", "incomplete"
+	Approved         bool          `json:"approved"`
+	Comments         string        `json:"comments"`
+	Blockers         []string      `json:"blockers,omitempty"`
+	EvidenceID       string        `json:"evidence_id,omitempty"`
+	ReviewedSnapshot string        `json:"reviewed_snapshot,omitempty"`
+	HostID           string        `json:"host_id,omitempty"`
+	Model            string        `json:"model,omitempty"`
+	Timestamp        time.Time     `json:"timestamp"`
 }
 
 type IntentStatus string
@@ -242,12 +256,17 @@ type IntentRecord struct {
 // ValidationEvidence represents verifiable proof that tests ran against a specific snapshot.
 type ValidationEvidence struct {
 	EvidenceID          string        `json:"evidence_id"`
+	ActivityID          string        `json:"activity_id,omitempty"`
+	TaskID              string        `json:"task_id,omitempty"`
+	WorkspaceDir        string        `json:"workspace_dir,omitempty"`
 	WorkspaceSnapshotID string        `json:"workspace_snapshot_id"`
 	Command             []string      `json:"command"`
 	ExitCode            int           `json:"exit_code"`
 	OutputSummary       string        `json:"output_summary,omitempty"`
 	Duration            time.Duration `json:"duration,omitempty"`
 	LogPath             string        `json:"log_path,omitempty"`
+	HostID              string        `json:"host_id,omitempty"`
+	AgentID             string        `json:"agent_id,omitempty"`
 	StartedAt           time.Time     `json:"started_at"`
 	CompletedAt         time.Time     `json:"completed_at"`
 	Valid               bool          `json:"valid"`
@@ -264,6 +283,8 @@ type TaskCheckpoint struct {
 	WorktreeBranch       string              `json:"worktree_branch"`
 	CurrentSnapshotSHA   string              `json:"current_snapshot_sha"`
 	GitStatusSummary     string              `json:"git_status_summary,omitempty"`
+	ModifiedFiles        []string            `json:"modified_files,omitempty"`
+	NewFiles             []string            `json:"new_files,omitempty"`
 	AcceptedDecisions    []string            `json:"accepted_decisions,omitempty"`
 	CompletedWork        []string            `json:"completed_work,omitempty"`
 	RemainingObligations []string            `json:"remaining_obligations,omitempty"`
@@ -272,6 +293,9 @@ type TaskCheckpoint struct {
 	SourceRuntime            string              `json:"source_runtime,omitempty"`
 	TargetRuntime            string              `json:"target_runtime,omitempty"`
 	Model                    string              `json:"model,omitempty"`
+	FailureReason            string              `json:"failure_reason,omitempty"`
+	InterruptionKind         ProviderFailureKind `json:"interruption_kind,omitempty"`
+	InterruptionMessage      string              `json:"interruption_message,omitempty"`
 	ContinuationInstructions string              `json:"continuation_instructions,omitempty"`
 	UpdatedAt                time.Time           `json:"updated_at"`
 }

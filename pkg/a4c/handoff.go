@@ -74,44 +74,71 @@ func (b *HandoffBuilder) BuildPrompt(artifact HandoffArtifact) string {
 }
 
 // BuildContinuationPrompt constructs a compact resumption prompt from an authoritative task checkpoint.
+// It explicitly distinguishes already-completed work from remaining obligations to prevent repeating work.
 func (b *HandoffBuilder) BuildContinuationPrompt(chk TaskCheckpoint) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Objective: %s\n", chk.Objective))
 	if chk.WorktreeBranch != "" {
 		sb.WriteString(fmt.Sprintf("Branch: %s\n", chk.WorktreeBranch))
 	}
-	sb.WriteString("\n--- CROSS-HOST CONTINUATION CHECKPOINT (Task Continuation Checkpoint) ---\n")
+	sb.WriteString("\n--- CROSS-HOST CONTINUATION CHECKPOINT (Task Continuation Checkpoint: DO NOT RE-IMPLEMENT EXISTING WORK) ---\n")
 	if chk.SourceRuntime != "" && chk.TargetRuntime != "" {
-		sb.WriteString(fmt.Sprintf("Transition: %s -> %s\n", chk.SourceRuntime, chk.TargetRuntime))
+		sb.WriteString(fmt.Sprintf("Host Transition: %s -> %s\n", chk.SourceRuntime, chk.TargetRuntime))
+	}
+	if chk.FailureReason != "" || chk.InterruptionMessage != "" {
+		reason := chk.FailureReason
+		if chk.InterruptionMessage != "" {
+			reason = fmt.Sprintf("%s (%s)", reason, chk.InterruptionMessage)
+		}
+		sb.WriteString(fmt.Sprintf("Interruption Context: %s\n", reason))
+	}
+
+	sb.WriteString("\n[ALREADY DONE]:\n")
+	if len(chk.ModifiedFiles) > 0 || len(chk.NewFiles) > 0 {
+		sb.WriteString("- Existing repository changes preserved in worktree:\n")
+		for _, m := range chk.ModifiedFiles {
+			sb.WriteString(fmt.Sprintf("  * [MODIFIED]: %s\n", m))
+		}
+		for _, n := range chk.NewFiles {
+			sb.WriteString(fmt.Sprintf("  * [NEW FILE]: %s\n", n))
+		}
+	} else if chk.GitStatusSummary != "" {
+		sb.WriteString(fmt.Sprintf("- Current Git Status:\n%s\n", chk.GitStatusSummary))
 	}
 	if len(chk.CompletedWork) > 0 {
-		sb.WriteString("Completed Work:\n")
+		sb.WriteString("- Completed milestones & activities:\n")
 		for _, w := range chk.CompletedWork {
-			sb.WriteString(fmt.Sprintf("- %s\n", w))
+			sb.WriteString(fmt.Sprintf("  * %s\n", w))
 		}
-	}
-	if chk.GitStatusSummary != "" {
-		sb.WriteString(fmt.Sprintf("Current Repository State:\n%s\n", chk.GitStatusSummary))
 	}
 	if len(chk.AcceptedDecisions) > 0 {
-		sb.WriteString("Accepted Decisions & Constraints:\n")
+		sb.WriteString("- Accepted architectural decisions & constraints:\n")
 		for _, d := range chk.AcceptedDecisions {
-			sb.WriteString(fmt.Sprintf("- %s\n", d))
+			sb.WriteString(fmt.Sprintf("  * %s\n", d))
 		}
-	}
-	if len(chk.RemainingObligations) > 0 {
-		sb.WriteString("Remaining Obligations:\n")
-		for _, o := range chk.RemainingObligations {
-			sb.WriteString(fmt.Sprintf("- %s\n", o))
-		}
-	}
-	if chk.ContinuationInstructions != "" {
-		sb.WriteString(fmt.Sprintf("Continuation Guidance:\n%s\n", chk.ContinuationInstructions))
 	}
 	if chk.ValidationEvidence != nil && chk.ValidationEvidence.Valid {
-		sb.WriteString(fmt.Sprintf("Prior Test Evidence: %s (Exit %d)\n", chk.ValidationEvidence.EvidenceID, chk.ValidationEvidence.ExitCode))
+		sb.WriteString(fmt.Sprintf("- Prior passing test evidence: %s (ExitCode %d)\n", chk.ValidationEvidence.EvidenceID, chk.ValidationEvidence.ExitCode))
 	}
-	sb.WriteString("\nInstructions: Continue the implementation from the current worktree state. Do not redo completed work. Use your native tools to edit files and run tests. Ensure all remaining obligations are satisfied and tests pass.\n")
+
+	sb.WriteString("\n[STILL NEEDED]:\n")
+	if len(chk.RemainingObligations) > 0 {
+		sb.WriteString("- Remaining obligations & unfinished functionality:\n")
+		for _, o := range chk.RemainingObligations {
+			sb.WriteString(fmt.Sprintf("  * %s\n", o))
+		}
+	} else {
+		sb.WriteString(fmt.Sprintf("- Complete remaining implementation for: %s\n", chk.Objective))
+	}
+	if chk.ContinuationInstructions != "" {
+		sb.WriteString(fmt.Sprintf("- Continuation guidance from developer:\n  %s\n", chk.ContinuationInstructions))
+	}
+
+	sb.WriteString("\n[CRITICAL CONTINUATION INSTRUCTIONS]:\n")
+	sb.WriteString("1. Inspect the existing codebase and files in the worktree before modifying anything.\n")
+	sb.WriteString("2. Build incrementally upon the existing changes. Do NOT delete, discard, or re-implement already completed work.\n")
+	sb.WriteString("3. Complete the remaining functionality, run native tests, and ensure all tests pass.\n")
+
 	return sb.String()
 }
 

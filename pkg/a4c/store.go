@@ -257,6 +257,24 @@ func (s *DurableActivityStore) FailWithResult(id string, result ActivityResult, 
 	return s.persist(rec)
 }
 
+// InterruptWithResult pauses an activity due to an infrastructure or provider outage.
+func (s *DurableActivityStore) InterruptWithResult(id string, result ActivityResult, interruptionErr error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, exists := s.records[id]
+	if !exists {
+		return ErrActivityNotFound
+	}
+
+	rec.Status = StatusInterrupted
+	rec.Result = &result
+	if interruptionErr != nil {
+		rec.Error = interruptionErr.Error()
+	}
+	return s.persist(rec)
+}
+
 // MarkAwaitingHuman pauses an activity pending a decision from the human engineer.
 func (s *DurableActivityStore) MarkAwaitingHuman(activityID string, dec HumanDecisionRequest) error {
 	s.mu.Lock()

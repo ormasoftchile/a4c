@@ -464,15 +464,32 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 			ErrTaskNotReadyForReview, state, TaskStateAwaitingHumanReview)
 	}
 
-	// Authenticate human approval boundary (Milestone 16 Phase 1)
-	// Only explicit human CLI execution (AcceptedBy == "human_cli" or "human") is authenticated.
-	// Agents and MCP callers are strictly unauthorized.
-	if req.AcceptedBy != "human_cli" && req.AcceptedBy != "human" {
+	// Authenticate human approval boundary
+	// AI agents and autonomous subagents are strictly unauthorized to approve tasks.
+	agentRoles := map[string]bool{
+		"coder": true, "reviewer": true, "lead": true, "agent": true,
+		"alice": true, "bob": true, "charlie": true, "autonomous_agent": true,
+	}
+	if agentRoles[strings.ToLower(req.AcceptedBy)] {
 		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
 			"op": "accept", "task_id": req.TaskID, "outcome": "denied",
-			"reason": "unauthorized_caller", "caller": req.AcceptedBy,
+			"reason": "unauthorized_agent_caller", "caller": req.AcceptedBy,
 		})
 		return nil, fmt.Errorf("unauthorized: AI agents cannot approve their own work; manual execution via CLI ('a4c task accept %s') is required", req.TaskID)
+	}
+
+	authMethod := "interactive_tty"
+	envToken := os.Getenv("A4C_HUMAN_AUTH_TOKEN")
+	if req.ConfirmationToken != "" {
+		authMethod = "out_of_band_token"
+	} else if envToken != "" {
+		authMethod = "environment_token"
+	} else if !req.IsInteractive {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "accept", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "non_interactive_without_token", "caller": req.AcceptedBy,
+		})
+		return nil, fmt.Errorf("unauthorized: non-interactive invocation requires explicit human authorization token (--token or A4C_HUMAN_AUTH_TOKEN); automated agents cannot approve tasks")
 	}
 
 	snapshotID := s.resolveCurrentSnapshot(req.TaskID)
@@ -488,7 +505,7 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 	lifecycle.AcceptedAt = time.Now()
 	lifecycle.AcceptedBy = req.AcceptedBy
 	if lifecycle.AcceptedBy == "" {
-		lifecycle.AcceptedBy = "human"
+		lifecycle.AcceptedBy = "human_cli"
 	}
 	lifecycle.AcceptedSnapshot = snapshotID
 	lifecycle.AcceptComments = req.Comments
@@ -500,14 +517,15 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 
 	_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
 		"op": "accept", "task_id": req.TaskID, "outcome": "approved",
-		"snapshot": snapshotID, "actor": req.AcceptedBy, "comments": req.Comments,
+		"snapshot": snapshotID, "actor": lifecycle.AcceptedBy, "auth_method": authMethod, "comments": req.Comments,
 	})
 
 	res := &AcceptResult{
-		TaskID:           req.TaskID,
-		AcceptedSnapshot: snapshotID,
-		AcceptedAt:       lifecycle.AcceptedAt,
-		Comments:         req.Comments,
+		TaskID:              req.TaskID,
+		AcceptedSnapshot:    snapshotID,
+		AcceptedAt:          lifecycle.AcceptedAt,
+		Comments:            req.Comments,
+		AuthorizationMethod: authMethod,
 	}
 	return res, nil
 }

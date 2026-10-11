@@ -1012,18 +1012,22 @@ func runTask(args []string) {
 				comments += args[i]
 			}
 		}
+		stat, statErr := os.Stdin.Stat()
+		isInteractive := statErr == nil && (stat.Mode()&os.ModeCharDevice) != 0
+
 		res, err := svc.AcceptTask(ctx, a4c.AcceptTaskRequest{
 			TaskID:            taskID,
 			Comments:          comments,
 			AcceptedBy:        "human_cli",
 			ConfirmationToken: token,
+			IsInteractive:     isInteractive,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to accept task: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Task %s accepted successfully at snapshot %s.\nWorking checkout untouched. Run 'a4c task integrate %s' to apply changes.\n",
-			res.TaskID, res.AcceptedSnapshot, res.TaskID)
+		fmt.Printf("Task %s accepted successfully at snapshot %s (auth: %s).\nWorking checkout untouched. Run 'a4c task integrate %s' to apply changes.\n",
+			res.TaskID, res.AcceptedSnapshot, res.AuthorizationMethod, res.TaskID)
 
 	case "integrate":
 		if len(args) < 2 {

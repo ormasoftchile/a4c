@@ -158,14 +158,16 @@ type AcceptTaskRequest struct {
 	Comments          string `json:"comments,omitempty"`
 	AcceptedBy        string `json:"accepted_by,omitempty"`
 	ConfirmationToken string `json:"confirmation_token,omitempty"`
+	IsInteractive     bool   `json:"is_interactive,omitempty"`
 }
 
 // AcceptResult confirms human acceptance without modifying the working tree.
 type AcceptResult struct {
-	TaskID           string    `json:"task_id"`
-	AcceptedSnapshot string    `json:"accepted_snapshot"`
-	AcceptedAt       time.Time `json:"accepted_at"`
-	Comments         string    `json:"comments,omitempty"`
+	TaskID              string    `json:"task_id"`
+	AcceptedSnapshot    string    `json:"accepted_snapshot"`
+	AcceptedAt          time.Time `json:"accepted_at"`
+	Comments            string    `json:"comments,omitempty"`
+	AuthorizationMethod string    `json:"authorization_method,omitempty"`
 }
 
 // IntegrateTaskRequest applies an accepted task to the working tree.

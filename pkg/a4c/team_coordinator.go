@@ -992,7 +992,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 				comments = "Rejected: no valid native test evidence exists for these changes."
 			} else if status == "STALE" {
 				approved = false
-				comments = fmt.Sprintf("Rejected: test evidence %s is STALE (workspace was modified after validation).", ev.EvidenceID)
+				comments = fmt.Sprintf("Rejected: test evidence %s is STALE (workspace modified after validation).", ev.EvidenceID)
 			}
 		}
 

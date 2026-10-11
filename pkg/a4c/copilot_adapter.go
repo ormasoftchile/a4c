@@ -298,16 +298,20 @@ func (p *CopilotProvider) Capabilities() RuntimeCapabilities {
 
 // HostCapabilities returns the explicit discoverable technical capabilities of GitHub Copilot CLI.
 func (p *CopilotProvider) HostCapabilities() HostCapabilities {
-	return HostCapabilities{
+	p.mu.Lock()
+	avail := p.client != nil
+	p.mu.Unlock()
+
+	caps := HostCapabilities{
 		HostID:                "copilot",
 		DisplayName:           "GitHub Copilot CLI",
 		Version:               "1.0.95",
-		Available:             true,
-		SessionInvocation:     true,
-		WorktreeBinding:       true,
-		ContextInjection:      true,
-		CompletionCollection:  true,
-		SessionCancellation:   true,
+		Available:             avail,
+		SessionInvocation:     avail,
+		WorktreeBinding:       avail,
+		ContextInjection:      avail,
+		CompletionCollection:  avail,
+		SessionCancellation:   avail,
 		ModelSelection:        true,
 		NativeSubagents:       false,
 		SessionResumption:     true,
@@ -326,6 +330,10 @@ func (p *CopilotProvider) HostCapabilities() HostCapabilities {
 			"Native subagent spawning is not exposed via automation SDK session",
 		},
 	}
+	if !avail {
+		caps.Limitations = append(caps.Limitations, "Copilot client is uninitialized or disconnected")
+	}
+	return caps
 }
 
 func (p *CopilotProvider) CreateSession(ctx context.Context, config AgentConfig) (AgentSession, error) {

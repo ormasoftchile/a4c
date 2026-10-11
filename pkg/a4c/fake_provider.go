@@ -145,11 +145,13 @@ type FakeProvider struct {
 	ResponseFunc        FakeResponseFunc
 	SessionResponseFunc FakeSessionResponseFunc
 	FailNext            bool
+	Available           bool
 }
 
 func NewFakeProvider() *FakeProvider {
 	return &FakeProvider{
-		sessions: make(map[string]*FakeSession),
+		sessions:  make(map[string]*FakeSession),
+		Available: true,
 	}
 }
 
@@ -217,16 +219,20 @@ func (p *FakeProvider) ResumeSession(ctx context.Context, sessionID string, conf
 }
 
 func (p *FakeProvider) HostCapabilities() HostCapabilities {
+	p.mu.Lock()
+	avail := p.Available
+	p.mu.Unlock()
+
 	return HostCapabilities{
 		HostID:               "fake",
 		DisplayName:          "In-Memory Test Simulator",
 		Version:              "test",
-		Available:            true,
-		SessionInvocation:    true,
-		WorktreeBinding:      true,
-		ContextInjection:     true,
-		CompletionCollection: true,
-		SessionCancellation:  true,
+		Available:            avail,
+		SessionInvocation:    avail,
+		WorktreeBinding:      avail,
+		ContextInjection:     avail,
+		CompletionCollection: avail,
+		SessionCancellation:  avail,
 		ModelSelection:       true,
 		NativeSubagents:      false,
 		SessionResumption:    true,

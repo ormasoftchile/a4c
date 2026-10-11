@@ -77,21 +77,22 @@ func (p *AntigravityProvider) Capabilities() RuntimeCapabilities {
 
 // HostCapabilities returns the explicit discoverable technical capabilities of Antigravity.
 func (p *AntigravityProvider) HostCapabilities() HostCapabilities {
-	return HostCapabilities{
+	avail := p.available
+	caps := HostCapabilities{
 		HostID:                "antigravity",
 		DisplayName:           "Antigravity CLI (agy)",
 		Version:               "2.0",
-		Available:             p.available,
-		SessionInvocation:     true,
-		WorktreeBinding:       true,
-		ContextInjection:      true,
-		CompletionCollection:  true,
-		SessionCancellation:   true,
+		Available:             avail,
+		SessionInvocation:     avail,
+		WorktreeBinding:       avail,
+		ContextInjection:      avail,
+		CompletionCollection:  avail,
+		SessionCancellation:   avail,
 		ModelSelection:        true,
 		NativeSubagents:       false, // Print non-interactive mode runs single turn
 		SessionResumption:     true,  // Supports --conversation <id>
 		StructuredTelemetry:   true,  // Reports input, output, thinking, cache_read tokens
-		ToolRestrictions:     true,  // Supports read-only validation & boundary enforcement
+		ToolRestrictions:     false, // Print mode lacks programmatic tool filtering; enforced via A4C snapshot verification
 		InteractiveAttachment: true,  // Supports agy -i interactive attachment
 		DefaultModel:          p.defaultModel,
 		SupportedModels: []string{
@@ -107,8 +108,13 @@ func (p *AntigravityProvider) HostCapabilities() HostCapabilities {
 		Limitations: []string{
 			"Print mode executes non-interactively without real-time token streaming",
 			"Native subagent spawning is disabled in single-turn print execution",
+			"Tool restrictions in print mode are instruction-guided; A4C coordinator verifies workspace immutability and rolls back any mutations",
 		},
 	}
+	if !avail {
+		caps.Limitations = append(caps.Limitations, "agy binary is not found in PATH")
+	}
+	return caps
 }
 
 // CreateSession initializes a new Antigravity session.

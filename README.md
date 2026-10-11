@@ -1,188 +1,145 @@
-# A4C: Agents for Coding — Host-Native Personal Engineering Team
+# A4C: Agents for Coding — Host-Independent Engineering Organization
 
-**A4C** turns your existing coding agent into a **persistent, coordinated personal software engineering team**.
+**A4C** turns coding hosts into a **governed, persistent software engineering organization**.
 
-Operating on the principle:
-> **The host runs the agents. A4C makes them a persistent, coordinated personal software engineering team with Git worktree isolation and independent verification.**
+Its tasks, specialists, worktrees, decisions, activity history, and engineering knowledge exist independently of GitHub Copilot CLI, OpenCode, Antigravity, or any future coding host.
 
-A4C was inspired by **Squad** (the engineering team agent that operates inside GitHub Copilot). Instead of acting as a competing standalone conversational application, A4C operates natively inside **GitHub Copilot CLI**, **OpenCode**, and **Antigravity**.
-
----
-
-## Architecture Overview
-
-```text
-Human Software Engineer
-       │
-       ▼
-GitHub Copilot CLI / OpenCode / Antigravity
-       │
-       ▼
-A4C Coordinator Agent (Alice — Lead Architect)
-       ├──► Host-native Bob subagent (Coder)
-       ├──► Host-native Charlie subagent (Reviewer — Read-Only)
-       └──► Other host-native specialists
-       │
-       ▼
-A4C Durable Coordination & State Layer (.a4c)
-       ├──► team_context          (environment, roster, active tasks)
-       ├──► team_begin_task       (isolated git worktree allocation)
-       ├──► team_assign_activity  (specialist task delegation)
-       ├──► team_checkpoint       (intermediate progress & snapshot persistence)
-       ├──► team_complete_activity(evidence-bound completion)
-       ├──► team_review_result    (non-mutating review verdict verification)
-       ├──► team_accept           (explicit human snapshot sign-off)
-       └──► team_integrate        (conflict-verified base repository merge)
-       │
-       ▼
-Git Worktree Isolation & Host-Native Command/Test Execution
-```
-
-### Critical Architectural Invariants
-1. **Zero Secondary Inference in Host-Native Mode**:
-   Starting A4C inside Copilot or OpenCode does **NOT** cause A4C to initiate secondary SDK-managed model sessions. The hosting agent environment supplies reasoning, conversation, and native subagent dispatch.
-2. **Non-Mutating Reviewer Invariant**:
-   Charlie (Reviewer) is strictly read-only. A4C programmatically verifies git status before recording review verdicts; any reviewer modifications cause immediate rejection.
-3. **Cross-Host Task Portability**:
-   Engineering tasks, activity progress, checkpoints, and review states survive host restarts and transfer seamlessly across Copilot, OpenCode, and Antigravity.
+A4C uses each host at its near-native execution speed without imposing an artificial agent runtime, coordinator overhead, or unnecessary inference loops.
 
 ---
 
-## Dual-Mode Contract
+## 1. Fundamental Architecture
 
-| Property | Mode A: Host-Native (Default Interactive) | Mode B: Headless (Automated CI / Benchmarking) |
-| :--- | :--- | :--- |
-| **Primary Interface** | `copilot --agent a4c` / `opencode --agent a4c` | `a4c run` / `a4c host` / Go test runner |
-| **Inference Source** | Host coding agent subscription & quotas | Direct Copilot SDK / OpenCode HTTP daemon |
-| **Agent Execution** | Host native subagents (`task` tool) | Standalone Go `TeamCoordinator` loop |
-| **Durable State** | A4C MCP Server (`a4c mcp`) & `.a4c/` | A4C Activity Store & Intent Journal |
-| **Reviewer Gate** | Host permissions + A4C worktree diff validation | Policy Governor tool restrictions |
+A4C establishes strict ownership boundaries between the coding host and the engineering organization:
 
----
+### The Coding Host Owns:
+- Model inference, context window management, and token generation.
+- Model-specific configuration, credentials, and quotas.
+- Native tool execution (`bash`, file editing, reading, patching).
+- Native agent turns, streaming output, and interactive developer UX.
 
-## Installation & Setup
-
-Build the A4C CLI:
-```bash
-go build -o bin/a4c ./cmd/a4c
-```
-
-### 1. Initialize Workspace
-```bash
-./bin/a4c init .
-```
-Initializes `.a4c/` storage for activities, persistent team roster, organizational memory, and journals.
-
-### 2. Install Host-Native Agent Definitions
-Install for GitHub Copilot:
-```bash
-./bin/a4c install copilot
-```
-*Creates `.github/agents/a4c.agent.md`, `bob.agent.md`, `charlie.agent.md`, and `.mcp.json`.*
-
-Install for OpenCode:
-```bash
-./bin/a4c install opencode
-```
-*Creates `.opencode/agents/a4c.md`, `bob.md`, `charlie.md`, and `opencode.json`.*
-
-Install for all supported hosts:
-```bash
-./bin/a4c install all
-```
-
-### 3. Diagnose Environment
-Verify your configuration across git, durable stores, Copilot CLI, OpenCode, and Antigravity:
-```bash
-./bin/a4c doctor
-```
+### A4C Owns:
+- **Organizational Identity & Roles**: Specialists (`coder`, `reviewer`, `lead`, domain specialists) defined in a durable team roster.
+- **Task Lifecycle & Intent**: Persistent task graphs, activities, and budget governance stored in `.a4c/`.
+- **Workspace Isolation**: Clean Git worktree provisioning per task (`.a4c/worktrees/<task-id>/`), eliminating state pollution on the developer's main branch.
+- **Validation Evidence**: Cryptographic workspace snapshots (`WorkspaceSnapshotter`) and deterministic test execution results (`go test ./...`), binding task completion to verified evidence.
+- **Independent Verification**: Non-mutating review guarantees enforced natively or via snapshot mutation verification and automatic rollback.
+- **Cross-Host Continuation**: Authoritative checkpoints enabling work started on one host to resume on another host without transcript replay.
+- **Human Acceptance & Integration**: Explicit engineer sign-off (`a4c task accept`) and clean merge integration (`a4c task integrate`).
 
 ---
 
-## Interactive Host Usage
+## 2. Execution Strategies
 
-### Running inside GitHub Copilot
-Launch Copilot with the A4C agent:
-```bash
-copilot --agent a4c
-```
-Interact naturally:
-> *"Alice, investigate the failing test in calculation_test.go. Delegate the fix to Bob, have Charlie review the change, and report the result."*
+A4C supports three distinct execution strategies tailored to task complexity:
 
-Alice will:
-1. Call `team_context` to inspect current team state and active tasks.
-2. Call `team_begin_task` to create an isolated worktree branch.
-3. Call `team_assign_activity` and dispatch Bob via Copilot's native `task` tool.
-4. Call `team_checkpoint` to record intermediate progress.
-5. Call `team_complete_activity` when Bob finishes with passing test evidence.
-6. Call `team_assign_activity` and dispatch Charlie via Copilot's native `task` tool for independent, read-only review.
-7. Call `team_review_result` to record the approved verdict.
-8. Report results directly to you in the Copilot chat.
-
-### Running inside OpenCode
-Launch OpenCode with the A4C primary agent:
-```bash
-opencode run --agent a4c "Investigate test failures, delegate to Bob, and have Charlie review."
-```
-OpenCode delegates to `@bob` and `@charlie` using its native subagent facility with strict permission boundaries (`edit: deny`, `write: deny` for Charlie).
+| Strategy | Flag | Execution Flow | Overhead | Ideal Use Case |
+| :--- | :--- | :--- | :--- | :--- |
+| **Direct Mode** | `--strategy direct` (Default) | Single specialist turn with worktree isolation and test evidence collection. Zero coordinators, zero automatic reviewers. | < 0.2s | Bugfixes, focused features, rapid iterations requiring native host speed. |
+| **Reviewed Mode** | `--strategy reviewed` | Specialist implementer turn, followed by an independent read-only reviewer turn gating approval on passing test evidence. | Specialist + Reviewer | Security-sensitive changes, public API modifications, production code. |
+| **Team Mode** | `--strategy team` | Lead engineer breaks down objective into delegated subtasks for specialists, followed by quality review. | Multi-turn | Complex multi-step architectural features requiring decomposition. |
 
 ---
 
-## Cross-Host Task Continuity
+## 3. Supported Peer Hosts & Capability Matrix
 
-A4C allows work started in one environment to be seamlessly continued in another:
+A4C treats supported hosts as peers, discovering their capabilities truthfully and enforcing governance appropriate to each host:
 
-1. **Start in Copilot**: Alice and Bob begin a complex refactoring in Copilot and record a checkpoint via `team_checkpoint`.
-2. **Host Session Ends**: The developer exits Copilot.
-3. **Resume in OpenCode**: The developer launches OpenCode (`opencode --agent a4c`). Alice reads `.a4c/` state via `team_context` and resumes the exact task ID, recognizing already-completed work without re-running earlier steps.
-4. **Independent Review & Merge**: Charlie reviews the changes, the developer approves via `a4c task accept <task-id>`, and integrates via `a4c task integrate <task-id>`.
+| Capability | GitHub Copilot CLI (`copilot`) | OpenCode (`opencode`) | Antigravity CLI (`antigravity` / `agy`) |
+| :--- | :--- | :--- | :--- |
+| **Execution Mode** | CLI automation SDK / stdio | Headless HTTP Server (`4096`) | Print non-interactive (`agy -p`) |
+| **Worktree Binding** | ✅ Native worktree binding | ✅ Directory scoping | ✅ Working directory flag |
+| **Context Injection** | ✅ Charter & Handoff prompt | ✅ Session prompt & system rules | ✅ Handoff prompt injection |
+| **Telemetry & Tokens**| ✅ Prompt, completion, total | ✅ Input, output, reasoning | ✅ Input, output, thinking, cache |
+| **Review Isolation** | ✅ SDK tool definition filters | ✅ Server permission table (`deny`) | ✅ Snapshot mutation check & rollback |
+| **Model Selection** | ✅ Custom model per activity | ✅ Custom provider/model per activity | ✅ Custom model per activity |
+| **Continuation** | ✅ Authoritative checkpoints | ✅ Authoritative checkpoints | ✅ Authoritative checkpoints |
 
 ---
 
-## CLI Management & Diagnostics
+## 4. Quick Start & CLI Reference
 
-The CLI remains fully functional for inspection, auditing, and headless automation:
-
+### 1. Build and Initialize
 ```bash
-# Inspect task status, worktree, and lifecycle state
-./bin/a4c task inspect <task-id> [--json]
+# Build A4C CLI
+go build -o ~/.local/bin/a4c ./cmd/a4c
 
-# View review diffs before approval
-./bin/a4c task diff <task-id>
+# Initialize A4C repository (.a4c durable stores)
+a4c init .
 
-# Submit human review feedback
-./bin/a4c task feedback <task-id> "Ensure nil checks are present"
+# Diagnose environment across all hosts
+a4c doctor
+```
+
+### 2. Direct Mode (Near-Native Speed)
+Execute a focused task directly on any host:
+```bash
+# Direct task on OpenCode
+a4c task start "Fix nil pointer dereference in cache.go" --runtime opencode --strategy direct
+
+# Direct task on GitHub Copilot
+a4c task start "Refactor options parser" --runtime copilot --strategy direct
+
+# Direct task on Antigravity
+a4c task start "Add table-driven unit tests" --runtime antigravity --strategy direct
+```
+
+### 3. Reviewed Mode (Independent Quality Gate)
+Execute implementation with independent, non-mutating review:
+```bash
+a4c task start "Add distributed rate limiter" \
+  --strategy reviewed \
+  --runtime opencode \
+  --reviewer-runtime copilot
+```
+
+### 4. Cross-Host Teams (Team Mode)
+Run a mixed-host engineering team where different specialists execute on different hosts:
+```bash
+a4c task start "Implement robust health check endpoints" \
+  --strategy team \
+  --runtime copilot \
+  --agent-runtimes coder=opencode,reviewer=copilot
+```
+
+### 5. Cross-Host Continuation
+Pause an in-flight task on one host and continue on another:
+```bash
+# Capture authoritative checkpoint
+a4c task checkpoint task-1791671400473010000
+
+# Resume task on another host without context loss
+a4c task resume task-1791671400473010000 --runtime opencode --run
+```
+
+### 6. Human Review & Integration
+A4C maintains a strict human acceptance boundary:
+```bash
+# Inspect task audit trail and activity DAG
+a4c task inspect task-1791671400473010000
+
+# View review diff in isolated worktree against base branch
+a4c task diff task-1791671400473010000
+
+# Provide human review feedback (re-opens task for revision)
+a4c task feedback task-1791671400473010000 "Please add benchmarks for concurrent access"
 
 # Record explicit human approval of reviewed snapshot
-./bin/a4c task accept <task-id> "Approved for merge"
+a4c task accept task-1791671400473010000 "Approved for production"
 
-# Integrate approved changes into base repository
-./bin/a4c task integrate <task-id>
-
-# Run MCP server manually
-./bin/a4c mcp
+# Cleanly integrate approved worktree branch into base repository
+a4c task integrate task-1791671400473010000
 ```
 
 ---
 
-## Verification & Test Suite
+## 5. Verification & Regression Protection
 
-Run unit and integration tests:
+Run the hardened test suite:
 ```bash
-go test -short ./...
-```
+# Run production hardening tests (capabilities, evidence resolution, mutation rollback)
+go test -v -run TestProductionHardening ./pkg/a4c
 
-Run cross-host continuity test:
-```bash
-go test -v -run TestCrossHostContinuity ./pkg/a4c/...
-```
-
-Run reviewer boundary enforcement test:
-```bash
-go test -v -run TestReviewerBoundaryEnforcement ./pkg/a4c/...
-```
-
-Run MCP host-native flow test:
-```bash
-go test -v -run TestMCPServer_HostNativeCoordinationFlow ./pkg/a4c/mcp/...
+# Run universal host and mixed routing tests
+go test -v -run "TestHostContract|TestMixedHostRouting|TestCrossHostContinuation" ./pkg/a4c
 ```

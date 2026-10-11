@@ -1,6 +1,7 @@
 package a4c
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -72,6 +73,12 @@ func (r *UniversalHostRegistry) Get(hostID string) (AgentProvider, bool) {
 	return p, ok
 }
 
+// Sentinel errors for host capability validation
+var (
+	ErrUnsupportedCapability = errors.New("host does not support required capability")
+	ErrHostUnavailable       = errors.New("host provider is unavailable")
+)
+
 // ListCapabilities reports discoverable capabilities across all registered hosts.
 func (r *UniversalHostRegistry) ListCapabilities() []HostCapabilities {
 	r.mu.RLock()
@@ -79,48 +86,131 @@ func (r *UniversalHostRegistry) ListCapabilities() []HostCapabilities {
 
 	var result []HostCapabilities
 	for hostID, p := range r.providers {
-		if hp, ok := p.(HostProvider); ok {
-			result = append(result, hp.HostCapabilities())
-		} else {
-			rc := p.Capabilities()
-			result = append(result, HostCapabilities{
-				HostID:               hostID,
-				DisplayName:          hostID,
-				Available:            true,
-				SessionInvocation:    true,
-				WorktreeBinding:      true,
-				ContextInjection:     true,
-				CompletionCollection: true,
-				SessionCancellation:  rc.SessionCancellation,
-				SessionResumption:    rc.SessionResumption,
-				StructuredTelemetry:  rc.UsageReporting,
-				ToolRestrictions:     rc.NativeToolRestrictions,
-			})
-		}
+		result = append(result, GetHostCapability(p, hostID))
 	}
 	return result
 }
 
 // GetHostCapability returns capabilities for a specific provider.
+// If the provider is nil, reports Available: false.
+// If the provider does not implement HostProvider, capabilities are marked unsupported
+// rather than assuming unverified capabilities.
 func GetHostCapability(p AgentProvider, fallbackID string) HostCapabilities {
+	if p == nil {
+		return HostCapabilities{
+			HostID:      fallbackID,
+			DisplayName: fallbackID,
+			Available:   false,
+			Limitations: []string{
+				fmt.Sprintf("Provider %s is nil or uninitialized", fallbackID),
+			},
+		}
+	}
+
 	if hp, ok := p.(HostProvider); ok {
 		return hp.HostCapabilities()
 	}
+
 	rc := p.Capabilities()
 	return HostCapabilities{
 		HostID:               fallbackID,
 		DisplayName:          fallbackID,
-		Available:            true,
-		SessionInvocation:    true,
-		WorktreeBinding:      true,
-		ContextInjection:     true,
-		CompletionCollection: true,
+		Available:            false, // Cannot verify availability without HostProvider implementation
+		SessionInvocation:    false,
+		WorktreeBinding:      false,
+		ContextInjection:     false,
+		CompletionCollection: false,
 		SessionCancellation:  rc.SessionCancellation,
 		SessionResumption:    rc.SessionResumption,
 		StructuredTelemetry:  rc.UsageReporting,
 		ToolRestrictions:     rc.NativeToolRestrictions,
 		Limitations: []string{
-			fmt.Sprintf("Provider %s does not implement detailed HostProvider interface", fallbackID),
+			fmt.Sprintf("Provider %s does not implement HostProvider interface; capabilities unverified", fallbackID),
 		},
 	}
 }
+
+// ValidateRequiredCapability verifies that a host is available and supports a specific capability.
+func ValidateRequiredCapability(caps HostCapabilities, required string) error {
+	if !caps.Available {
+		return fmt.Errorf("%w: host %s is not available", ErrHostUnavailable, caps.HostID)
+	}
+
+	switch required {
+	case "SessionInvocation":
+		if !caps.SessionInvocation {
+			return fmt.Errorf("%w: host %s does not support %s", ErrUnsupportedCapability, caps.HostID, required)
+		}
+	case "WorktreeBinding":
+		if !caps.WorktreeBinding {
+			return fmt.Errorf("%w: host %s does not support %s", ErrUnsupportedCapability, caps.HostID, required)
+		}
+	case "ContextInjection":
+		if !caps.ContextInjection {
+			return fmt.Errorf("%w: host %s does not support %s", ErrUnsupportedCapability, caps.HostID, required)
+		}
+	case "CompletionCollection":
+		if !caps.CompletionCollection {
+			return fmt.Errorf("%w: host %s does not support %s", ErrUnsupportedCapability, caps.HostID, required)
+		}
+	case "SessionCancellation":
+		if !caps.SessionCancellation {
+			return fmt.Errorf("%w: host %s does not support %s", ErrUnsupportedCapability, caps.HostID, required)
+		}
+	case "ModelSelection":
+		if !caps.ModelSelection {
+			return fmt.Errorf("%w: host %s does not support %s", ErrUnsupportedCapability, caps.HostID, required)
+		}
+	case "NativeSubagents":
+		if !caps.NativeSubagents {
+			return fmt.Errorf("%w: host %s does not support %s", ErrUnsupportedCapability, caps.HostID, required)
+		}
+	case "SessionResumption":
+		if !caps.SessionResumption {
+			return fmt.Errorf("%w: host %s does not support %s", ErrUnsupportedCapability, caps.HostID, required)
+		}
+	case "StructuredTelemetry":
+		if !caps.StructuredTelemetry {
+			return fmt.Errorf("%w: host %s does not support %s", ErrUnsupportedCapability, caps.HostID, required)
+		}
+	case "ToolRestrictions":
+		if !caps.ToolRestrictions {
+			return fmt.Errorf("%w: host %s does not support %s", ErrUnsupportedCapability, caps.HostID, required)
+		}
+	case "InteractiveAttachment":
+		if !caps.InteractiveAttachment {
+			return fmt.Errorf("%w: host %s does not support %s", ErrUnsupportedCapability, caps.HostID, required)
+		}
+	default:
+		return fmt.Errorf("%w: unrecognized capability %q", ErrUnsupportedCapability, required)
+	}
+	return nil
+}
+
+// RequireExecutionSupport verifies all mandatory capabilities required for an A4C execution turn.
+func RequireExecutionSupport(caps HostCapabilities) error {
+	mandatory := []string{
+		"SessionInvocation",
+		"WorktreeBinding",
+		"ContextInjection",
+		"CompletionCollection",
+		"SessionCancellation",
+	}
+	for _, req := range mandatory {
+		if err := ValidateRequiredCapability(caps, req); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RequireModelSelection verifies that a host supports custom model selection.
+func RequireModelSelection(caps HostCapabilities) error {
+	return ValidateRequiredCapability(caps, "ModelSelection")
+}
+
+// RequireToolRestrictions verifies that a host supports strict tool restriction enforcement.
+func RequireToolRestrictions(caps HostCapabilities) error {
+	return ValidateRequiredCapability(caps, "ToolRestrictions")
+}
+

@@ -67,18 +67,30 @@ func (p *OpenCodeProvider) Capabilities() RuntimeCapabilities {
 	}
 }
 
+// isServerReachable performs a lightweight probe against the OpenCode server endpoint.
+func (p *OpenCodeProvider) isServerReachable() bool {
+	probeClient := &http.Client{Timeout: 800 * time.Millisecond}
+	resp, err := probeClient.Get(p.endpoint + "/project")
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 500
+}
+
 // HostCapabilities returns the explicit discoverable technical capabilities of OpenCode.
 func (p *OpenCodeProvider) HostCapabilities() HostCapabilities {
-	return HostCapabilities{
+	reachable := p.isServerReachable()
+	caps := HostCapabilities{
 		HostID:                "opencode",
 		DisplayName:           "OpenCode Headless Server",
 		Version:               "1.18.35",
-		Available:             true,
-		SessionInvocation:     true,
-		WorktreeBinding:       true,
-		ContextInjection:      true,
-		CompletionCollection:  true,
-		SessionCancellation:   true,
+		Available:             reachable,
+		SessionInvocation:     reachable,
+		WorktreeBinding:       reachable,
+		ContextInjection:      reachable,
+		CompletionCollection:  reachable,
+		SessionCancellation:   reachable,
 		ModelSelection:        true,
 		NativeSubagents:       false,
 		SessionResumption:     true,
@@ -95,6 +107,10 @@ func (p *OpenCodeProvider) HostCapabilities() HostCapabilities {
 			"Native subagents are not exposed through public headless HTTP API",
 		},
 	}
+	if !reachable {
+		caps.Limitations = append(caps.Limitations, fmt.Sprintf("OpenCode server at %s is not reachable", p.endpoint))
+	}
+	return caps
 }
 
 // ParseModelIdentifier splits a model string like "opencode-go/mimo-v2.5" into providerID and modelID.

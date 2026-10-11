@@ -27,6 +27,29 @@ func (r *LocalEffectReconciler) Reconcile(ctx context.Context, intent IntentReco
 	return false, "", nil
 }
 
+// ErrReviewerMutation is returned when a reviewer agent attempts unauthorized file modifications.
+var ErrReviewerMutation = errors.New("reviewer attempted unauthorized file modifications; changes rolled back")
+
+// parseStringMap safely parses a map of strings whether typed as map[string]string or map[string]any.
+func parseStringMap(val any) map[string]string {
+	if val == nil {
+		return nil
+	}
+	if sm, ok := val.(map[string]string); ok {
+		return sm
+	}
+	if am, ok := val.(map[string]any); ok {
+		res := make(map[string]string)
+		for k, v := range am {
+			if s, ok := v.(string); ok {
+				res[k] = s
+			}
+		}
+		return res
+	}
+	return nil
+}
+
 type TeamCoordinator struct {
 	mu            sync.Mutex
 	WorkspaceDir  string
@@ -594,32 +617,15 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		strings.Contains(strings.ToLower(ident.Role), "reviewer")
 
 	diff := ""
+	evStatus := "none"
 	if isReviewerRole {
 		diff, _ = c.getWorkspaceDiff(ctx, activeWorkspace)
-		if c.lastEvidence == nil {
-			for _, depID := range req.DependsOn {
-				if depRec, err := c.Store.Get(depID); err == nil && depRec != nil && depRec.Result != nil {
-					if len(depRec.Result.EvidenceIDs) > 0 {
-						snapID, _ := depRec.Result.Outputs["snapshot_id"].(string)
-						outSum, _ := depRec.Result.Outputs["test_output_summary"].(string)
-						c.lastEvidence = &ValidationEvidence{
-							EvidenceID:          depRec.Result.EvidenceIDs[len(depRec.Result.EvidenceIDs)-1],
-							WorkspaceSnapshotID: snapID,
-							Command:             []string{"go", "test", "./..."},
-							ExitCode:            0,
-							OutputSummary:       outSum,
-							Valid:               true,
-						}
-						break
-					}
-				}
-			}
-		}
+		c.lastEvidence, evStatus = c.resolveValidationEvidence(req, activeWorkspace)
 	}
 	evidenceSummary := "none"
 	if c.lastEvidence != nil {
-		evidenceSummary = fmt.Sprintf("Evidence ID: %s | Command: %s | ExitCode: %d | Duration: %v | Valid: %t\nTest Output:\n%s",
-			c.lastEvidence.EvidenceID, strings.Join(c.lastEvidence.Command, " "), c.lastEvidence.ExitCode,
+		evidenceSummary = fmt.Sprintf("Evidence ID: %s | Status: %s | Command: %s | ExitCode: %d | Duration: %v | Valid: %t\nTest Output:\n%s",
+			c.lastEvidence.EvidenceID, evStatus, strings.Join(c.lastEvidence.Command, " "), c.lastEvidence.ExitCode,
 			c.lastEvidence.Duration.Round(time.Millisecond), c.lastEvidence.Valid, c.lastEvidence.OutputSummary)
 	}
 
@@ -647,10 +653,27 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	prompt := c.Handoff.BuildPrompt(artifact)
 
 	// 7. Dispatch to agent session with latency tracking
+	var preReviewSnap string
+	var snapErr error
+	if isReviewerRole {
+		preReviewSnap, snapErr = c.Snapshotter.ComputeSnapshot(activeWorkspace)
+	}
+
 	startWall := time.Now()
 	startModel := time.Now()
 	resp, err := session.Send(ctx, prompt)
 	modelDuration := time.Since(startModel)
+
+	var reviewerMutated bool
+	if isReviewerRole && snapErr == nil && preReviewSnap != "" {
+		postReviewSnap, postSnapErr := c.Snapshotter.ComputeSnapshot(activeWorkspace)
+		if postSnapErr == nil && preReviewSnap != postReviewSnap {
+			// Unauthorized mutation detected! Rollback unapproved changes
+			_ = exec.Command("git", "-C", activeWorkspace, "reset", "--hard", "HEAD").Run()
+			_ = exec.Command("git", "-C", activeWorkspace, "clean", "-fd", "-e", ".a4c").Run()
+			reviewerMutated = true
+		}
+	}
 
 	modelDur, toolDur := session.Durations()
 	if modelDur == 0 && toolDur == 0 {
@@ -812,13 +835,19 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 				}
 			}
 			if req.Inputs != nil {
-				if rMap, ok := req.Inputs["agent_runtimes"].(map[string]string); ok {
-					if r, exists := rMap[prop.ProposedAgentID]; exists && r != "" {
+				rMap := parseStringMap(req.Inputs["agent_runtimes"])
+				if r, exists := rMap[prop.ProposedAgentID]; exists && r != "" {
+					authReq.Runtime = r
+				}
+				mMap := parseStringMap(req.Inputs["agent_models"])
+				if m, exists := mMap[prop.ProposedAgentID]; exists && m != "" {
+					authReq.Model = m
+				}
+				if prop.ProposedAgentID == "reviewer" {
+					if r, ok := req.Inputs["reviewer_runtime"].(string); ok && r != "" {
 						authReq.Runtime = r
 					}
-				}
-				if mMap, ok := req.Inputs["agent_models"].(map[string]string); ok {
-					if m, exists := mMap[prop.ProposedAgentID]; exists && m != "" {
+					if m, ok := req.Inputs["reviewer_model"].(string); ok && m != "" {
 						authReq.Model = m
 					}
 				}
@@ -951,34 +980,20 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			comments = reviewResult.Comments
 		}
 
-		// If coordinator restarted or lastEvidence is missing from memory, recover from durable predecessor activities
-		if c.lastEvidence == nil {
-			for _, depID := range req.DependsOn {
-				if depRec, err := c.Store.Get(depID); err == nil && depRec != nil && depRec.Result != nil {
-					if len(depRec.Result.EvidenceIDs) > 0 {
-						snapID, _ := depRec.Result.Outputs["snapshot_id"].(string)
-						outSum, _ := depRec.Result.Outputs["test_output_summary"].(string)
-						c.lastEvidence = &ValidationEvidence{
-							EvidenceID:          depRec.Result.EvidenceIDs[len(depRec.Result.EvidenceIDs)-1],
-							WorkspaceSnapshotID: snapID,
-							Command:             []string{"go", "test", "./..."},
-							ExitCode:            0,
-							OutputSummary:       outSum,
-							Valid:               true,
-						}
-						break
-					}
-				}
+		if reviewerMutated {
+			approved = false
+			comments = "Rejected: reviewer attempted unauthorized workspace mutations; changes were automatically rolled back."
+			result.Outputs["reviewer_mutation_detected"] = true
+		} else {
+			ev, status := c.resolveValidationEvidence(req, activeWorkspace)
+			c.lastEvidence = ev
+			if status == "MISSING" || ev == nil || !ev.Valid {
+				approved = false
+				comments = "Rejected: no valid native test evidence exists for these changes."
+			} else if status == "STALE" {
+				approved = false
+				comments = fmt.Sprintf("Rejected: test evidence %s is STALE (workspace was modified after validation).", ev.EvidenceID)
 			}
-		}
-
-		// Verify evidence is present and valid; model approval CANNOT replace native evidence
-		if c.lastEvidence == nil || !c.lastEvidence.Valid {
-			approved = false
-			comments = "Rejected: no valid native test evidence exists for these changes."
-		} else if err := c.Snapshotter.ValidateAgainstEvidence(activeWorkspace, *c.lastEvidence); err != nil {
-			approved = false
-			comments = fmt.Sprintf("Rejected: workspace modified after validation (%v)", err)
 		}
 
 		result.Outputs["approved"] = approved
@@ -1184,6 +1199,91 @@ func (c *TeamCoordinator) getWorkspaceDiff(ctx context.Context, dir string) (str
 	return "No uncommitted git changes detected.", nil
 }
 
+// resolveValidationEvidence searches the dependency graph and activity tree for valid test evidence.
+// It returns the found ValidationEvidence (if any) and a status string: "VALID", "STALE", or "MISSING".
+func (c *TeamCoordinator) resolveValidationEvidence(req *ActivityRequest, activeWorkspace string) (*ValidationEvidence, string) {
+	// Helper to extract evidence from an activity record
+	extractEvidence := func(rec *ActivityRecord) *ValidationEvidence {
+		if rec == nil || rec.Result == nil || len(rec.Result.EvidenceIDs) == 0 {
+			return nil
+		}
+		snapID, _ := rec.Result.Outputs["snapshot_id"].(string)
+		outSum, _ := rec.Result.Outputs["test_output_summary"].(string)
+		if snapID == "" && len(rec.Result.EvidenceIDs) > 0 {
+			if evMap, ok := rec.Result.Outputs["validation_evidence"].(map[string]any); ok {
+				if s, ok := evMap["workspace_snapshot_id"].(string); ok {
+					snapID = s
+				}
+			}
+		}
+		return &ValidationEvidence{
+			EvidenceID:          rec.Result.EvidenceIDs[len(rec.Result.EvidenceIDs)-1],
+			WorkspaceSnapshotID: snapID,
+			Command:             []string{"go", "test", "./..."},
+			ExitCode:            0,
+			OutputSummary:       outSum,
+			Valid:               true,
+		}
+	}
+
+	// 1. If in-memory lastEvidence is already available, validate it against active workspace
+	if c.lastEvidence != nil && c.lastEvidence.Valid {
+		if err := c.Snapshotter.ValidateAgainstEvidence(activeWorkspace, *c.lastEvidence); err == nil {
+			return c.lastEvidence, "VALID"
+		}
+		return c.lastEvidence, "STALE"
+	}
+
+	// 2. Search direct dependencies first
+	for _, depID := range req.DependsOn {
+		if depRec, err := c.Store.Get(depID); err == nil && depRec != nil {
+			if ev := extractEvidence(depRec); ev != nil {
+				if err := c.Snapshotter.ValidateAgainstEvidence(activeWorkspace, *ev); err == nil {
+					return ev, "VALID"
+				}
+				return ev, "STALE"
+			}
+		}
+	}
+
+	// 3. Search the entire task tree (e.g. child coder subtasks under lead parent)
+	rootID := req.ID
+	curr := req
+	for curr != nil && curr.ParentID != "" {
+		rootID = curr.ParentID
+		if parentRec, err := c.Store.Get(curr.ParentID); err == nil && parentRec != nil {
+			curr = &parentRec.Request
+		} else {
+			break
+		}
+	}
+
+	tree := c.Store.GetTaskTree(rootID)
+	// Iterate in reverse chronological order to find most recent evidence
+	for i := len(tree) - 1; i >= 0; i-- {
+		rec := tree[i]
+		if rec.Request.ID == req.ID {
+			continue // skip self
+		}
+		if ev := extractEvidence(rec); ev != nil {
+			if err := c.Snapshotter.ValidateAgainstEvidence(activeWorkspace, *ev); err == nil {
+				return ev, "VALID"
+			}
+			return ev, "STALE"
+		}
+	}
+
+	return nil, "MISSING"
+}
+
+// ClearValidationEvidenceForTest resets the coordinator's in-memory lastEvidence cache for testing.
+func (c *TeamCoordinator) ClearValidationEvidenceForTest() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastEvidence = nil
+}
+
+
 
 // parseTextDirectives extracts structured directives from model text output as fallback.
 func (c *TeamCoordinator) parseTextDirectives(
@@ -1246,22 +1346,28 @@ func (c *TeamCoordinator) parseTextDirectives(
 	}
 
 	// Fallback JSON block parsing
+	jsonBlock := ""
 	if strings.Contains(content, "```json") {
 		start := strings.Index(content, "```json") + 7
 		end := strings.Index(content[start:], "```")
 		if end != -1 {
-			jsonBlock := strings.TrimSpace(content[start : start+end])
-			var parsed struct {
-				Proposals []ActivityProposal `json:"proposals"`
-				Memories  map[string]string  `json:"memories"`
+			jsonBlock = strings.TrimSpace(content[start : start+end])
+		}
+	} else if strings.HasPrefix(strings.TrimSpace(content), "{") {
+		jsonBlock = strings.TrimSpace(content)
+	}
+
+	if jsonBlock != "" {
+		var parsed struct {
+			Proposals []ActivityProposal `json:"proposals"`
+			Memories  map[string]string  `json:"memories"`
+		}
+		if err := json.Unmarshal([]byte(jsonBlock), &parsed); err == nil {
+			for _, p := range parsed.Proposals {
+				*props = append(*props, p)
 			}
-			if err := json.Unmarshal([]byte(jsonBlock), &parsed); err == nil {
-				for _, p := range parsed.Proposals {
-					*props = append(*props, p)
-				}
-				for k, v := range parsed.Memories {
-					*mems = append(*mems, struct{ Key, Content string }{Key: k, Content: v})
-				}
+			for k, v := range parsed.Memories {
+				*mems = append(*mems, struct{ Key, Content string }{Key: k, Content: v})
 			}
 		}
 	}

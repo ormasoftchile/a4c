@@ -108,7 +108,11 @@ func GetHostCapability(p AgentProvider, fallbackID string) HostCapabilities {
 	}
 
 	if hp, ok := p.(HostProvider); ok {
-		return hp.HostCapabilities()
+		caps := hp.HostCapabilities()
+		if (caps.HostID == "" || caps.HostID == "fake") && fallbackID != "" {
+			caps.HostID = fallbackID
+		}
+		return caps
 	}
 
 	rc := p.Capabilities()

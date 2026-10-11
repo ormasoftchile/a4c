@@ -30,6 +30,7 @@ const (
 	TaskStateIntegrated          TaskLifecycleState = "integrated"
 	TaskStateRejected            TaskLifecycleState = "rejected"
 	TaskStateFailed              TaskLifecycleState = "failed"
+	TaskStateInterrupted         TaskLifecycleState = "interrupted"
 )
 
 // RevisionRecord captures a human-requested revision and its feedback.
@@ -319,5 +320,30 @@ type HostReviewResult struct {
 	ReviewedAt     time.Time          `json:"reviewed_at"`
 	LifecycleState TaskLifecycleState `json:"lifecycle_state"`
 	SnapshotSHA    string             `json:"snapshot_sha"`
+}
+
+// AdoptWorkRequest encapsulates parameters to adopt external ongoing development into A4C.
+type AdoptWorkRequest struct {
+	Objective    string            `json:"objective"`
+	HandoffNotes string            `json:"handoff_notes,omitempty"`
+	SourceHost   string            `json:"source_host,omitempty"` // e.g. "antigravity"
+	Runtime      string            `json:"runtime,omitempty"`     // Target host to continue with e.g. "copilot", "opencode"
+	Model        string            `json:"model,omitempty"`
+	Specialist   string            `json:"specialist,omitempty"`
+	Strategy     ExecutionStrategy `json:"strategy,omitempty"`
+	BudgetTokens float64           `json:"budget_tokens,omitempty"`
+	InPlace      bool              `json:"in_place,omitempty"` // If true, binds current workspace without creating separate worktree
+}
+
+// AdoptWorkResult returns details of the newly adopted A4C task.
+type AdoptWorkResult struct {
+	TaskID             string          `json:"task_id"`
+	WorkspacePath      string          `json:"workspace_path"`
+	Branch             string          `json:"branch"`
+	ModifiedFiles      []string        `json:"modified_files"`
+	NewFiles           []string        `json:"new_files"`
+	TotalChanges       int             `json:"total_changes"`
+	Checkpoint         *TaskCheckpoint `json:"checkpoint"`
+	ContinuationPrompt string          `json:"continuation_prompt,omitempty"`
 }
 

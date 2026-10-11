@@ -44,6 +44,7 @@ Commands:
   task start <obj> [budget] [--strategy s] [--specialist s] [--runtime r] [--model m] [--steps N] Submit and immediately execute task
   task run [task-id] [--steps N] [--runtime r] [--model m] Execute pending task activities
   task resume <task-id> [--runtime r] [--model m] [--specialist s] [--run] Resume interrupted task on another host
+  task adopt <obj> [--notes text] [--runtime r] [--model m] [--strategy s] [--in-place] [--run] Adopt external work
   task escalate <task-id> <reviewed|team> [--reviewer r] Escalate task to reviewed or team collaboration
   task checkpoint <task-id> [--json]    Capture authoritative task checkpoint
   task list [--state s] [--status s] [--agent a] [--runtime r] Query tasks or activities
@@ -99,6 +100,9 @@ func main() {
 
 	case "task":
 		runTask(args)
+
+	case "adopt":
+		runTask(append([]string{"adopt"}, args...))
 
 	case "host":
 		runHost(args)
@@ -753,6 +757,55 @@ func runTask(args []string) {
 			}
 		}
 
+		chkPreview, _ := svc.CaptureCheckpoint(ctx, taskID)
+		if runtime == "" && chkPreview != nil {
+			alternatives, _ := svc.DiscoverAlternativeHosts(ctx, chkPreview.SourceRuntime)
+			if len(alternatives) > 0 {
+				fmt.Printf("A4C Task: %s\n\n", taskID)
+				if chkPreview.SourceRuntime != "" {
+					fmt.Printf("Host: %s\n", chkPreview.SourceRuntime)
+				}
+				stateDesc := "Interrupted"
+				fmt.Printf("Status: %s\n\n", stateDesc)
+				if chkPreview.FailureReason != "" {
+					fmt.Printf("Reason: %s\n", chkPreview.FailureReason)
+					if chkPreview.InterruptionMessage != "" {
+						fmt.Printf("Details: %s\n", chkPreview.InterruptionMessage)
+					}
+					fmt.Println()
+				}
+				fmt.Printf("Engineering state preserved:\n")
+				fmt.Printf("  Worktree: intact\n")
+				fmt.Printf("  Modified files: %d\n", len(chkPreview.ModifiedFiles))
+				fmt.Printf("  New files: %d\n", len(chkPreview.NewFiles))
+				fmt.Printf("  Completed obligations: %d\n", len(chkPreview.CompletedWork))
+				fmt.Printf("  Remaining obligations: %d\n", len(chkPreview.RemainingObligations))
+
+				fmt.Printf("\nAvailable execution hosts:\n")
+				for idx, alt := range alternatives {
+					fmt.Printf("  %d. %s\n", idx+1, alt.DisplayName)
+				}
+
+				// If interactive TTY, prompt user for selection
+				stat, statErr := os.Stdin.Stat()
+				if statErr == nil && (stat.Mode()&os.ModeCharDevice) != 0 {
+					fmt.Print("\nChoose a host to continue: ")
+					var input string
+					fmt.Scanln(&input)
+					input = strings.TrimSpace(input)
+					if idx, err := strconv.Atoi(input); err == nil && idx >= 1 && idx <= len(alternatives) {
+						runtime = alternatives[idx-1].HostID
+					} else if input != "" {
+						runtime = input
+					}
+				}
+				if runtime == "" {
+					fmt.Printf("\nChoose a host by running: a4c task resume %s --runtime <host> --run\n", taskID)
+					return
+				}
+			}
+		}
+
 		chk, err := svc.ResumeTaskOnHost(ctx, a4c.ResumeTaskRequest{
 			TaskID:       taskID,
 			Runtime:      runtime,
@@ -795,6 +848,95 @@ func runTask(args []string) {
 				fmt.Fprintf(os.Stderr, "Execution warning: %v\n", xErr)
 			}
 			fmt.Printf("Executed %d activities upon resumption.\n", len(results))
+		}
+
+	case "adopt":
+		if len(args) < 2 {
+			fmt.Println("Usage: a4c task adopt <objective> [--notes <text>] [--runtime <r>] [--model <m>] [--strategy <s>] [--in-place] [--run] [--steps N]")
+			return
+		}
+		objective := args[1]
+		notes := ""
+		runtime := ""
+		model := ""
+		strategy := a4c.StrategyDirect
+		inPlace := false
+		runImmediately := false
+		steps := 10
+		realCopilot := false
+		opencodeEndpoint := ""
+
+		for i := 2; i < len(args); i++ {
+			if args[i] == "--notes" && i+1 < len(args) {
+				notes = args[i+1]
+				i++
+			} else if args[i] == "--runtime" && i+1 < len(args) {
+				runtime = args[i+1]
+				i++
+			} else if args[i] == "--model" && i+1 < len(args) {
+				model = args[i+1]
+				i++
+			} else if args[i] == "--strategy" && i+1 < len(args) {
+				strategy = a4c.ExecutionStrategy(args[i+1])
+				i++
+			} else if args[i] == "--in-place" {
+				inPlace = true
+			} else if args[i] == "--run" {
+				runImmediately = true
+			} else if args[i] == "--real-copilot" {
+				realCopilot = true
+			} else if args[i] == "--opencode-endpoint" && i+1 < len(args) {
+				opencodeEndpoint = args[i+1]
+				i++
+			} else if args[i] == "--steps" && i+1 < len(args) {
+				if s, err := strconv.Atoi(args[i+1]); err == nil {
+					steps = s
+				}
+				i++
+			}
+		}
+
+		res, err := svc.AdoptExistingWork(ctx, a4c.AdoptWorkRequest{
+			Objective:    objective,
+			HandoffNotes: notes,
+			Runtime:      runtime,
+			Model:        model,
+			Strategy:     strategy,
+			InPlace:      inPlace,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to adopt existing work: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Adopted existing engineering work into Task %s\n", res.TaskID)
+		fmt.Printf("  Branch:          %s\n", res.Branch)
+		fmt.Printf("  Workspace:       %s\n", res.WorkspacePath)
+		fmt.Printf("  Preserved state: %d modified files, %d new files\n", len(res.ModifiedFiles), len(res.NewFiles))
+		for _, m := range res.ModifiedFiles {
+			fmt.Printf("    * [MODIFIED]: %s\n", m)
+		}
+		for _, n := range res.NewFiles {
+			fmt.Printf("    * [NEW FILE]: %s\n", n)
+		}
+		if runtime != "" {
+			fmt.Printf("  Target host:     %s (Model: %s)\n", runtime, model)
+		}
+
+		if runImmediately {
+			fmt.Printf("\nExecuting adopted task %s...\n", res.TaskID)
+			cleanup, cErr := configureProviderForCoordinator(svc.Coordinator(), runtime, model, realCopilot, opencodeEndpoint)
+			if cErr != nil {
+				fmt.Fprintf(os.Stderr, "Provider warning: %v\n", cErr)
+			}
+			if cleanup != nil {
+				defer cleanup()
+			}
+			execResults, xErr := svc.ExecuteTask(ctx, res.TaskID, steps)
+			if xErr != nil {
+				fmt.Fprintf(os.Stderr, "Execution warning: %v\n", xErr)
+			}
+			fmt.Printf("Executed %d activities for adopted task %s.\n", len(execResults), res.TaskID)
 		}
 
 	case "escalate":
@@ -1061,7 +1203,7 @@ func runTask(args []string) {
 		fmt.Printf("Task %s rejected at %s. Reason: %s\n", res.TaskID, res.RejectedAt.Format(time.RFC3339), res.Reason)
 
 	default:
-		fmt.Printf("Unknown task command %q. Usage: a4c task <submit|start|run|resume|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject>\n", subCmd)
+		fmt.Printf("Unknown task command %q. Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject>\n", subCmd)
 	}
 }
 

@@ -27,6 +27,7 @@ const (
 	StatusFailed        ActivityStatus = "failed"
 	StatusIndeterminate ActivityStatus = "indeterminate"
 	StatusAwaitingHuman ActivityStatus = "awaiting_human"
+	StatusInterrupted   ActivityStatus = "interrupted"
 )
 
 // Budget models consumable tokens or compute cost with reserved vs consumed tracking.
@@ -282,6 +283,8 @@ type TaskCheckpoint struct {
 	WorktreeBranch       string              `json:"worktree_branch"`
 	CurrentSnapshotSHA   string              `json:"current_snapshot_sha"`
 	GitStatusSummary     string              `json:"git_status_summary,omitempty"`
+	ModifiedFiles        []string            `json:"modified_files,omitempty"`
+	NewFiles             []string            `json:"new_files,omitempty"`
 	AcceptedDecisions    []string            `json:"accepted_decisions,omitempty"`
 	CompletedWork        []string            `json:"completed_work,omitempty"`
 	RemainingObligations []string            `json:"remaining_obligations,omitempty"`
@@ -290,6 +293,9 @@ type TaskCheckpoint struct {
 	SourceRuntime            string              `json:"source_runtime,omitempty"`
 	TargetRuntime            string              `json:"target_runtime,omitempty"`
 	Model                    string              `json:"model,omitempty"`
+	FailureReason            string              `json:"failure_reason,omitempty"`
+	InterruptionKind         ProviderFailureKind `json:"interruption_kind,omitempty"`
+	InterruptionMessage      string              `json:"interruption_message,omitempty"`
 	ContinuationInstructions string              `json:"continuation_instructions,omitempty"`
 	UpdatedAt                time.Time           `json:"updated_at"`
 }

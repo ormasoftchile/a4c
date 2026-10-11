@@ -2,6 +2,7 @@ package a4c
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +26,8 @@ type TeamService interface {
 	ResumeTask(ctx context.Context, taskID string) error
 	ResumeTaskOnHost(ctx context.Context, req ResumeTaskRequest) (*TaskCheckpoint, error)
 	CaptureCheckpoint(ctx context.Context, taskID string) (*TaskCheckpoint, error)
+	DiscoverAlternativeHosts(ctx context.Context, currentHostID string) ([]HostCapabilities, error)
+	AdoptExistingWork(ctx context.Context, req AdoptWorkRequest) (*AdoptWorkResult, error)
 	EscalateTask(ctx context.Context, req EscalateTaskRequest) (*TaskRef, error)
 	ExecuteTask(ctx context.Context, taskID string, maxSteps int) ([]*ActivityResult, error)
 
@@ -713,6 +716,24 @@ func (s *TeamServiceImpl) CaptureCheckpoint(ctx context.Context, taskID string) 
 		gitStatusSummary = strings.TrimSpace(string(out))
 	}
 
+	var modifiedFiles []string
+	var newFiles []string
+	if gitStatusSummary != "" {
+		for _, line := range strings.Split(gitStatusSummary, "\n") {
+			line = strings.TrimSpace(line)
+			if len(line) < 3 {
+				continue
+			}
+			st := line[:2]
+			path := strings.TrimSpace(line[2:])
+			if strings.HasPrefix(st, "??") {
+				newFiles = append(newFiles, path)
+			} else {
+				modifiedFiles = append(modifiedFiles, path)
+			}
+		}
+	}
+
 	currentSnap := s.resolveCurrentSnapshot(taskID)
 
 	// 2. Collect completed work & obligations from activity tree
@@ -723,6 +744,9 @@ func (s *TeamServiceImpl) CaptureCheckpoint(ctx context.Context, taskID string) 
 	specialistID := rootRec.Request.AgentID
 	specialistRole := "specialist"
 	var lastValEvidence *ValidationEvidence
+	var failureReason string
+	var interruptionKind ProviderFailureKind
+	var interruptionMsg string
 
 	for _, sub := range subtasks {
 		if sub.Status == StatusCompleted {
@@ -731,15 +755,31 @@ func (s *TeamServiceImpl) CaptureCheckpoint(ctx context.Context, taskID string) 
 				if sm, ok := sub.Result.Outputs["summary"].(string); ok && sm != "" {
 					summary += fmt.Sprintf(" — %s", sm)
 				}
+				// Retrieve authoritative evidence
+				if rawEv, ok := sub.Result.Outputs["validation_evidence"]; ok && rawEv != nil {
+					switch v := rawEv.(type) {
+					case *ValidationEvidence:
+						lastValEvidence = v
+					case ValidationEvidence:
+						lastValEvidence = &v
+					}
+				}
 			}
 			completedWork = append(completedWork, summary)
-			if len(sub.Result.EvidenceIDs) > 0 {
-				lastValEvidence = &ValidationEvidence{
-					EvidenceID:          sub.Result.EvidenceIDs[len(sub.Result.EvidenceIDs)-1],
-					WorkspaceSnapshotID: currentSnap,
-					Valid:               true,
-					ExitCode:            0,
+		} else if sub.Status == StatusInterrupted {
+			if sub.Result != nil && sub.Result.Outputs != nil {
+				if r, ok := sub.Result.Outputs["interruption_reason"].(string); ok {
+					failureReason = r
+					interruptionKind = ProviderFailureKind(r)
 				}
+				if m, ok := sub.Result.Outputs["interruption_message"].(string); ok {
+					interruptionMsg = m
+				}
+			}
+			remainingObligations = append(remainingObligations, fmt.Sprintf("Interrupted activity %s (%s): %s", sub.Request.ID, sub.Request.AgentID, sub.Request.Objective))
+			if activeActivityID == "" {
+				activeActivityID = sub.Request.ID
+				specialistID = sub.Request.AgentID
 			}
 		} else {
 			remainingObligations = append(remainingObligations, fmt.Sprintf("Pending activity %s (%s): %s", sub.Request.ID, sub.Request.AgentID, sub.Request.Objective))
@@ -772,6 +812,8 @@ func (s *TeamServiceImpl) CaptureCheckpoint(ctx context.Context, taskID string) 
 		WorktreeBranch:       branchName,
 		CurrentSnapshotSHA:   currentSnap,
 		GitStatusSummary:     gitStatusSummary,
+		ModifiedFiles:        modifiedFiles,
+		NewFiles:             newFiles,
 		AcceptedDecisions:    acceptedDecisions,
 		CompletedWork:        completedWork,
 		RemainingObligations: remainingObligations,
@@ -779,9 +821,13 @@ func (s *TeamServiceImpl) CaptureCheckpoint(ctx context.Context, taskID string) 
 		Strategy:             rootRec.Request.Strategy,
 		SourceRuntime:        rootRec.Request.Runtime,
 		Model:                rootRec.Request.Model,
+		FailureReason:        failureReason,
+		InterruptionKind:     interruptionKind,
+		InterruptionMessage:  interruptionMsg,
 		UpdatedAt:            time.Now(),
 	}
 
+	_ = s.saveCheckpoint(chk)
 	return chk, nil
 }
 
@@ -798,6 +844,11 @@ func (s *TeamServiceImpl) ResumeTaskOnHost(ctx context.Context, req ResumeTaskRe
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Verify that the requested target runtime is registered and available
+	if req.Runtime != "" && s.coordinator != nil && !s.coordinator.IsHostAvailable(req.Runtime) {
+		return nil, fmt.Errorf("%w: runtime %q is not registered or unavailable", ErrHostUnavailable, req.Runtime)
+	}
 
 	// Update checkpoint with target runtime info
 	if req.Runtime != "" {
@@ -826,8 +877,8 @@ func (s *TeamServiceImpl) ResumeTaskOnHost(ctx context.Context, req ResumeTaskRe
 
 	actRec, err := s.store.Get(targetActID)
 	if err == nil && actRec != nil {
-		// If activity was claimed or failed (e.g. host crashed mid-session), reset to pending so new host claims it
-		if actRec.Status == StatusClaimed || actRec.Status == StatusFailed || actRec.Status == StatusIndeterminate {
+		// If activity was claimed, interrupted, or failed (e.g. host crashed mid-session), reset to pending so new host claims it
+		if actRec.Status == StatusClaimed || actRec.Status == StatusFailed || actRec.Status == StatusIndeterminate || actRec.Status == StatusInterrupted {
 			actRec.Status = StatusPending
 		}
 		if req.Runtime != "" {
@@ -860,6 +911,7 @@ func (s *TeamServiceImpl) ResumeTaskOnHost(ctx context.Context, req ResumeTaskRe
 		})
 	}
 
+	_ = s.saveCheckpoint(chk)
 	return chk, nil
 }
 
@@ -973,6 +1025,19 @@ func (s *TeamServiceImpl) ExecuteTask(ctx context.Context, taskID string, maxSte
 		}
 		res, err := s.coordinator.Step(ctx)
 		if err != nil {
+			if pErr, ok := AsProviderFailure(err); ok {
+				chk, _ := s.CaptureCheckpoint(ctx, taskID)
+				if chk != nil {
+					chk.FailureReason = string(pErr.Kind)
+					chk.InterruptionKind = pErr.Kind
+					chk.InterruptionMessage = pErr.Message
+					_ = s.saveCheckpoint(chk)
+				}
+				if res != nil {
+					results = append(results, res)
+				}
+				return results, pErr
+			}
 			return results, err
 		}
 		if res == nil {
@@ -982,6 +1047,193 @@ func (s *TeamServiceImpl) ExecuteTask(ctx context.Context, taskID string, maxSte
 	}
 
 	return results, nil
+}
+
+// saveCheckpoint persists a TaskCheckpoint into the .a4c/checkpoints directory.
+func (s *TeamServiceImpl) saveCheckpoint(chk *TaskCheckpoint) error {
+	if chk == nil || chk.TaskID == "" {
+		return nil
+	}
+	dir := filepath.Join(s.workspaceDir, ".a4c", "checkpoints")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(chk, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s.json", chk.TaskID)), data, 0644)
+}
+
+// DiscoverAlternativeHosts reports available execution providers other than currentHostOrTaskID.
+func (s *TeamServiceImpl) DiscoverAlternativeHosts(ctx context.Context, currentHostOrTaskID string) ([]HostCapabilities, error) {
+	if s.coordinator == nil {
+		return nil, nil
+	}
+
+	excludeHostID := currentHostOrTaskID
+	if s.store != nil {
+		if rec, err := s.store.Get(currentHostOrTaskID); err == nil && rec != nil {
+			if rec.Request.Runtime != "" {
+				excludeHostID = rec.Request.Runtime
+			}
+		}
+	}
+
+	allCaps := s.coordinator.ListHostCapabilities()
+	var available []HostCapabilities
+	for _, c := range allCaps {
+		if c.Available && c.HostID != excludeHostID {
+			available = append(available, c)
+		}
+	}
+	return available, nil
+}
+
+// AdoptExistingWork inspects ongoing external development in the working directory,
+// preserves existing changes without overwriting, and creates an A4C task for continuation.
+func (s *TeamServiceImpl) AdoptExistingWork(ctx context.Context, req AdoptWorkRequest) (*AdoptWorkResult, error) {
+	if strings.TrimSpace(req.Objective) == "" {
+		return nil, fmt.Errorf("service: objective cannot be empty")
+	}
+
+	workDir := s.workspaceDir
+
+	// 1. Inspect repository state in workDir
+	cmdCheck := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree")
+	cmdCheck.Dir = workDir
+	if out, err := cmdCheck.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "true" {
+		return nil, fmt.Errorf("service: cannot adopt work: %s is not inside a git repository", workDir)
+	}
+
+	// Capture git branch
+	branchName := "main"
+	cmdBranch := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmdBranch.Dir = workDir
+	if out, err := cmdBranch.CombinedOutput(); err == nil {
+		branchName = strings.TrimSpace(string(out))
+	}
+
+	// Capture porcelain status
+	cmdStat := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	cmdStat.Dir = workDir
+	var modifiedFiles []string
+	var newFiles []string
+	var statusSummary string
+	if out, err := cmdStat.CombinedOutput(); err == nil {
+		statusSummary = strings.TrimSpace(string(out))
+		if statusSummary != "" {
+			for _, l := range strings.Split(statusSummary, "\n") {
+				l = strings.TrimSpace(l)
+				if len(l) < 3 {
+					continue
+				}
+				st := l[:2]
+				path := strings.TrimSpace(l[2:])
+				if strings.HasPrefix(st, "??") {
+					newFiles = append(newFiles, path)
+				} else {
+					modifiedFiles = append(modifiedFiles, path)
+				}
+			}
+		}
+	}
+
+	currentSnap, _ := NewStrictWorkspaceSnapshotter().ComputeSnapshot(workDir)
+
+	// 2. Determine target workspace
+	taskID := fmt.Sprintf("task-adopt-%d", time.Now().UnixNano())
+	targetWorkspace := workDir
+
+	// If worktree manager is enabled and InPlace is false, acquire worktree and copy uncommitted files safely
+	if s.wtMgr != nil && !req.InPlace {
+		wtRec, err := s.wtMgr.AcquireWorktree(ctx, taskID, "adopt")
+		if err == nil && wtRec != nil {
+			targetWorkspace = wtRec.WorktreePath
+			// Copy modified and new untracked files into the worktree so uncommitted state is preserved
+			for _, relPath := range append(modifiedFiles, newFiles...) {
+				srcFile := filepath.Join(workDir, relPath)
+				dstFile := filepath.Join(targetWorkspace, relPath)
+				if data, err := os.ReadFile(srcFile); err == nil {
+					_ = os.MkdirAll(filepath.Dir(dstFile), 0755)
+					_ = os.WriteFile(dstFile, data, 0644)
+				}
+			}
+		}
+	}
+
+	strategy := req.Strategy
+	if strategy == "" {
+		strategy = StrategyDirect
+	}
+
+	budget := req.BudgetTokens
+	if budget <= 0 {
+		budget = 50000.0
+	}
+
+	// 3. Create initial TaskCheckpoint with explicit Already Done / Still Needed data
+	chk := &TaskCheckpoint{
+		TaskID:                   taskID,
+		Objective:                req.Objective,
+		ActiveActivityID:         taskID,
+		SpecialistID:             "coder",
+		SpecialistRole:           "Software Engineer",
+		WorktreePath:             targetWorkspace,
+		WorktreeBranch:           branchName,
+		CurrentSnapshotSHA:       currentSnap,
+		GitStatusSummary:         statusSummary,
+		ModifiedFiles:            modifiedFiles,
+		NewFiles:                 newFiles,
+		CompletedWork:            []string{fmt.Sprintf("Adopted %d modified and %d new files from native workspace", len(modifiedFiles), len(newFiles))},
+		RemainingObligations:     []string{req.Objective},
+		ContinuationInstructions: req.HandoffNotes,
+		Strategy:                 strategy,
+		SourceRuntime:            req.SourceHost,
+		TargetRuntime:            req.Runtime,
+		Model:                    req.Model,
+		UpdatedAt:                time.Now(),
+	}
+
+	// 4. Submit task into A4C coordinator & store
+	inputs := map[string]any{
+		"checkpoint":                chk,
+		"is_adopted_work":           true,
+		"modified_files":            modifiedFiles,
+		"new_files":                 newFiles,
+		"continuation_instructions": req.HandoffNotes,
+	}
+	if req.Runtime != "" {
+		inputs["runtime"] = req.Runtime
+	}
+	if req.Model != "" {
+		inputs["model"] = req.Model
+	}
+	if req.Specialist != "" {
+		inputs["specialist"] = req.Specialist
+	}
+
+	actReq, err := s.coordinator.SubmitTaskWithStrategy(req.Objective, Budget{Allocated: budget}, inputs, strategy)
+	if err != nil {
+		return nil, fmt.Errorf("service: failed to submit adopted task: %w", err)
+	}
+
+	// Ensure checkpoint uses actual actReq.ID
+	chk.TaskID = actReq.ID
+	chk.ActiveActivityID = actReq.ID
+
+	_ = s.saveCheckpoint(chk)
+
+	return &AdoptWorkResult{
+		TaskID:             actReq.ID,
+		WorkspacePath:      targetWorkspace,
+		Branch:             branchName,
+		ModifiedFiles:      modifiedFiles,
+		NewFiles:           newFiles,
+		TotalChanges:       len(modifiedFiles) + len(newFiles),
+		Checkpoint:         chk,
+		ContinuationPrompt: BuildContinuationPrompt(*chk),
+	}, nil
 }
 
 // deriveTaskState derives the active lifecycle state from authoritative activity state and lifecycle facts.
@@ -1018,6 +1270,7 @@ func (s *TeamServiceImpl) deriveTaskState(rootID string) (TaskLifecycleState, *H
 	subtasks := s.store.GetTaskTree(rootID)
 
 	hasFailures := false
+	hasInterrupted := false
 	hasAwaitingDecision := false
 	hasRunning := false
 	hasApprovedReview := false
@@ -1025,6 +1278,8 @@ func (s *TeamServiceImpl) deriveTaskState(rootID string) (TaskLifecycleState, *H
 
 	for _, rec := range subtasks {
 		switch rec.Status {
+		case StatusInterrupted:
+			hasInterrupted = true
 		case StatusFailed:
 			hasFailures = true
 		case StatusAwaitingHuman:
@@ -1046,6 +1301,9 @@ func (s *TeamServiceImpl) deriveTaskState(rootID string) (TaskLifecycleState, *H
 		}
 	}
 
+	if hasInterrupted {
+		return TaskStateInterrupted, lifecycle, nil
+	}
 	if hasFailures {
 		return TaskStateFailed, lifecycle, nil
 	}

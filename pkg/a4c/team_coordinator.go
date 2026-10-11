@@ -157,6 +157,44 @@ func (c *TeamCoordinator) SetDefaultProvider(p AgentProvider) {
 	c.Provider = p
 }
 
+// ListHostCapabilities reports discoverable technical capabilities across all registered providers.
+func (c *TeamCoordinator) ListHostCapabilities() []HostCapabilities {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var result []HostCapabilities
+	for name, p := range c.Providers {
+		result = append(result, GetHostCapability(p, name))
+	}
+	if len(result) == 0 && c.Provider != nil {
+		result = append(result, GetHostCapability(c.Provider, "default"))
+	}
+	return result
+}
+
+// IsHostAvailable checks whether a specific host runtime is registered and operational.
+func (c *TeamCoordinator) IsHostAvailable(hostID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if hostID == "" {
+		return true
+	}
+	// If no providers are configured at all in the coordinator (e.g. lightweight unit tests)
+	if len(c.Providers) == 0 && c.Provider == nil {
+		return true
+	}
+	if c.Providers != nil {
+		if p, ok := c.Providers[hostID]; ok && p != nil {
+			caps := GetHostCapability(p, hostID)
+			return caps.Available
+		}
+	}
+	if c.Provider != nil {
+		caps := GetHostCapability(c.Provider, hostID)
+		return caps.Available
+	}
+	return false
+}
+
 func (c *TeamCoordinator) resolveProvider(req *ActivityRequest) AgentProvider {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -625,11 +663,42 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	prov := c.resolveProviderLocked(req)
 	if prov == nil {
 		err := fmt.Errorf("coordinator: no agent provider configured for runtime %q", req.Runtime)
-		_ = c.Store.Fail(req.ID, err)
-		return nil, err
+		pe := &ProviderError{
+			Kind:        ProviderFailureTemporaryOutage,
+			HostID:      req.Runtime,
+			Message:     err.Error(),
+			OriginalErr: err,
+		}
+		intResult := ActivityResult{
+			ID:     req.ID,
+			Status: StatusInterrupted,
+			Outputs: map[string]any{
+				"error":                err.Error(),
+				"interruption_reason":  string(pe.Kind),
+				"interruption_message": pe.Message,
+				"host_id":              req.Runtime,
+			},
+		}
+		_ = c.Store.InterruptWithResult(req.ID, intResult, pe)
+		return &intResult, pe
 	}
 	session, err := prov.CreateSession(ctx, config)
 	if err != nil {
+		if pe := ClassifyProviderError(req.Runtime, req.Model, err, ""); pe != nil {
+			intResult := ActivityResult{
+				ID:     req.ID,
+				Status: StatusInterrupted,
+				Outputs: map[string]any{
+					"error":                err.Error(),
+					"interruption_reason":  string(pe.Kind),
+					"interruption_message": pe.Message,
+					"host_id":              pe.HostID,
+					"model":                pe.Model,
+				},
+			}
+			_ = c.Store.InterruptWithResult(req.ID, intResult, pe)
+			return &intResult, pe
+		}
 		_ = c.Store.Fail(req.ID, err)
 		return nil, fmt.Errorf("coordinator: failed to initialize session for %s: %w", ident.ID, err)
 	}
@@ -724,6 +793,32 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	}
 
 	if err != nil {
+		pe, isProviderFail := AsProviderFailure(err)
+		if !isProviderFail {
+			pe = ClassifyProviderError(req.Runtime, req.Model, err, "")
+			if pe != nil {
+				isProviderFail = true
+			}
+		}
+
+		if isProviderFail {
+			intResult := ActivityResult{
+				ID:       req.ID,
+				Status:   StatusInterrupted,
+				Consumed: consumed,
+				Metrics:  metrics,
+				Outputs: map[string]any{
+					"error":                err.Error(),
+					"interruption_reason":  string(pe.Kind),
+					"interruption_message": pe.Message,
+					"host_id":              pe.HostID,
+					"model":                pe.Model,
+				},
+			}
+			_ = c.Store.InterruptWithResult(req.ID, intResult, pe)
+			return &intResult, pe
+		}
+
 		failResult := ActivityResult{
 			ID:       req.ID,
 			Status:   StatusFailed,

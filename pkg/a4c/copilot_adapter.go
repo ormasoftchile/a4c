@@ -443,15 +443,34 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		maxToolCalls = 10
 	}
 
-	checkToolLimits := func() error {
+	// Coordination tools (delegate / escalate) are exempt from the tool-call
+	// cap: a lead that exhausts its exploration budget on read_file must still
+	// be able to hand off or ask a human. Without this exemption, large
+	// codebases burn the lead's 10-call default on exploration and
+	// governed_propose_activity then fails — the model reports "delegation
+	// tools are failing" and the activity ends with zero children.
+	isCoordinationTool := func(name string) bool {
+		return name == "governed_propose_activity" || name == "governed_request_human_decision"
+	}
+
+	checkToolLimits := func(toolName string) error {
 		if err := adapter.checkActionBudget("tool call"); err != nil {
+			if config.OnToolLimitHit != nil {
+				config.OnToolLimitHit(toolName)
+			}
 			return err
+		}
+		if isCoordinationTool(toolName) {
+			return nil
 		}
 		adapter.mu.Lock()
 		adapter.toolCallCount++
 		calls := adapter.toolCallCount
 		adapter.mu.Unlock()
 		if calls > maxToolCalls {
+			if config.OnToolLimitHit != nil {
+				config.OnToolLimitHit(toolName)
+			}
 			return fmt.Errorf("%w: maximum %d calls allowed per session", ErrToolCallLimitExceeded, maxToolCalls)
 		}
 		return nil
@@ -462,7 +481,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			tStart := time.Now()
 			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
 
-			if err := checkToolLimits(); err != nil {
+			if err := checkToolLimits("governed_read_file"); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -491,7 +510,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			tStart := time.Now()
 			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
 
-			if err := checkToolLimits(); err != nil {
+			if err := checkToolLimits("governed_apply_patch"); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -529,7 +548,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			tStart := time.Now()
 			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
 
-			if err := checkToolLimits(); err != nil {
+			if err := checkToolLimits("governed_propose_activity"); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -554,7 +573,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			tStart := time.Now()
 			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
 
-			if err := checkToolLimits(); err != nil {
+			if err := checkToolLimits("governed_submit_review"); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -580,7 +599,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			tStart := time.Now()
 			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
 
-			if err := checkToolLimits(); err != nil {
+			if err := checkToolLimits("governed_request_human_decision"); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -609,7 +628,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			tStart := time.Now()
 			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
 
-			if err := checkToolLimits(); err != nil {
+			if err := checkToolLimits("governed_propose_memory"); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {

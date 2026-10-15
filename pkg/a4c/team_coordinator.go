@@ -554,10 +554,31 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 	var structuralQueriesCount int
 	var fileReadsCount int
+	var toolLimitHits, proposalsRecorded int
+	var lastToolLimitHit string
 
 	// Resolve capability profile for this activity
 	profile := c.Capabilities.ResolveProfile(ident.ID, ident.Role, req.Objective, req.CapabilityProfile, c.Governor)
 	req.CapabilityProfile = &profile
+
+	// Lead must always be able to delegate; refuse to start a lead session
+	// without governed_propose_activity rather than letting the model discover
+	// the missing tool after burning exploration turns.
+	isLeadAgent := strings.EqualFold(ident.ID, "lead") || strings.EqualFold(ident.Role, "lead") || strings.EqualFold(ident.ID, "alice")
+	if isLeadAgent {
+		hasPropose := false
+		for _, t := range profile.AllowedTools {
+			if t == "governed_propose_activity" {
+				hasPropose = true
+				break
+			}
+		}
+		if !hasPropose {
+			cfgErr := fmt.Errorf("coordinator: lead profile missing governed_propose_activity; cannot delegate")
+			_ = c.Store.Fail(req.ID, cfgErr)
+			return nil, cfgErr
+		}
+	}
 
 	// Resolve effective economic and activity limits
 	effectiveLimits := ActivityLimits{
@@ -665,6 +686,11 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		},
 		OnProposeActivity: func(prop ActivityProposal) {
 			proposedActivities = append(proposedActivities, prop)
+			proposalsRecorded++
+		},
+		OnToolLimitHit: func(toolName string) {
+			toolLimitHits++
+			lastToolLimitHit = toolName
 		},
 		OnSubmitReview: func(rev ReviewResult) {
 			rev.ActivityID = req.ID
@@ -814,6 +840,8 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		ModelInvocations:       1,
 		StructuralQueriesCount: structuralQueriesCount,
 		FileReadsCount:         fileReadsCount,
+		ProposalsRecorded:      proposalsRecorded,
+		ToolLimitHits:          toolLimitHits,
 	}
 
 	if c.Governor != nil {
@@ -929,14 +957,50 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		Metrics:           metrics,
 		CapabilityProfile: &profile,
 		Outputs: map[string]any{
-			"summary":    resp.Content,
-			"session_id": session.SessionID(),
+			"summary":            resp.Content,
+			"session_id":         session.SessionID(),
+			"proposals_recorded": proposalsRecorded,
+			"tool_limit_hits":    toolLimitHits,
 		},
 	}
 
 	isLead := strings.EqualFold(ident.ID, "lead") || strings.EqualFold(ident.Role, "lead") || strings.EqualFold(ident.ID, "alice")
 
 	if isLead {
+		// A lead that finishes with zero delegated children and no human
+		// escalation has failed its role — unless child activities were
+		// already enqueued for this task (e.g. pre-scheduled DAG in tests
+		// or host-routing fixtures). Do not mark a bare lead completed;
+		// that silently drops the task into awaiting_human_review with
+		// nothing implemented (large-repo regression: lead burned tool-call
+		// budget on exploration, propose_activity was rejected, model
+		// reported "delegation tools are failing" and ended the turn
+		// successfully).
+		if len(proposedActivities) == 0 && decisionRequest == nil && !c.storeHasChildren(req.ID) {
+			noDelegErr := fmt.Errorf("coordinator: lead completed without proposing any child activities")
+			guidance := "delegate implementation to 'coder' via governed_propose_activity before ending the turn; coordination tools (propose_activity, request_human_decision) are exempt from the tool-call cap"
+			if toolLimitHits > 0 {
+				guidance = fmt.Sprintf("%s (last tool-limit rejection: %s, total hits: %d)", guidance, lastToolLimitHit, toolLimitHits)
+			}
+			failResult := ActivityResult{
+				ID:       req.ID,
+				Status:   StatusFailed,
+				Consumed: consumed,
+				Metrics:  metrics,
+				Outputs: map[string]any{
+					"error":              noDelegErr.Error(),
+					"failure_reason":     "no_delegation",
+					"lead_summary":       resp.Content,
+					"proposals_recorded": proposalsRecorded,
+					"tool_limit_hits":    toolLimitHits,
+					"last_tool_limit":    lastToolLimitHit,
+					"guidance":           guidance,
+				},
+			}
+			_ = c.Store.FailWithResult(req.ID, failResult, noDelegErr)
+			return &failResult, noDelegErr
+		}
+
 		// Authorize and enqueue delegated subtasks
 		proposalIDMap := make(map[string]string)
 		for idx, prop := range proposedActivities {
@@ -1444,6 +1508,21 @@ func (c *TeamCoordinator) RunLoop(ctx context.Context, maxSteps int) ([]*Activit
 // ListPendingDecisions returns decisions awaiting human engineer review.
 func (c *TeamCoordinator) ListPendingDecisions() []*HumanDecisionRequest {
 	return c.Store.ListPendingDecisions()
+}
+
+// storeHasChildren reports whether any activity in the store already has
+// parentID as its ParentID. Used to distinguish "lead failed to delegate"
+// from "children were pre-enqueued (host-routing / DAG fixtures)".
+func (c *TeamCoordinator) storeHasChildren(parentID string) bool {
+	if c.Store == nil {
+		return false
+	}
+	for _, rec := range c.Store.QueryActivities(ActivityFilter{ParentID: parentID}) {
+		if rec != nil && rec.Request.ID != parentID {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolveDecision allows the human engineer to approve, reject, or reassign work.

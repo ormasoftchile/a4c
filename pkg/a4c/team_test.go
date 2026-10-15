@@ -346,8 +346,17 @@ func TestTeam_06_HumanEscalationAndResumption(t *testing.T) {
 			}
 			return &spike.AgentMessage{Content: "Escalated decision to engineer"}, nil
 		}
-		// Second invocation after human resolution: proceed
-		return &spike.AgentMessage{Content: "Architecture finalized with selected database"}, nil
+		// Second invocation after human resolution: lead now has the decision
+		// and delegates implementation.
+		if session.Config().OnProposeActivity != nil {
+			session.Config().OnProposeActivity(spike.ActivityProposal{
+				ProposalID:      "post-decision-coder",
+				ProposedAgentID: "coder",
+				Objective:       "Implement storage layer with SQLite",
+				RequestedBudget: spike.Budget{Allocated: 5000},
+			})
+		}
+		return &spike.AgentMessage{Content: "Architecture finalized; delegated implementation."}, nil
 	}
 
 	coord := spike.NewTeamCoordinator(workspaceDir, store, roster, memory, gov, journal, runner, fakeProvider)

@@ -83,6 +83,12 @@ type ExecutionMetrics struct {
 	ToolCalls              int           `json:"tool_calls"`
 	StructuralQueriesCount int           `json:"structural_queries_count,omitempty"`
 	FileReadsCount         int           `json:"file_reads_count,omitempty"`
+	// Coordination observability: how many governed_propose_activity tool
+	// invocations were accepted by the session adapter (via OnProposeActivity).
+	ProposalsRecorded int `json:"proposals_recorded,omitempty"`
+	// How many governed_* tool calls were rejected by in-session limits
+	// (budget, tool-call cap) — surfaces "delegation tools are failing".
+	ToolLimitHits int `json:"tool_limit_hits,omitempty"`
 }
 
 // BilledConsumption returns the budget-relevant token consumption for a

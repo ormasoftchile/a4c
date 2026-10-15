@@ -41,6 +41,9 @@ type AgentConfig struct {
 	Governor               *PolicyGovernor                `json:"-"`
 	IntentJournal          *DurableIntentJournal          `json:"-"`
 	OnProposeActivity      func(ActivityProposal)         `json:"-"`
+	// OnToolLimitHit is invoked when a governed tool call is rejected by the
+	// in-session tool-call or budget limit (before the host sees the error).
+	OnToolLimitHit func(toolName string) `json:"-"`
 	OnSubmitReview         func(ReviewResult)             `json:"-"`
 	OnRequestHumanDecision func(HumanDecisionRequest)     `json:"-"`
 	OnProposeMemory        func(key, content string)      `json:"-"`

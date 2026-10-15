@@ -1,0 +1,53 @@
+# Task: Support property-to-property comparisons in Cypher WHERE clauses
+
+## Problem
+
+The Cypher query subset supported by `src/cypher/cypher.c` fails to parse a WHERE condition that compares one variable's property with another variable's property. The query aborts with `expected value at pos N` at the right-hand operand.
+
+Examples that fail on the current code:
+
+```
+MATCH (a)-[:CALLS]->(b) WHERE a.file_path = b.file_path RETURN a.name, b.name
+MATCH (a)-[:CALLS]->(b) WHERE a.name <> b.name RETURN a.name, b.name
+MATCH (a)-[:CALLS]->(b) WITH a, b WHERE a.file_path = b.file_path RETURN a.name, b.name
+```
+
+Property-to-literal comparisons already work and must keep working:
+
+```
+MATCH (a)-[:CALLS]->(b) WHERE b.file_path = 'demo.go' RETURN a.name, b.name
+```
+
+## Required behavior
+
+Extend the WHERE parser and evaluator so that when the right-hand side of a comparison operator is another `variable.property` expression (not a string/number/boolean literal), the condition compares the two resolved property values for the current binding.
+
+1. `a.prop = b.prop` — true when the two resolved string values are equal.
+2. `a.prop <> b.prop` — true when the two resolved string values differ.
+3. All existing comparison operators that make sense on property values (`>`, `<`, `>=`, `<=`) should also accept a property right-hand side, evaluated the same way as when the right-hand side is a numeric literal (via `strtod`).
+4. The property right-hand side must resolve through the same binding mechanism used for the left-hand side (`node_prop` / bare-alias name), so File, Function, and other node property paths all work.
+5. Property-to-literal and bare-alias comparisons must continue to work exactly as before.
+6. The change must work in both the early WHERE (after MATCH) and post-WITH WHERE paths, since they share the same parser and evaluator.
+
+## Where to change
+
+- Parser: `parse_condition_expr` in `src/cypher/cypher.c` currently rejects a non-literal right-hand side with `expected value at pos %d`.
+- Condition model: `cbm_condition_t` in `src/cypher/cypher.h` currently only stores a literal `value`.
+- Evaluator: `eval_condition` / `resolve_condition_value` in `src/cypher/cypher.c` currently resolve only the left-hand side against the binding.
+
+## Constraints
+
+- Do not break any existing Cypher behavior (WHERE with literals, regex, CONTAINS, STARTS WITH, ENDS WITH, IN, IS NULL, IS NOT NULL, HAS_LABEL, EXISTS, AND/OR/XOR/NOT).
+- Keep the error path for genuinely unsupported right-hand sides (e.g. function calls on the RHS if not already supported) clear and non-crashing.
+- Add unit tests in the existing Cypher test suite covering property-to-property `=`, `<>`, and at least one ordering operator, plus a WITH-path case.
+- The full project test suite (`make -f Makefile.cbm SANITIZE= test`) must still pass.
+
+## How to verify
+
+```sh
+make -f Makefile.cbm SANITIZE= cbm
+./build/c/codebase-memory-mcp cli index_repository '{"repo_path":"/tmp/demo","mode":"full","name":"demo"}'
+./build/c/codebase-memory-mcp cli query_graph '{"project":"demo","query":"MATCH (a)-[:CALLS]->(b) WHERE a.file_path = b.file_path RETURN a.name, b.name"}'
+```
+
+Before the fix this errors with `expected value at pos N`. After the fix it returns only CALLS edges whose source and target files are the same.

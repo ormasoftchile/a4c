@@ -1,0 +1,13 @@
+== build production binary (no libgit2; env has incompatible headers) ==
+build: OK
+== full unit test suite ==
+unit tests: PASS (1032 lines)
+== fixture + index ==
+== acceptance queries (2 CALLS edges, both same-file) ==
+FAIL same-file (a.file_path = b.file_path): query failed (expected value at pos 44)
+FAIL cross-file (a.file_path <> b.file_path): query failed (expected value at pos 45)
+FAIL name inequality (a.name <> b.name): query failed (expected value at pos 40)
+FAIL post-WITH same-file: query failed (expected value at pos 54)
+PASS property-to-literal control (rows=2)
+
+ACCEPTANCE: 1 passed, 4 failed

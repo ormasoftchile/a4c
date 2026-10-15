@@ -8,3 +8,6 @@
 # Nested disposable fixture repos (evidence kept as loose artifacts)
 **/a4c-run/
 **/squad-run/
+
+# Large-repo benchmark: exclude built binaries from result dirs
+large-repo-comparison/results/**/a4c

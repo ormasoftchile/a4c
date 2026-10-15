@@ -130,7 +130,7 @@ Your responsibilities:
 4. Propose architectural conventions using governed_propose_memory.
 5. Escalate ambiguous requirements or high-impact trade-offs to the human engineer via governed_request_human_decision.
 Handoff guidelines: each proposed objective must be self-contained and concise — name the target files, the exact contract (signatures/behaviors), constraints, and how to verify. Never paste investigation transcripts or full file contents.
-Budget guidelines: propose child budgets that cover the full work including session context overhead — implementation and review tasks each need tens of thousands of tokens. The runtime raises proposals below the viable minimum and rejects proposals the parent budget cannot afford.
+Budget guidelines: size child budgets from the parent budget and expected work. Implementation tasks on non-trivial repositories routinely consume 150k–400k tokens once session context, file reads, edits, and native test runs are included — a full test suite alone can cost tens of thousands of tokens per run. When the parent budget is large (hundreds of thousands of tokens), propose coder budgets in the 150k–400k range unless the task is demonstrably tiny; reviewers typically need 40k–80k. The runtime raises proposals below the viable minimum and rejects proposals the parent cannot afford.
 You NEVER directly mutate code via governed_apply_patch.`,
 				Specialties: []string{"architecture", "planning", "delegation", "triage"},
 				AllowedTools: []string{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	spike "github.com/ormasoftchile/a4c/pkg/a4c"
@@ -153,8 +154,9 @@ func TestBudgetEconomics_ParentReservationAndExhaustion(t *testing.T) {
 // remaining budget. The retry completes; nothing is granted beyond the parent.
 func TestBudgetEconomics_RecoveryFromExhaustion(t *testing.T) {
 	fake := spike.NewFakeProvider()
-	runner := &stubTestRunner{}
-	coord, store, gov := newBudgetTestCoordinator(t, fake, runner)
+	// First test run fails so salvage (complete-on-overrun-when-tests-pass)
+	// does not intercept; the retried attempt then passes.
+	coord, store, gov := newBudgetTestCoordinator(t, fake, &flakyThenPassRunner{failCalls: 3})
 
 	coderSends := 0
 	fake.SessionResponseFunc = func(ctx context.Context, session *spike.FakeSession, prompt string) (*spike.AgentMessage, error) {
@@ -168,9 +170,12 @@ func TestBudgetEconomics_RecoveryFromExhaustion(t *testing.T) {
 			})
 			return &spike.AgentMessage{Content: "Delegated to coder."}, nil
 		case "coder":
-			coderSends++
-			if coderSends == 1 {
-				// First attempt blows the (floor-sized) allocation.
+			// Count only the primary attempt prompt, not repair-loop resends.
+			if !strings.Contains(prompt, "Tests failed with exit code") {
+				coderSends++
+			}
+			if coderSends <= 1 {
+				// First primary attempt blows the (floor-sized) allocation.
 				session.SetUsage(spike.UsageInfo{
 					PromptTokens: 28000, CompletionTokens: 2000,
 					TotalTokens: 30000, BilledTokens: 30000,
@@ -256,8 +261,9 @@ func TestBudgetEconomics_RecoveryFromExhaustion(t *testing.T) {
 // explicit budget-exhausted state instead of looping.
 func TestBudgetEconomics_RecoveryIsBounded(t *testing.T) {
 	fake := spike.NewFakeProvider()
-	runner := &stubTestRunner{}
-	coord, store, _ := newBudgetTestCoordinator(t, fake, runner)
+	// Always fail tests so neither salvage nor a successful retry can
+	// complete; both reallocation attempts exhaust and terminate.
+	coord, store, _ := newBudgetTestCoordinator(t, fake, &failingTestRunner{})
 	coord.MaxBudgetRetries = 1
 
 	coderSends := 0
@@ -272,8 +278,14 @@ func TestBudgetEconomics_RecoveryIsBounded(t *testing.T) {
 			})
 			return &spike.AgentMessage{Content: "Delegated."}, nil
 		case "coder":
-			coderSends++
-			session.SetUsage(spike.UsageInfo{TotalTokens: 60000, BilledTokens: 60000})
+			if !strings.Contains(prompt, "Tests failed with exit code") {
+				coderSends++
+			}
+			// Exceed any reallocation the governor can grant from the 500k
+			// parent while leaving headroom for one retry: first attempt
+			// 400k > 25k floor; reallocation caps at ~parent-available;
+			// retry still exceeds the reallocated cap → terminal.
+			session.SetUsage(spike.UsageInfo{TotalTokens: 400000, BilledTokens: 400000})
 			return &spike.AgentMessage{Content: "Budget keeps running out."}, nil
 		}
 		return &spike.AgentMessage{Content: "ok"}, nil

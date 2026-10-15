@@ -182,3 +182,199 @@ func TestTeam_LeadToolAssert(t *testing.T) {
 		t.Errorf("expected tool-availability error, got: %v", stepErr)
 	}
 }
+
+// TestBudgetSalvage_CompletesWhenTestsPassAfterOverrun verifies that a
+// specialist whose session overran its allocation is COMPLETED (with an
+// explicit budget_overrun marker) when native tests pass on the resulting
+// workspace — instead of failing the activity and discarding verified work.
+//
+// Regression context (large-repo team re-run): coder allocated 180k, consumed
+// 217k after producing a correct fix; the full-suite validation cost pushed
+// it over; activity failed and reviewer never ran, even though the worktree
+// held an acceptance-passing implementation.
+func TestBudgetSalvage_CompletesWhenTestsPassAfterOverrun(t *testing.T) {
+	fake := spike.NewFakeProvider()
+	runner := &noDelegationTestRunner{} // returns exit 0 / "ok"
+	coord, store, _ := newNoDelegationCoordinator(t, fake)
+	// Use a runner that always passes (already the stub)
+	_ = runner
+
+	fake.SessionResponseFunc = func(ctx context.Context, session *spike.FakeSession, prompt string) (*spike.AgentMessage, error) {
+		switch session.Config().AgentID {
+		case "lead":
+			if session.Config().OnProposeActivity != nil {
+				session.Config().OnProposeActivity(spike.ActivityProposal{
+					ProposalID:      "coder-1",
+					ProposedAgentID: "coder",
+					Objective:       "Implement the cypher fix",
+					RequestedBudget: spike.Budget{Allocated: 40000},
+				})
+			}
+			return &spike.AgentMessage{Content: "Delegated to coder."}, nil
+		case "coder":
+			// Blow the allocation: FakeSession errors when TotalTokens > Budget.Allocated.
+			// Lead proposes 40k; floor is 25k, so 40k stands. Use 50k total.
+			session.SetUsage(spike.UsageInfo{
+				PromptTokens: 42000, CompletionTokens: 8000,
+				TotalTokens: 50000, BilledTokens: 50000,
+			})
+			return &spike.AgentMessage{Content: "Implemented the fix; native tests pass."}, nil
+		}
+		return &spike.AgentMessage{Content: "ok"}, nil
+	}
+
+	_, err := coord.SubmitTask("Fix cypher WHERE", spike.Budget{Allocated: 500000}, nil)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	ctx := context.Background()
+	var coderRes *spike.ActivityResult
+	for i := 0; i < 10; i++ {
+		if !store.HasClaimable() {
+			break
+		}
+		res, stepErr := coord.Step(ctx)
+		if stepErr != nil {
+			t.Fatalf("step %d: %v", i, stepErr)
+		}
+		if res == nil {
+			break
+		}
+		if res.ID == "coder-1" || (res.Consumed.Consumed > 0 && coderRes == nil && res.Status == spike.StatusCompleted) {
+			if rec, _ := store.Get(res.ID); rec != nil && rec.Request.AgentID == "coder" {
+				coderRes = res
+			}
+		}
+	}
+
+	// Find coder record
+	var coderRec *spike.ActivityRecord
+	for _, rec := range store.ListAllActivities() {
+		if rec.Request.AgentID == "coder" {
+			coderRec = rec
+			break
+		}
+	}
+	if coderRec == nil {
+		t.Fatal("coder activity not found")
+	}
+	if coderRec.Status != spike.StatusCompleted {
+		t.Fatalf("expected coder completed via salvage, got %s (err: %s)", coderRec.Status, coderRec.Error)
+	}
+	if coderRec.Result == nil {
+		t.Fatal("expected coder result recorded")
+	}
+	if ov, _ := coderRec.Result.Outputs["budget_overrun"].(bool); !ov {
+		t.Errorf("expected budget_overrun=true in outputs, got %v", coderRec.Result.Outputs)
+	}
+	if coderRec.Result.Outputs["budget_overrun_note"] == nil {
+		t.Error("expected budget_overrun_note in outputs")
+	}
+}
+
+// TestBudgetReallocation_CoversObservedOverrun verifies the retry allocation
+// is sized from observed consumption (consumed*1.5), not merely 2× the
+// original — so a 217k first attempt is not retried with only 360k when the
+// suite will re-run.
+func TestBudgetReallocation_CoversObservedOverrun(t *testing.T) {
+	fake := spike.NewFakeProvider()
+	runner := &noDelegationTestRunner{}
+	coord, store, _ := newNoDelegationCoordinator(t, fake)
+	_ = runner
+
+	coderSends := 0
+	fake.SessionResponseFunc = func(ctx context.Context, session *spike.FakeSession, prompt string) (*spike.AgentMessage, error) {
+		switch session.Config().AgentID {
+		case "lead":
+			if session.Config().OnProposeActivity != nil {
+				session.Config().OnProposeActivity(spike.ActivityProposal{
+					ProposalID:      "coder-1",
+					ProposedAgentID: "coder",
+					Objective:       "Implement the cypher fix",
+					RequestedBudget: spike.Budget{Allocated: 40000},
+				})
+			}
+			return &spike.AgentMessage{Content: "Delegated."}, nil
+		case "coder":
+			coderSends++
+			if coderSends == 1 {
+				// First attempt: overruns allocation (40k proposed → 40k used).
+				// Failing runner means salvage is skipped; reallocation fires.
+				session.SetUsage(spike.UsageInfo{
+					PromptTokens: 42000, CompletionTokens: 8000,
+					TotalTokens: 50000, BilledTokens: 50000,
+				})
+				return &spike.AgentMessage{Content: "Partial work; tests not green."}, nil
+			}
+			session.SetUsage(spike.UsageInfo{
+				PromptTokens: 10000, CompletionTokens: 1000,
+				TotalTokens: 11000, BilledTokens: 11000,
+			})
+			return &spike.AgentMessage{Content: "Fixed and verified."}, nil
+		}
+		return &spike.AgentMessage{Content: "ok"}, nil
+	}
+
+	// Failing-then-passing runner: first attempt fails tests so salvage is
+	// skipped and reallocation fires; the retried attempt can complete.
+	coord.TestRunner = &flakyThenPassRunner{failCalls: 3}
+
+	_, err := coord.SubmitTask("Fix cypher WHERE", spike.Budget{Allocated: 500000}, nil)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	ctx := context.Background()
+	var sawRecovery bool
+	var recoveryAlloc float64
+	for i := 0; i < 12; i++ {
+		if !store.HasClaimable() {
+			break
+		}
+		res, stepErr := coord.Step(ctx)
+		if stepErr != nil {
+			t.Fatalf("step %d: %v", i, stepErr)
+		}
+		if res == nil {
+			break
+		}
+		if res.Outputs["recovery"] == "budget_reallocation" {
+			sawRecovery = true
+			if v, ok := res.Outputs["reallocated_to"].(float64); ok {
+				recoveryAlloc = v
+			}
+		}
+	}
+
+	if !sawRecovery {
+		t.Fatal("expected budget reallocation recovery")
+	}
+	// Floor is 25k; first alloc raised to 25k; consumed 32k → target 48k.
+	// 2×25k=50k also applies; max should be at least consumed*1.5=48k.
+	if recoveryAlloc < 50000*1.5 {
+		t.Errorf("recovery allocation %.0f should cover observed overrun 50000*1.5=75000", recoveryAlloc)
+	}
+}
+
+type failingTestRunner struct{}
+
+func (s *failingTestRunner) RunTests(ctx context.Context, workspaceDir string) (int, string, error) {
+	return 1, "FAIL: simulated", nil
+}
+
+// flakyThenPassRunner fails the first N calls (so budget salvage is skipped
+// and reallocation is exercised), then passes (so the retried attempt can
+// complete).
+type flakyThenPassRunner struct {
+	failCalls int
+	calls     int
+}
+
+func (s *flakyThenPassRunner) RunTests(ctx context.Context, workspaceDir string) (int, string, error) {
+	s.calls++
+	if s.calls <= s.failCalls {
+		return 1, "FAIL: simulated first attempt", nil
+	}
+	return 0, "ok", nil
+}

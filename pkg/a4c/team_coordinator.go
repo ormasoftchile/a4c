@@ -822,6 +822,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 	usage := session.Usage()
 	consumed := Budget{Consumed: usage.BilledConsumption()}
+	isLeadEarly := strings.EqualFold(ident.ID, "lead") || strings.EqualFold(ident.Role, "lead") || strings.EqualFold(ident.ID, "alice")
 
 	metrics := &ExecutionMetrics{
 		WallClockDuration:      time.Since(startWall),
@@ -890,6 +891,19 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			failResult.Outputs["failure_reason"] = "tool_limit_exhausted"
 		} else if errors.Is(err, ErrBudgetExceeded) {
 			failResult.Outputs["failure_reason"] = "budget_exhausted"
+			// Specialist mid-session exhaustion: the agentic loop may already
+			// have produced a verified workspace. Validate before retrying.
+			if !isLeadEarly && !isReviewerRole && c.TestRunner != nil {
+				if exitCode, out, testErr := c.TestRunner.RunTests(ctx, activeWorkspace); testErr == nil && exitCode == 0 {
+					failResult.Status = StatusCompleted
+					failResult.Outputs["budget_overrun"] = true
+					failResult.Outputs["budget_overrun_tokens"] = consumed.Consumed - req.Budget.Allocated
+					failResult.Outputs["budget_overrun_note"] = "session exhausted budget but native tests pass on the resulting workspace; completing verified work"
+					failResult.Outputs["test_output_summary"] = truncateSummary(out, 500)
+					_ = c.Store.Complete(req.ID, failResult)
+					return &failResult, nil
+				}
+			}
 			if rec, ok := c.maybeReallocateBudget(req, consumed.Consumed, &failResult); ok {
 				return rec, nil
 			}
@@ -898,8 +912,39 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		return nil, err
 	}
 
-	// Post-flight budget check: verify activity didn't exceed allocated budget
+	// Post-flight budget check: verify activity didn't exceed allocated budget.
+	// For specialists that already ran native tests inside the agentic Send
+	// loop (Copilot multi-turn), the workspace may hold a verified fix even
+	// when the session overran. Prefer completing verified work over
+	// discarding it and re-running the full suite from scratch.
 	if req.Budget.Allocated > 0 && consumed.Consumed > req.Budget.Allocated {
+		overrunBy := consumed.Consumed - req.Budget.Allocated
+		// Specialists only: lead/reviewer never produce implementation to salvage.
+		if !isLeadEarly && !isReviewerRole && c.TestRunner != nil {
+			if exitCode, out, testErr := c.TestRunner.RunTests(ctx, activeWorkspace); testErr == nil && exitCode == 0 {
+				salvage := ActivityResult{
+					ID:       req.ID,
+					Status:   StatusCompleted,
+					Consumed: consumed,
+					Metrics:  metrics,
+					Outputs: map[string]any{
+						"summary":               truncateSummary(resp.Content, 500),
+						"session_id":            session.SessionID(),
+						"budget_overrun":        true,
+						"budget_overrun_tokens": overrunBy,
+						"budget_overrun_note": fmt.Sprintf(
+							"session exceeded allocation by %.0f tokens but native tests pass on the resulting workspace; completing verified work",
+							overrunBy),
+						"test_output_summary": truncateSummary(out, 500),
+					},
+				}
+				if c.Governor != nil {
+					c.Governor.RecordConsumption(req.ID, rootID, overrunBy)
+				}
+				_ = c.Store.Complete(req.ID, salvage)
+				return &salvage, nil
+			}
+		}
 		overrunErr := fmt.Errorf("%w: activity %s consumed %.0f tokens exceeds allocated %.0f",
 			ErrBudgetExceeded, req.ID, consumed.Consumed, req.Budget.Allocated)
 		failResult := ActivityResult{
@@ -1525,6 +1570,14 @@ func (c *TeamCoordinator) storeHasChildren(parentID string) bool {
 	return false
 }
 
+// truncateSummary bounds a test-output excerpt for durable activity outputs.
+func truncateSummary(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "... [truncated]"
+}
+
 // ResolveDecision allows the human engineer to approve, reject, or reassign work.
 func (c *TeamCoordinator) ResolveDecision(decisionID string, resolution string, approve bool, reassignTo string) error {
 	return c.Store.ResolveHumanDecision(decisionID, resolution, approve, reassignTo)
@@ -1788,7 +1841,14 @@ func (c *TeamCoordinator) maybeReallocateBudget(req *ActivityRequest, consumed f
 		return nil, false
 	}
 
+	// Size the retry to actually cover the observed overrun plus headroom,
+	// not merely double the original allocation. Doubling 180k→360k still
+	// failed on a 217k first attempt that then re-ran a 5,722-test suite.
+	// Target: observed consumption + 50% headroom, at least 2× original.
 	newAlloc := req.Budget.Allocated * 2
+	if withHeadroom := consumed * 1.5; withHeadroom > newAlloc {
+		newAlloc = withHeadroom
+	}
 	if newAlloc < floor {
 		newAlloc = floor
 	}

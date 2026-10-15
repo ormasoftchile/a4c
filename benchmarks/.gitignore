@@ -1,0 +1,10 @@
+# Built binaries from live benchmark runs
+**/a4c
+# Nested disposable fixture repos and worktrees (evidence artifacts kept)
+**/a4c-run/.git/
+**/squad-run/.git/
+**/a4c-run/.a4c/worktrees/*/tree/
+
+# Nested disposable fixture repos (evidence kept as loose artifacts)
+**/a4c-run/
+**/squad-run/

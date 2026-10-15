@@ -57,7 +57,7 @@ func (b *HandoffBuilder) BuildPrompt(artifact HandoffArtifact) string {
 
 	switch artifact.AgentID {
 	case "lead", "alice":
-		sb.WriteString("Instructions: You are the Lead Engineer. Inspect the codebase if necessary and delegate implementation to a specialist using governed_propose_activity.\n")
+		sb.WriteString("Instructions: You are the Lead Engineer. Identify the task, select capabilities, and delegate promptly using governed_propose_activity. Inspect only what is needed for a precise handoff; do not solve the task yourself. Each proposal's objective must be a concise, self-contained handoff: target files, exact contract, constraints, and verification — never your investigation transcript.\n")
 
 	case "reviewer", "charlie":
 		trimmedDiff := b.truncateDiff(artifact.Diff)

@@ -19,12 +19,12 @@ type ActivityRecord struct {
 }
 
 type DurableActivityStore struct {
-	mu        sync.Mutex
-	dir       string
+	mu           sync.Mutex
+	dir          string
 	decisionsDir string
-	records   map[string]*ActivityRecord
-	decisions map[string]*HumanDecisionRequest
-	order     []string
+	records      map[string]*ActivityRecord
+	decisions    map[string]*HumanDecisionRequest
+	order        []string
 }
 
 func NewDurableActivityStore(dir string) (*DurableActivityStore, error) {
@@ -194,7 +194,6 @@ func (s *DurableActivityStore) ClaimNextForAgent(agentID string) (*ActivityReque
 			continue
 		}
 
-
 		// Check agent assignment filter if specified
 		if agentID != "" && rec.Request.AgentID != "" && rec.Request.AgentID != "team" && rec.Request.AgentID != agentID {
 			continue
@@ -221,6 +220,26 @@ func (s *DurableActivityStore) Complete(id string, result ActivityResult) error 
 
 	rec.Status = StatusCompleted
 	rec.Result = &result
+	return s.persist(rec)
+}
+
+// Requeue returns an activity to the pending pool with an updated request.
+// It is used for explicit, bounded budget-exhaustion recovery: the activity's
+// terminal error and result are cleared so it can be claimed again under a
+// reallocated budget, preserving any workspace progress already made.
+func (s *DurableActivityStore) Requeue(req ActivityRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, exists := s.records[req.ID]
+	if !exists {
+		return ErrActivityNotFound
+	}
+
+	rec.Request = req
+	rec.Status = StatusPending
+	rec.Error = ""
+	rec.Result = nil
 	return s.persist(rec)
 }
 
@@ -561,4 +580,3 @@ func (s *DurableActivityStore) QueryActivities(filter ActivityFilter) []*Activit
 func (s *DurableActivityStore) ListAllActivities() []*ActivityRecord {
 	return s.QueryActivities(ActivityFilter{})
 }
-

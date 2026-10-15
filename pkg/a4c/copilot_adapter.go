@@ -27,8 +27,8 @@ type ApplyPatchParams struct {
 
 type ProposeActivityParams struct {
 	ProposedAgentID string   `json:"proposed_agent_id" jsonschema:"the agent ID to delegate to: 'coder' or 'reviewer'"`
-	Objective       string   `json:"objective" jsonschema:"the specific objective of the subtask"`
-	BudgetTokens    float64  `json:"budget_tokens" jsonschema:"the requested budget allocation in tokens"`
+	Objective       string   `json:"objective" jsonschema:"the specific objective of the subtask; make it self-contained: target files, exact contract, constraints, and how to verify"`
+	BudgetTokens    float64  `json:"budget_tokens" jsonschema:"requested budget allocation in tokens; include full expected context overhead (session prompts alone cost tens of thousands of tokens). The runtime raises proposals below the viable minimum and rejects proposals the parent cannot afford"`
 	DependsOn       []string `json:"depends_on,omitempty" jsonschema:"optional list of activity IDs that must complete first"`
 }
 
@@ -59,19 +59,57 @@ type CopilotSessionAdapter struct {
 	toolDuration   time.Duration
 	toolCallCount  int
 	turnCount      int
+	abortFn        func()
+	budgetAbort    sync.Once
 }
 
 func (s *CopilotSessionAdapter) SessionID() string {
 	return s.sessionID
 }
 
+// budgetedTokens returns the budget-relevant consumption: billed tokens when
+// the host reports cache detail (uncached input + output), else the legacy
+// total (providers/fakes that only set TotalTokens).
+func (s *CopilotSessionAdapter) budgetedTokens() int {
+	if s.usage.BilledTokens > 0 {
+		return s.usage.BilledTokens
+	}
+	return s.usage.TotalTokens
+}
+
+// abortOnBudget makes budget exhaustion terminal for the session: the host
+// session is aborted once so the model cannot keep burning tokens on
+// operations governance will keep rejecting.
+func (s *CopilotSessionAdapter) abortOnBudget() {
+	s.budgetAbort.Do(func() {
+		s.mu.Lock()
+		s.budgetExceeded = true
+		abort := s.abortFn
+		s.mu.Unlock()
+		if abort != nil {
+			abort()
+		}
+	})
+}
+
+// checkActionBudget gates an in-flight action (tool call or permission
+// request) on the session budget. On exhaustion the session is aborted so
+// repeated impossible calls cannot continue.
+func (s *CopilotSessionAdapter) checkActionBudget(action string) error {
+	if err := s.CheckBudget(); err != nil {
+		s.abortOnBudget()
+		return fmt.Errorf("%w: %s blocked: %v", ErrBudgetExceeded, action, err)
+	}
+	return nil
+}
+
 func (s *CopilotSessionAdapter) CheckBudget() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.config.Budget.Allocated > 0 && float64(s.usage.TotalTokens) >= s.config.Budget.Allocated {
+	if s.config.Budget.Allocated > 0 && float64(s.budgetedTokens()) >= s.config.Budget.Allocated {
 		return fmt.Errorf("%w: session consumed %d tokens exceeds allocated %.0f",
-			ErrBudgetExceeded, s.usage.TotalTokens, s.config.Budget.Allocated)
+			ErrBudgetExceeded, s.budgetedTokens(), s.config.Budget.Allocated)
 	}
 	return nil
 }
@@ -97,7 +135,7 @@ func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*Agent
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: turn %d exceeds max model turns %d", ErrTurnLimitExceeded, turns, maxTurns)
 	}
-	if s.config.Budget.Allocated > 0 && float64(s.usage.TotalTokens) >= s.config.Budget.Allocated {
+	if s.config.Budget.Allocated > 0 && float64(s.budgetedTokens()) >= s.config.Budget.Allocated {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: session budget exhausted before send", ErrBudgetExceeded)
 	}
@@ -121,19 +159,32 @@ func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*Agent
 			responseContent.WriteString(data.Content)
 		case *copilot.AssistantUsageData:
 			s.mu.Lock()
+			// Host semantics: InputTokens is total prompt input including
+			// cache reads (and cache writes); budget consumption counts
+			// uncached input + output, keeping cache re-serves out of the
+			// billed total while PromptTokens keeps the full-input figure.
+			evUncached := 0
 			if data.InputTokens != nil {
 				inTok := int(*data.InputTokens)
 				s.usage.PromptTokens += inTok
 				if inTok > s.usage.PeakContextTokens {
 					s.usage.PeakContextTokens = inTok
 				}
+				evUncached = inTok
 			}
+			evOut := 0
 			if data.OutputTokens != nil {
-				s.usage.CompletionTokens += int(*data.OutputTokens)
+				evOut = int(*data.OutputTokens)
+				s.usage.CompletionTokens += evOut
 			}
 			if data.CacheReadTokens != nil {
 				s.usage.CachedTokens += int(*data.CacheReadTokens)
+				evUncached -= int(*data.CacheReadTokens)
 			}
+			if evUncached < 0 {
+				evUncached = 0
+			}
+			s.usage.BilledTokens += evUncached + evOut
 			if data.ReasoningTokens != nil {
 				s.usage.ReasoningTokens += int(*data.ReasoningTokens)
 			}
@@ -141,9 +192,12 @@ func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*Agent
 				s.usage.ReportedCostUSD += *data.Cost
 			}
 			s.usage.TotalTokens = s.usage.PromptTokens + s.usage.CompletionTokens
-			if s.config.Budget.Allocated > 0 && float64(s.usage.TotalTokens) > s.config.Budget.Allocated {
+			if s.config.Budget.Allocated > 0 && float64(s.budgetedTokens()) > s.config.Budget.Allocated {
 				s.budgetExceeded = true
-				s.usage.OverrunTokens = s.usage.TotalTokens - int(s.config.Budget.Allocated)
+				over := s.budgetedTokens() - int(s.config.Budget.Allocated)
+				if over > s.usage.OverrunTokens {
+					s.usage.OverrunTokens = over
+				}
 			}
 			s.mu.Unlock()
 		case *copilot.SessionIdleData:
@@ -171,6 +225,14 @@ func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*Agent
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case err := <-errChan:
+		// A budget abort surfaces as a session error; report it as the
+		// budget exhaustion it is, not as a generic session failure.
+		s.mu.Lock()
+		exhausted := s.budgetExceeded
+		s.mu.Unlock()
+		if exhausted {
+			return nil, fmt.Errorf("%w: session aborted after budget exhaustion during activity", ErrBudgetExceeded)
+		}
 		return nil, err
 	case <-done:
 	}
@@ -184,7 +246,7 @@ func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*Agent
 	}
 	s.modelDuration += modelSend
 	exceeded := s.budgetExceeded
-	total := s.usage.TotalTokens
+	consumedNow := s.budgetedTokens()
 	alloc := s.config.Budget.Allocated
 	s.mu.Unlock()
 
@@ -199,8 +261,8 @@ func (s *CopilotSessionAdapter) Send(ctx context.Context, prompt string) (*Agent
 		Timestamp: time.Now(),
 	}
 
-	if alloc > 0 && (exceeded || float64(total) > alloc) {
-		return msg, fmt.Errorf("%w: session consumed %d tokens exceeds allocated %.0f", ErrBudgetExceeded, total, alloc)
+	if alloc > 0 && (exceeded || float64(consumedNow) > alloc) {
+		return msg, fmt.Errorf("%w: session consumed %d tokens exceeds allocated %.0f", ErrBudgetExceeded, consumedNow, alloc)
 	}
 
 	return msg, nil
@@ -316,7 +378,7 @@ func (p *CopilotProvider) HostCapabilities() HostCapabilities {
 		NativeSubagents:       false,
 		SessionResumption:     true,
 		StructuredTelemetry:   true,
-		ToolRestrictions:     true,
+		ToolRestrictions:      true,
 		InteractiveAttachment: true,
 		DefaultModel:          p.model,
 		SupportedModels: []string{
@@ -382,7 +444,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 	}
 
 	checkToolLimits := func() error {
-		if err := adapter.CheckBudget(); err != nil {
+		if err := adapter.checkActionBudget("tool call"); err != nil {
 			return err
 		}
 		adapter.mu.Lock()
@@ -566,7 +628,10 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 	// 2. Strict permission handler that fails closed
 	permHandler := func(request copilot.PermissionRequest, invocation copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
 		if err := adapter.CheckBudget(); err != nil {
-			feedback := fmt.Sprintf("Budget exceeded: %v", err)
+			// Budget exhaustion is terminal: abort the session so the model
+			// cannot keep re-discovering the same forbidden operation.
+			adapter.abortOnBudget()
+			feedback := fmt.Sprintf("Budget exhausted: %v. This activity is terminated.", err)
 			return &rpc.PermissionDecisionReject{Feedback: &feedback}, nil
 		}
 		toolName := string(request.Kind())
@@ -643,7 +708,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		Model:                   modelToUse,
 		WorkingDirectory:        config.WorkspaceDir,
 		Tools:                   tools,
-		ExcludedTools:          excludedTools,
+		ExcludedTools:           excludedTools,
 		EnableHostGitOperations: &disableGit,
 		OnPermissionRequest:     permHandler,
 		SystemMessage: &copilot.SystemMessageConfig{
@@ -666,6 +731,9 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 
 	adapter.session = copilotSession
 	adapter.sessionID = actualID
+	adapter.abortFn = func() {
+		_ = copilotSession.Abort(context.Background())
+	}
 	return adapter, nil
 }
 

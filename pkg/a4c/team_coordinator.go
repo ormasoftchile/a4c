@@ -51,31 +51,32 @@ func parseStringMap(val any) map[string]string {
 }
 
 type TeamCoordinator struct {
-	mu            sync.Mutex
-	WorkspaceDir  string
-	WorktreeMgr   *WorktreeManager
-	Store         *DurableActivityStore
-	Roster        *TeamRoster
-	Memory        *DurableMemoryStore
-	Governor      *PolicyGovernor
-	Journal       *DurableIntentJournal
-	Snapshotter   *WorkspaceSnapshotter
-	TestRunner    TestRunner
-	Provider               AgentProvider
-	Providers              map[string]AgentProvider
-	Reconciler             EffectReconciler
-	MaxRepair              int
-	MaxRevisions           int
-	MaxToolCalls           int
-	MaxReadFileLines       int
-	Limits                 ActivityLimits
-	lock                   *WorkspaceLock
-	coordID                string
-	revisionCount          int
-	lastEvidence           *ValidationEvidence
-	sessions               map[string]AgentSession
-	Handoff      *HandoffBuilder
-	Capabilities *CapabilityRegistry
+	mu               sync.Mutex
+	WorkspaceDir     string
+	WorktreeMgr      *WorktreeManager
+	Store            *DurableActivityStore
+	Roster           *TeamRoster
+	Memory           *DurableMemoryStore
+	Governor         *PolicyGovernor
+	Journal          *DurableIntentJournal
+	Snapshotter      *WorkspaceSnapshotter
+	TestRunner       TestRunner
+	Provider         AgentProvider
+	Providers        map[string]AgentProvider
+	Reconciler       EffectReconciler
+	MaxRepair        int
+	MaxRevisions     int
+	MaxToolCalls     int
+	MaxReadFileLines int
+	MaxBudgetRetries int
+	Limits           ActivityLimits
+	lock             *WorkspaceLock
+	coordID          string
+	revisionCount    int
+	lastEvidence     *ValidationEvidence
+	sessions         map[string]AgentSession
+	Handoff          *HandoffBuilder
+	Capabilities     *CapabilityRegistry
 }
 
 func NewTeamCoordinator(
@@ -113,6 +114,7 @@ func NewTeamCoordinator(
 		MaxRevisions:     2,
 		MaxToolCalls:     10,
 		MaxReadFileLines: 300,
+		MaxBudgetRetries: 1,
 		coordID:          coordID,
 		Limits: ActivityLimits{
 			MaxModelTurns:       10,
@@ -221,7 +223,6 @@ func (c *TeamCoordinator) resolveProviderLocked(req *ActivityRequest) AgentProvi
 	return nil
 }
 
-
 // SetWorktreeManager sets the Git worktree manager for task isolation.
 func (c *TeamCoordinator) SetWorktreeManager(mgr *WorktreeManager) {
 	c.mu.Lock()
@@ -303,7 +304,6 @@ func (c *TeamCoordinator) resolveWorkspace(req *ActivityRequest) string {
 	}
 	return c.WorkspaceDir
 }
-
 
 // SubmitTask allows the human engineer to assign a feature request to the persistent team.
 func (c *TeamCoordinator) SubmitTask(objective string, budget Budget, inputs map[string]any) (*ActivityRequest, error) {
@@ -453,7 +453,6 @@ func (c *TeamCoordinator) SubmitTaskWithStrategy(
 	}
 }
 
-
 // Step processes the next claimable activity whose dependencies are satisfied.
 func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	if err := c.AcquireWorkspaceLock(); err != nil {
@@ -569,29 +568,57 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		MaxValidationOutput: 4096,
 		MaxRevisions:        c.MaxRevisions,
 	}
-	if c.Limits.MaxModelTurns > 0 { effectiveLimits.MaxModelTurns = c.Limits.MaxModelTurns }
-	if c.Limits.MaxToolCalls > 0 { effectiveLimits.MaxToolCalls = c.Limits.MaxToolCalls }
-	if c.Limits.MaxReadFileLines > 0 { effectiveLimits.MaxReadFileLines = c.Limits.MaxReadFileLines }
-	if c.Limits.MaxDiffLines > 0 { effectiveLimits.MaxDiffLines = c.Limits.MaxDiffLines }
+	if c.Limits.MaxModelTurns > 0 {
+		effectiveLimits.MaxModelTurns = c.Limits.MaxModelTurns
+	}
+	if c.Limits.MaxToolCalls > 0 {
+		effectiveLimits.MaxToolCalls = c.Limits.MaxToolCalls
+	}
+	if c.Limits.MaxReadFileLines > 0 {
+		effectiveLimits.MaxReadFileLines = c.Limits.MaxReadFileLines
+	}
+	if c.Limits.MaxDiffLines > 0 {
+		effectiveLimits.MaxDiffLines = c.Limits.MaxDiffLines
+	}
 	maxRevs := c.MaxRevisions
 	if c.Limits.MaxRevisions != 2 {
 		maxRevs = c.Limits.MaxRevisions
 	}
 	if profile.Limits != nil {
-		if profile.Limits.MaxModelTurns > 0 { effectiveLimits.MaxModelTurns = profile.Limits.MaxModelTurns }
-		if profile.Limits.MaxToolCalls > 0 { effectiveLimits.MaxToolCalls = profile.Limits.MaxToolCalls }
-		if profile.Limits.MaxReadFileLines > 0 { effectiveLimits.MaxReadFileLines = profile.Limits.MaxReadFileLines }
-		if profile.Limits.MaxDiffLines > 0 { effectiveLimits.MaxDiffLines = profile.Limits.MaxDiffLines }
-		if profile.Limits.MaxValidationOutput > 0 { effectiveLimits.MaxValidationOutput = profile.Limits.MaxValidationOutput }
+		if profile.Limits.MaxModelTurns > 0 {
+			effectiveLimits.MaxModelTurns = profile.Limits.MaxModelTurns
+		}
+		if profile.Limits.MaxToolCalls > 0 {
+			effectiveLimits.MaxToolCalls = profile.Limits.MaxToolCalls
+		}
+		if profile.Limits.MaxReadFileLines > 0 {
+			effectiveLimits.MaxReadFileLines = profile.Limits.MaxReadFileLines
+		}
+		if profile.Limits.MaxDiffLines > 0 {
+			effectiveLimits.MaxDiffLines = profile.Limits.MaxDiffLines
+		}
+		if profile.Limits.MaxValidationOutput > 0 {
+			effectiveLimits.MaxValidationOutput = profile.Limits.MaxValidationOutput
+		}
 		maxRevs = profile.Limits.MaxRevisions
 	}
 
 	if req.Limits != nil {
-		if req.Limits.MaxModelTurns > 0 { effectiveLimits.MaxModelTurns = req.Limits.MaxModelTurns }
-		if req.Limits.MaxToolCalls > 0 { effectiveLimits.MaxToolCalls = req.Limits.MaxToolCalls }
-		if req.Limits.MaxReadFileLines > 0 { effectiveLimits.MaxReadFileLines = req.Limits.MaxReadFileLines }
-		if req.Limits.MaxDiffLines > 0 { effectiveLimits.MaxDiffLines = req.Limits.MaxDiffLines }
-		if req.Limits.MaxValidationOutput > 0 { effectiveLimits.MaxValidationOutput = req.Limits.MaxValidationOutput }
+		if req.Limits.MaxModelTurns > 0 {
+			effectiveLimits.MaxModelTurns = req.Limits.MaxModelTurns
+		}
+		if req.Limits.MaxToolCalls > 0 {
+			effectiveLimits.MaxToolCalls = req.Limits.MaxToolCalls
+		}
+		if req.Limits.MaxReadFileLines > 0 {
+			effectiveLimits.MaxReadFileLines = req.Limits.MaxReadFileLines
+		}
+		if req.Limits.MaxDiffLines > 0 {
+			effectiveLimits.MaxDiffLines = req.Limits.MaxDiffLines
+		}
+		if req.Limits.MaxValidationOutput > 0 {
+			effectiveLimits.MaxValidationOutput = req.Limits.MaxValidationOutput
+		}
 		maxRevs = req.Limits.MaxRevisions
 	}
 
@@ -768,7 +795,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 	}
 
 	usage := session.Usage()
-	consumed := Budget{Consumed: float64(usage.TotalTokens)}
+	consumed := Budget{Consumed: usage.BilledConsumption()}
 
 	metrics := &ExecutionMetrics{
 		WallClockDuration:      time.Since(startWall),
@@ -779,6 +806,7 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		CompletionTokens:       usage.CompletionTokens,
 		ReasoningTokens:        usage.ReasoningTokens,
 		CachedTokens:           usage.CachedTokens,
+		BilledTokens:           usage.BilledTokens,
 		ReportedCostUSD:        usage.ReportedCostUSD,
 		TotalTokens:            usage.TotalTokens,
 		PeakContextTokens:      usage.PeakContextTokens,
@@ -834,6 +862,9 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			failResult.Outputs["failure_reason"] = "tool_limit_exhausted"
 		} else if errors.Is(err, ErrBudgetExceeded) {
 			failResult.Outputs["failure_reason"] = "budget_exhausted"
+			if rec, ok := c.maybeReallocateBudget(req, consumed.Consumed, &failResult); ok {
+				return rec, nil
+			}
 		}
 		_ = c.Store.FailWithResult(req.ID, failResult, err)
 		return nil, err
@@ -849,8 +880,15 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			Consumed: consumed,
 			Metrics:  metrics,
 			Outputs: map[string]any{
-				"error": overrunErr.Error(),
+				"error":             overrunErr.Error(),
+				"failure_reason":    "budget_exhausted",
+				"billed_tokens":     metrics.BilledTokens,
+				"total_tokens_host": metrics.TotalTokens,
+				"cached_tokens":     metrics.CachedTokens,
 			},
+		}
+		if rec, ok := c.maybeReallocateBudget(req, consumed.Consumed, &failResult); ok {
+			return rec, nil
 		}
 		_ = c.Store.FailWithResult(req.ID, failResult, overrunErr)
 		return nil, overrunErr
@@ -931,6 +969,23 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 
 			authReq, authErr := c.Governor.AuthorizeProposal(*req, prop, childID)
 			if authErr != nil {
+				// Explicit actionable terminal state: the delegation itself
+				// could not be funded. Record it on the lead activity instead
+				// of stranding it in-progress.
+				rejectResult := ActivityResult{
+					ID:       req.ID,
+					Status:   StatusFailed,
+					Consumed: consumed,
+					Metrics:  metrics,
+					Outputs: map[string]any{
+						"error":              authErr.Error(),
+						"failure_reason":     "budget_insufficient",
+						"rejected_agent":     prop.ProposedAgentID,
+						"rejected_objective": prop.Objective,
+						"guidance":           "propose a smaller-scope activity, reduce prior allocations, or escalate via governed_request_human_decision",
+					},
+				}
+				_ = c.Store.FailWithResult(req.ID, rejectResult, authErr)
 				return nil, fmt.Errorf("coordinator: proposal rejected by governor: %w", authErr)
 			}
 
@@ -976,7 +1031,6 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		}
 		_ = c.Store.Complete(req.ID, *result)
 
-
 	} else if !isReviewerRole {
 		// Specialist implementer: deterministic native testing and evidence collection
 		beforeSnapshot, err := c.Snapshotter.ComputeSnapshot(activeWorkspace)
@@ -1008,11 +1062,13 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		if exitCode != 0 {
 			repaired := false
 			repairAttempts := 0
+			var repairErr error
 			for repairAttempts < c.MaxRepair {
 				repairAttempts++
 				repairPrompt := fmt.Sprintf("Tests failed with exit code %d:\n%s\nPlease fix the failure in the workspace and ensure all tests pass.", exitCode, testOut)
 				_, rErr := session.Send(ctx, repairPrompt)
 				if rErr != nil {
+					repairErr = rErr
 					break
 				}
 
@@ -1035,6 +1091,38 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 			}
 
 			if !repaired {
+				// Budget exhaustion during repair is a budget outcome, not a
+				// coding failure: route it through recovery/terminal budget
+				// handling instead of mislabeling it as failed tests.
+				if repairErr != nil && errors.Is(repairErr, ErrBudgetExceeded) {
+					repUsage := session.Usage()
+					repConsumed := Budget{Consumed: repUsage.BilledConsumption()}
+					metrics.PromptTokens = repUsage.PromptTokens
+					metrics.CompletionTokens = repUsage.CompletionTokens
+					metrics.CachedTokens = repUsage.CachedTokens
+					metrics.BilledTokens = repUsage.BilledTokens
+					metrics.TotalTokens = repUsage.TotalTokens
+					metrics.OverrunTokens = repUsage.OverrunTokens
+					if c.Governor != nil {
+						c.Governor.RecordConsumption(req.ID, rootID, repConsumed.Consumed-consumed.Consumed)
+						consumed = repConsumed
+					}
+					budgetFail := ActivityResult{
+						ID:       req.ID,
+						Status:   StatusFailed,
+						Consumed: repConsumed,
+						Metrics:  metrics,
+						Outputs: map[string]any{
+							"error":          repairErr.Error(),
+							"failure_reason": "budget_exhausted",
+						},
+					}
+					if rec, ok := c.maybeReallocateBudget(req, repConsumed.Consumed, &budgetFail); ok {
+						return rec, nil
+					}
+					_ = c.Store.FailWithResult(req.ID, budgetFail, repairErr)
+					return nil, repairErr
+				}
 				failErr := fmt.Errorf("tests failed with exit code %d after %d repairs: %s", exitCode, repairAttempts, testOut)
 				_ = c.Store.Fail(req.ID, failErr)
 				if c.WorktreeMgr != nil {
@@ -1088,7 +1176,6 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		}
 
 		_ = c.Store.Complete(req.ID, *result)
-
 
 	} else {
 		// Reviewer verification: Fail-Closed Contract
@@ -1582,6 +1669,95 @@ func (c *TeamCoordinator) parseTextDirectives(
 // createDisposableReviewWorkspace provisions an isolated, disposable copy of the workspace
 // specifically for reviewer execution. This ensures the authoritative implementation worktree
 // is never modified, reset, or cleaned as a side-effect of reviewing.
+// maybeReallocateBudget performs one bounded, explicit recovery from budget
+// exhaustion on a CHILD activity: if the parent still has capacity and the
+// activity has not used up its budget retries, the activity is requeued with
+// an enlarged viable allocation (drawn from the parent's remaining budget,
+// never implicitly granted). The workspace is preserved so completed work
+// counts toward the retried attempt. Returns the recovery result when the
+// activity was requeued; ok=false means the failure is terminal and must be
+// recorded by the caller with the explicit budget-exhaustion state.
+func (c *TeamCoordinator) maybeReallocateBudget(req *ActivityRequest, consumed float64, fail *ActivityResult) (*ActivityResult, bool) {
+	if c.Governor == nil || c.MaxBudgetRetries <= 0 {
+		return nil, false
+	}
+	if req.ParentID == "" || req.ParentID == req.ID {
+		// Root activities are bounded by the human-set task budget; never
+		// extend them implicitly. Only children can draw on a parent.
+		return nil, false
+	}
+	retries := 0
+	if req.Inputs != nil {
+		switch v := req.Inputs["budget_retries"].(type) {
+		case int:
+			retries = v
+		case float64:
+			retries = int(v)
+		}
+	}
+	if retries >= c.MaxBudgetRetries {
+		return nil, false
+	}
+
+	floor := c.Governor.MinChildBudget()
+	if floor <= 0 {
+		floor = DefaultMinChildBudgetTokens
+	}
+	reserve := c.Governor.ParentReserve()
+	parentAvail := c.Governor.AvailableFor(req.ParentID)
+	if parentAvail <= 0 {
+		return nil, false
+	}
+
+	newAlloc := req.Budget.Allocated * 2
+	if newAlloc < floor {
+		newAlloc = floor
+	}
+	if headroom := parentAvail - reserve; newAlloc > headroom {
+		newAlloc = headroom
+	}
+	if newAlloc < floor {
+		return nil, false
+	}
+
+	if err := c.Governor.ReallocateChild(req.ParentID, req.ID, newAlloc); err != nil {
+		return nil, false
+	}
+
+	retried := *req
+	retried.Budget = Budget{Allocated: newAlloc}
+	if retried.Inputs == nil {
+		retried.Inputs = map[string]any{}
+	}
+	retried.Inputs["budget_retries"] = retries + 1
+	retried.Inputs["budget_reallocation"] = fmt.Sprintf(
+		"attempt %d exhausted %.0f of %.0f tokens; reallocated to %.0f from parent %s",
+		retries+1, consumed, req.Budget.Allocated, newAlloc, req.ParentID)
+	if err := c.Store.Requeue(retried); err != nil {
+		return nil, false
+	}
+
+	if fail != nil {
+		fail.Outputs["recovery"] = "budget_reallocation"
+		fail.Outputs["reallocated_to"] = newAlloc
+		fail.Outputs["budget_retries"] = retries + 1
+	}
+	return &ActivityResult{
+		ID:       req.ID,
+		Status:   StatusPending,
+		Consumed: Budget{Consumed: consumed},
+		Metrics:  fail.Metrics,
+		Outputs: map[string]any{
+			"failure_reason": "budget_exhausted",
+			"recovery":       "budget_reallocation",
+			"reallocated_to": newAlloc,
+			"budget_retries": retries + 1,
+			"note":           "activity requeued with viable reallocated budget; workspace progress preserved",
+			"previous_error": fail.Outputs["error"],
+		},
+	}, true
+}
+
 func (c *TeamCoordinator) createDisposableReviewWorkspace(src string, taskID string) (string, func(), error) {
 	if src == "" {
 		src = "."

@@ -1,0 +1,85 @@
+● skill(test-discipline)
+
+Squad v1.0.0-build.1 — Runtime Engineer is on it, and I’ll keep the change focused on `sched.go` plus targeted tests.
+
+💡 Say "squad commands" to see what I can do.
+
+● Read team.md
+  │ .squad/team.md
+  └ 24 lines read
+
+● Read routing.md
+  │ .squad/routing.md
+  └ 45 lines read
+
+● Read config.json
+  │ .squad/config.json
+  └ 4 lines read
+
+● Read registry.json
+  │ .squad/casting/registry.json
+  └ 54 lines read
+
+● Get user and date (shell)
+  │ git config user.name || true; date +"%Y-%m-%dT%H:%M:%S%z"
+  └ 2 lines…
+
+🔧 lead — implementing interval algebra and focused unit coverage in the `sched` package.
+
+Implemented interval algebra in `sched`.
+
+Files changed:
+- `sched.go`: added `Merge`, `Total`, `Subtract`, and `Complement`.
+- `sched_test.go`: added unit tests covering empty inputs, invalid intervals, touching/overlap merging, containment, full coverage, and non-overlap cases.
+
+Verification:
+- `go test ./...` passes.● General-purpose (model: gpt-5.5) 🏗️ lead: Implement interval algebra                           41s
+  │ Implemented interval algebra in `sched`.
+  │ Format test and show diff (shell)
+  │   │ gofmt -w sched.go sched_test.go && go test ./... && git --no-pager diff -- sched.go
+  │   │ sched_test.go
+  │   └ 300 lines…
+  └ Show changed files (shell)
+      │ git --no-pager status --short -- sched.go sched_test.go
+      └ 2 lines…
+
+The implementation is in place; I’m doing a final diff check and test run before closing.
+
+● Show sched diff (shell)
+  │ git --no-pager diff -- sched.go sched_test.go
+  └ 299 lines…
+
+● Run Go tests (shell)
+  │ go test ./...
+  └ 1 line…
+
+● Read sched.go
+  └ L1:150 (130 lines read)
+
+● Read sched_test.go
+  └ L1:260 (234 lines read)
+
+● Show git status (shell)
+  │ git --no-pager status --short
+  └ 9 lines…
+
+● Format and diff check (shell)
+  │ gofmt -w sched.go sched_test.go && git --no-pager diff --check -- sched.go sched_test.go
+  └ No Content
+
+● Run final Go tests (shell)
+  │ go test ./...
+  └ 1 line…
+
+Implemented interval algebra in `sched.go` with exported `Merge`, `Total`, `Subtract`, and `Complement` functions matching the requested half-open interval contract.
+
+Added focused unit coverage in `sched_test.go` for empty/all-invalid inputs, touching interval merge behavior, overlap/containment, full coverage, invalid bases/universes, non-overlapping intervals, and complement gaps.
+
+**Validation:** `go test ./...` passes.
+
+
+
+Changes    +276 -1
+AI Credits 70.05 (1m 19s)
+Tokens     ↑ 511.4k (451.6k cached) • ↓ 5.9k (1.2k reasoning)
+Resume     copilot --resume=0f1ed4f5-64a9-40ef-9b09-64a5172e3be5

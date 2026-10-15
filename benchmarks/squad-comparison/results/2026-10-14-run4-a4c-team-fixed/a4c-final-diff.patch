@@ -1,0 +1,299 @@
+diff --git a/sched.go b/sched.go
+index 5307b5c..99af376 100644
+--- a/sched.go
++++ b/sched.go
+@@ -35,3 +35,90 @@ func SortIntervals(ivs []Interval) []Interval {
+ 	})
+ 	return out
+ }
++
++// Merge returns sorted valid intervals with overlapping or touching ranges combined.
++func Merge(ivs []Interval) []Interval {
++	valid := make([]Interval, 0, len(ivs))
++	for _, iv := range ivs {
++		if iv.IsValid() {
++			valid = append(valid, iv)
++		}
++	}
++	if len(valid) == 0 {
++		return []Interval{}
++	}
++
++	sorted := SortIntervals(valid)
++	merged := make([]Interval, 0, len(sorted))
++	cur := sorted[0]
++	for _, next := range sorted[1:] {
++		if cur.To >= next.From {
++			if next.To > cur.To {
++				cur.To = next.To
++			}
++			continue
++		}
++		merged = append(merged, cur)
++		cur = next
++	}
++	merged = append(merged, cur)
++	return merged
++}
++
++// Total returns the total duration in minutes covered by valid intervals.
++func Total(ivs []Interval) int {
++	total := 0
++	for _, iv := range Merge(ivs) {
++		total += iv.To - iv.From
++	}
++	return total
++}
++
++// Subtract returns the valid parts of base not covered by any valid interval in others.
++func Subtract(base Interval, others []Interval) []Interval {
++	if !base.IsValid() {
++		return []Interval{}
++	}
++
++	clipped := make([]Interval, 0, len(others))
++	for _, other := range others {
++		if !other.IsValid() || !base.Overlaps(other) {
++			continue
++		}
++		from := other.From
++		if from < base.From {
++			from = base.From
++		}
++		to := other.To
++		if to > base.To {
++			to = base.To
++		}
++		if from < to {
++			clipped = append(clipped, Interval{From: from, To: to})
++		}
++	}
++
++	covered := Merge(clipped)
++	gaps := make([]Interval, 0, len(covered)+1)
++	cursor := base.From
++	for _, cover := range covered {
++		if cursor < cover.From {
++			gaps = append(gaps, Interval{From: cursor, To: cover.From})
++		}
++		if cursor < cover.To {
++			cursor = cover.To
++		}
++		if cursor >= base.To {
++			return gaps
++		}
++	}
++	if cursor < base.To {
++		gaps = append(gaps, Interval{From: cursor, To: base.To})
++	}
++	return gaps
++}
++
++// Complement returns the sorted gaps inside universe not covered by valid intervals.
++func Complement(ivs []Interval, universe Interval) []Interval {
++	return Subtract(universe, ivs)
++}
+diff --git a/sched_test.go b/sched_test.go
+index d09ecb4..47a894c 100644
+--- a/sched_test.go
++++ b/sched_test.go
+@@ -1,6 +1,9 @@
+ package sched
+ 
+-import "testing"
++import (
++	"reflect"
++	"testing"
++)
+ 
+ func TestIsValid(t *testing.T) {
+ 	cases := []struct {
+@@ -41,12 +44,182 @@ func TestOverlaps(t *testing.T) {
+ func TestSortIntervals(t *testing.T) {
+ 	got := SortIntervals([]Interval{{30, 40}, {0, 10}, {0, 5}})
+ 	want := []Interval{{0, 5}, {0, 10}, {30, 40}}
+-	if len(got) != len(want) {
+-		t.Fatalf("SortIntervals returned %v, want %v", got, want)
++	assertIntervals(t, "SortIntervals", got, want)
++}
++
++func TestMerge(t *testing.T) {
++	cases := []struct {
++		name string
++		ivs  []Interval
++		want []Interval
++	}{
++		{
++			name: "empty",
++			ivs:  nil,
++			want: []Interval{},
++		},
++		{
++			name: "all invalid",
++			ivs:  []Interval{{10, 10}, {-1, 5}, {5, 1441}},
++			want: []Interval{},
++		},
++		{
++			name: "unsorted overlapping and touching",
++			ivs:  []Interval{{30, 40}, {0, 10}, {10, 20}, {15, 35}, {50, 60}},
++			want: []Interval{{0, 40}, {50, 60}},
++		},
++		{
++			name: "same from sorted by to before merge",
++			ivs:  []Interval{{0, 30}, {0, 10}, {40, 50}},
++			want: []Interval{{0, 30}, {40, 50}},
++		},
+ 	}
+-	for i := range want {
+-		if got[i] != want[i] {
+-			t.Fatalf("SortIntervals returned %v, want %v", got, want)
+-		}
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			original := append([]Interval(nil), c.ivs...)
++			got := Merge(c.ivs)
++			assertIntervals(t, "Merge", got, c.want)
++			assertIntervals(t, "input after Merge", c.ivs, original)
++		})
++	}
++}
++
++func TestTotal(t *testing.T) {
++	cases := []struct {
++		name string
++		ivs  []Interval
++		want int
++	}{
++		{
++			name: "empty",
++			ivs:  nil,
++			want: 0,
++		},
++		{
++			name: "all invalid",
++			ivs:  []Interval{{5, 5}, {30, 20}},
++			want: 0,
++		},
++		{
++			name: "overlapping union counted once",
++			ivs:  []Interval{{10, 30}, {20, 40}, {50, 55}, {55, 60}, {0, 1441}},
++			want: 40,
++		},
++	}
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			if got := Total(c.ivs); got != c.want {
++				t.Fatalf("Total(%v) = %d, want %d", c.ivs, got, c.want)
++			}
++		})
++	}
++}
++
++func TestSubtract(t *testing.T) {
++	cases := []struct {
++		name   string
++		base   Interval
++		others []Interval
++		want   []Interval
++	}{
++		{
++			name:   "invalid base",
++			base:   Interval{10, 10},
++			others: []Interval{{0, 20}},
++			want:   []Interval{},
++		},
++		{
++			name:   "no others",
++			base:   Interval{10, 20},
++			others: nil,
++			want:   []Interval{{10, 20}},
++		},
++		{
++			name:   "ignore invalid and outside others",
++			base:   Interval{10, 20},
++			others: []Interval{{0, 10}, {20, 30}, {12, 12}, {-1, 15}},
++			want:   []Interval{{10, 20}},
++		},
++		{
++			name:   "containment fully covered",
++			base:   Interval{10, 20},
++			others: []Interval{{0, 30}},
++			want:   []Interval{},
++		},
++		{
++			name:   "partial coverage with multiple gaps",
++			base:   Interval{0, 100},
++			others: []Interval{{80, 90}, {10, 20}, {15, 30}, {50, 60}, {100, 120}},
++			want:   []Interval{{0, 10}, {30, 50}, {60, 80}, {90, 100}},
++		},
++		{
++			name:   "touching covered intervals are canonical",
++			base:   Interval{0, 50},
++			others: []Interval{{10, 20}, {20, 30}},
++			want:   []Interval{{0, 10}, {30, 50}},
++		},
++	}
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			original := append([]Interval(nil), c.others...)
++			got := Subtract(c.base, c.others)
++			assertIntervals(t, "Subtract", got, c.want)
++			assertIntervals(t, "input after Subtract", c.others, original)
++		})
++	}
++}
++
++func TestComplement(t *testing.T) {
++	cases := []struct {
++		name     string
++		ivs      []Interval
++		universe Interval
++		want     []Interval
++	}{
++		{
++			name:     "invalid universe",
++			ivs:      []Interval{{0, 10}},
++			universe: Interval{20, 20},
++			want:     []Interval{},
++		},
++		{
++			name:     "empty intervals returns universe",
++			ivs:      nil,
++			universe: Interval{0, 10},
++			want:     []Interval{{0, 10}},
++		},
++		{
++			name:     "fully covered",
++			ivs:      []Interval{{0, 5}, {5, 10}},
++			universe: Interval{0, 10},
++			want:     []Interval{},
++		},
++		{
++			name:     "unsorted intervals with multiple gaps",
++			ivs:      []Interval{{90, 110}, {10, 20}, {40, 70}, {15, 30}, {120, 130}},
++			universe: Interval{0, 100},
++			want:     []Interval{{0, 10}, {30, 40}, {70, 90}},
++		},
++		{
++			name:     "ignore invalid and outside intervals",
++			ivs:      []Interval{{0, 10}, {20, 30}, {12, 12}, {1440, 1500}},
++			universe: Interval{10, 20},
++			want:     []Interval{{10, 20}},
++		},
++	}
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			original := append([]Interval(nil), c.ivs...)
++			got := Complement(c.ivs, c.universe)
++			assertIntervals(t, "Complement", got, c.want)
++			assertIntervals(t, "input after Complement", c.ivs, original)
++		})
++	}
++}
++
++func assertIntervals(t *testing.T, name string, got, want []Interval) {
++	t.Helper()
++	if !reflect.DeepEqual(got, want) {
++		t.Fatalf("%s returned %v, want %v", name, got, want)
+ 	}
+ }

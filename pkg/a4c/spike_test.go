@@ -257,14 +257,16 @@ func TestSpike_05_DynamicDispatch(t *testing.T) {
 		AgentID:   "architect",
 		Objective: "Decompose epic",
 		Budget: spike.Budget{
-			Allocated: 50000,
+			Allocated: 200000,
 			Reserved:  0,
 			Consumed:  5000,
 		},
 	}
 	_ = store.Enqueue(parent)
 
-	// Architect discovers 5 subtasks dynamically
+	// Architect discovers 5 subtasks dynamically. The architect under-requests
+	// (5k each); the governor must raise each proposal to the viable minimum
+	// because the parent is sized to fund viable children.
 	for i := 1; i <= 5; i++ {
 		proposal := spike.ActivityProposal{
 			ProposedAgentID: "coder",
@@ -275,6 +277,14 @@ func TestSpike_05_DynamicDispatch(t *testing.T) {
 		childReq, err := gov.AuthorizeProposal(parent, proposal, fmt.Sprintf("subtask-%d", i))
 		if err != nil {
 			t.Fatalf("failed to authorize proposal %d: %v", i, err)
+		}
+		if childReq.Budget.Allocated != spike.DefaultMinChildBudgetTokens {
+			t.Fatalf("proposal %d: expected viable floor %.0f, got %.0f",
+				i, spike.DefaultMinChildBudgetTokens, childReq.Budget.Allocated)
+		}
+		if childReq.Inputs["budget_adjusted_from"] != float64(5000) {
+			t.Fatalf("proposal %d: expected budget_adjusted_from=5000, got %v",
+				i, childReq.Inputs["budget_adjusted_from"])
 		}
 
 		if err := store.Enqueue(*childReq); err != nil {

@@ -1,0 +1,146 @@
+{
+  "task_id": "task-1792026681048789000",
+  "original_objective": "Implement interval algebra in the `sched` package of this repository (sched.go).\n\nAdd these exported functions with exactly these signatures:\n\n    func Merge(ivs []Interval) []Interval\n    func Total(ivs []Interval) int\n    func Subtract(base Interval, others []Interval) []Interval\n    func Complement(ivs []Interval, universe Interval) []Interval\n\nBehavior contract (intervals are half-open [From, To) minute ranges):\n\n- Merge returns the canonical merged form: sorted by From, with overlapping\n  or touching intervals combined (two intervals touch when one's To equals\n  the other's From; touching intervals merge into one). Invalid intervals\n  (per Interval.IsValid) are ignored. Empty input (or all-invalid input)\n  returns an empty slice.\n- Total returns the number of minutes covered by the union of ivs, counting\n  overlapping regions once. Invalid intervals are ignored. Returns 0 for\n  empty input.\n- Subtract returns the parts of `base` not covered by any interval in\n  `others`, as canonical intervals sorted by From. If base is fully\n  covered, return an empty slice. If base is invalid, return an empty\n  slice. Entries of `others` that do not overlap base are ignored;\n  invalid entries in `others` are ignored.\n- Complement returns the gaps within `universe` not covered by ivs, as\n  canonical intervals sorted by From. If universe is invalid, return an\n  empty slice. Invalid entries in ivs are ignored. If ivs fully cover\n  universe, return an empty slice.\n\nExtend the package's test files with unit tests covering the new functions,\nincluding edge cases (empty inputs, touching intervals, full coverage,\ncontainment). Run `go test ./...` and make sure everything passes before\nfinishing. Keep changes limited to what this task requires. Do not ask\nquestions — make reasonable decisions and proceed.",
+  "strategy": "team",
+  "created_at": "2026-10-14T22:11:21.095645-03:00",
+  "allocated_budget": 500000,
+  "consumed_budget": 114729,
+  "status": "completed",
+  "branch": "a4c/task-1792026681048789000",
+  "participating_agents": [
+    "lead",
+    "coder",
+    "reviewer"
+  ],
+  "activities": [
+    {
+      "activity_id": "task-1792026681048789000",
+      "agent_id": "lead",
+      "objective": "Implement interval algebra in the `sched` package of this repository (sched.go).\n\nAdd these exported functions with exactly these signatures:\n\n    func Merge(ivs []Interval) []Interval\n    func Total(ivs []Interval) int\n    func Subtract(base Interval, others []Interval) []Interval\n    func Complement(ivs []Interval, universe Interval) []Interval\n\nBehavior contract (intervals are half-open [From, To) minute ranges):\n\n- Merge returns the canonical merged form: sorted by From, with overlapping\n  or touching intervals combined (two intervals touch when one's To equals\n  the other's From; touching intervals merge into one). Invalid intervals\n  (per Interval.IsValid) are ignored. Empty input (or all-invalid input)\n  returns an empty slice.\n- Total returns the number of minutes covered by the union of ivs, counting\n  overlapping regions once. Invalid intervals are ignored. Returns 0 for\n  empty input.\n- Subtract returns the parts of `base` not covered by any interval in\n  `others`, as canonical intervals sorted by From. If base is fully\n  covered, return an empty slice. If base is invalid, return an empty\n  slice. Entries of `others` that do not overlap base are ignored;\n  invalid entries in `others` are ignored.\n- Complement returns the gaps within `universe` not covered by ivs, as\n  canonical intervals sorted by From. If universe is invalid, return an\n  empty slice. Invalid entries in ivs are ignored. If ivs fully cover\n  universe, return an empty slice.\n\nExtend the package's test files with unit tests covering the new functions,\nincluding edge cases (empty inputs, touching intervals, full coverage,\ncontainment). Run `go test ./...` and make sure everything passes before\nfinishing. Keep changes limited to what this task requires. Do not ask\nquestions — make reasonable decisions and proceed.",
+      "status": "completed",
+      "budget_used": 30590,
+      "outputs": {
+        "session_id": "e41b5239-075a-4220-83a6-724afeb5e1c6",
+        "summary": "I’ll inspect the existing `sched` package shape, then delegate the implementation and verification as required.The package is small and self-contained; I’m delegating a surgical implementation plus tests, followed by independent review.I’ll check the resulting files to confirm the delegated implementation landed and matches the requested surface.**Blocked:** I delegated the interval algebra implementation to `coder` and review to `reviewer`, but the repository files are still unchanged after inspection. I do not have a permitted direct edit tool in this role, so I cannot apply the code changes myself.\n\nCurrent state: `sched.go` still only contains `Interval`, `IsValid`, `Overlaps`, and `SortIntervals`; `sched_test.go` still only tests those existing functions."
+      },
+      "metrics": {
+        "wall_clock_duration": 29667082375,
+        "provider_wait_duration": 29600617208,
+        "model_duration": 29600617208,
+        "tool_duration": 66462209,
+        "prompt_tokens": 28462,
+        "completion_tokens": 2128,
+        "total_tokens": 30590,
+        "peak_context_tokens": 7588,
+        "reasoning_tokens": 596,
+        "cached_tokens": 19456,
+        "reported_cost_usd": 37.5,
+        "model_invocations": 1,
+        "tool_calls": 0,
+        "file_reads_count": 4
+      },
+      "capability_profile": {
+        "id": "profile-architecture-investigation",
+        "name": "Architecture Investigation",
+        "description": "Read-only file inspection, activity delegation, and memory proposals.",
+        "allowed_tools": [
+          "governed_read_file",
+          "governed_propose_activity",
+          "governed_request_human_decision",
+          "governed_propose_memory"
+        ],
+        "budget": {
+          "allocated": 0,
+          "reserved": 0,
+          "consumed": 0
+        }
+      },
+      "created_at": "2026-10-14T22:11:21.095645-03:00"
+    },
+    {
+      "activity_id": "task-1792026681048789000-sub-1",
+      "parent_id": "task-1792026681048789000",
+      "agent_id": "coder",
+      "objective": "Implement interval algebra in the Go `sched` package. Current files: `sched.go` defines package sched, imports `sort`, type `Interval { From int; To int }`, methods `IsValid()` requiring `0 \u003c= From \u003c To \u003c= 1440`, `Overlaps`, and `SortIntervals` returning a sorted copy. `sched_test.go` currently tests `IsValid`, `Overlaps`, and `SortIntervals`.\n\nAdd exactly these exported functions to `sched.go`:\n\nfunc Merge(ivs []Interval) []Interval\nfunc Total(ivs []Interval) int\nfunc Subtract(base Interval, others []Interval) []Interval\nfunc Complement(ivs []Interval, universe Interval) []Interval\n\nBehavior contract:\n- Intervals are half-open [From, To) minute ranges.\n- Merge returns canonical merged form: sorted by From, with overlapping OR touching intervals combined (`prev.To == next.From` merges). Invalid intervals per `Interval.IsValid` are ignored. Empty/all-invalid returns empty slice.\n- Total returns minutes covered by the union, counting overlaps once; ignore invalids; 0 for empty.\n- Subtract returns parts of valid `base` not covered by valid intervals in `others`, canonical sorted. Ignore invalid `others` and entries that do not overlap base. If base invalid or fully covered, empty slice.\n- Complement returns gaps within valid `universe` not covered by `ivs`, canonical sorted. If universe invalid or fully covered, empty. Ignore invalid ivs.\n\nImplementation guidance: keep changes limited. Reuse `Merge` where appropriate. Preserve type safety and existing style. Avoid mutating input slices unexpectedly; `SortIntervals` already copies, and `Merge` should return new intervals. Canonical output should not include invalid or zero-length intervals. Consider clipping coverage to `base`/`universe` for subtract/complement before merging, so intervals extending beyond the range are handled correctly if valid.\n\nExtend tests in `sched_test.go` with unit tests covering all new functions and edge cases: empty input, all invalid, touching merge, overlapping merge, containment, invalid filtering, total with overlaps/touching, subtract no overlap/full coverage/partial split/touching/invalid base/containment/invalid others, complement empty/full coverage/gaps/touching/invalid universe/invalid ivs and coverage extending beyond universe. Use simple equality helpers or `reflect.DeepEqual`.\n\nRun `go test ./...` and report the exact result. Do not make unrelated changes.",
+      "status": "failed",
+      "budget_used": 84139,
+      "error": "governance: requested budget exceeds parent allocation: session consumed 84139 tokens exceeds allocated 4000",
+      "outputs": {
+        "error": "governance: requested budget exceeds parent allocation: session consumed 84139 tokens exceeds allocated 4000",
+        "failure_reason": "budget_exhausted"
+      },
+      "metrics": {
+        "wall_clock_duration": 24952721208,
+        "provider_wait_duration": 24952713958,
+        "model_duration": 24952713958,
+        "tool_duration": 0,
+        "prompt_tokens": 81983,
+        "completion_tokens": 2156,
+        "total_tokens": 84139,
+        "peak_context_tokens": 15229,
+        "overrun_tokens": 80139,
+        "reasoning_tokens": 376,
+        "cached_tokens": 69632,
+        "reported_cost_usd": 45,
+        "model_invocations": 1,
+        "tool_calls": 0
+      },
+      "capability_profile": {
+        "id": "profile-code-implementation",
+        "name": "Code Implementation",
+        "description": "Targeted file inspection, file modification in worktree, and memory proposals.",
+        "allowed_tools": [
+          "governed_read_file",
+          "governed_apply_patch",
+          "governed_propose_memory"
+        ],
+        "budget": {
+          "allocated": 0,
+          "reserved": 0,
+          "consumed": 0
+        }
+      },
+      "created_at": "2026-10-14T22:11:52.142631-03:00"
+    },
+    {
+      "activity_id": "task-1792026681048789000-sub-2",
+      "parent_id": "task-1792026681048789000",
+      "agent_id": "reviewer",
+      "objective": "Review the coder's changes for the interval algebra task in package `sched`. Verify that `sched.go` exports exactly `Merge`, `Total`, `Subtract`, and `Complement` with the requested signatures and behavior; invalid intervals are ignored where specified; touching intervals merge in `Merge`; outputs are canonical sorted non-overlapping intervals; inputs are not unexpectedly mutated; subtract/complement correctly clip coverage to base/universe; edge cases are covered by tests. Run or confirm `go test ./...` and report any issues requiring fixes, or approval if clean.",
+      "depends_on": [
+        "task-1792026681048789000-sub-1"
+      ],
+      "status": "pending",
+      "budget_used": 0,
+      "capability_profile": {
+        "id": "profile-independent-review",
+        "name": "Independent Review",
+        "description": "Read-only inspection of diffs and evidence, and review submission. Mutation strictly prohibited.",
+        "allowed_tools": [
+          "governed_read_file",
+          "governed_submit_review"
+        ],
+        "budget": {
+          "allocated": 0,
+          "reserved": 0,
+          "consumed": 0
+        }
+      },
+      "created_at": "2026-10-14T22:11:52.156517-03:00"
+    }
+  ],
+  "metrics_summary": {
+    "wall_clock_duration": 54619803583,
+    "provider_wait_duration": 54553331166,
+    "model_duration": 54553331166,
+    "tool_duration": 66462209,
+    "prompt_tokens": 110445,
+    "completion_tokens": 4284,
+    "total_tokens": 114729,
+    "overrun_tokens": 80139,
+    "model_invocations": 2,
+    "tool_calls": 0,
+    "file_reads_count": 4
+  },
+  "final_outcome": "Task failed: governance: requested budget exceeds parent allocation: session consumed 84139 tokens exceeds allocated 4000"
+}

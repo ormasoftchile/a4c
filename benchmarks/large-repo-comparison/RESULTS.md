@@ -198,27 +198,64 @@ Raw evidence: `results/2026-10-15-large-repo-team-rerun/`.
 
 ---
 
-## 9. Direct ranking (completed, correct work)
+## 9. Ranking
 
-1. **A4C Direct** — independently verified PASS at the lowest cost (481 credits), lowest input (6.2M), and shortest wall time (23 min). Minimal, correct, tested fix.
-2. **Squad** — independently verified PASS, with genuine reviewer-driven recovery, but at 1.83× the cost and 2.6× the wall time of Direct. Coordinator overhead is no longer the majority of the run but remains substantial in absolute terms.
-3. **A4C Team** — FAIL. No implementation produced. Lead terminated without delegation. Not an economic victory at any cost.
+**Pre-fix (original three-way run):**
+
+1. **A4C Direct** — PASS, 481 credits, 23 min.
+2. **Squad** — PASS, 879 credits, 59 min, reviewer-driven recovery.
+3. **A4C Team** — FAIL. Lead terminated without delegation (coordination bug, since fixed).
+
+**Post-fix team re-run (same task/commit/model):**
+
+Team mode now delegates and produces an acceptance-passing implementation
+(PASS 5/5) at 367 credits / 12 min. That is still **above A4C Direct**
+(481 credits / 23 min — wait, Direct was 481; team re-run was 367, so team
+is actually *cheaper* than Direct on this re-run but with a coder budget
+overrun and no completed review). Comparing verified outcomes:
+
+| Configuration | Acceptance | AI credits | Wall | Notes |
+|---|---|---:|---:|---|
+| A4C Direct (run1) | PASS 5/5 | 481 | 23 min | clean single-session completion |
+| A4C Team (re-run, post-fix) | PASS 5/5 | 367 | 12 min | lead+coder; coder budget overrun after valid fix; reviewer pending |
+| Squad (run1) | PASS 5/5 | 879 | 59 min | full review completed |
+
+On this single re-run, Team is cheaper than Direct — but the coder activity
+failed its budget and the reviewer never ran, so the "PASS" is
+implementation-only (worktree correct; full team lifecycle incomplete).
+Direct remains the only configuration that completed the entire intended
+workflow cleanly. One re-run is not enough to overturn the economic
+conclusion; it does prove the coordination defect is fixed.
 
 ---
 
 ## Final answer
 
-**On a real, large codebase with a demanding cross-component engineering task:**
+**On a real, large codebase with a demanding cross-component engineering task (pre-fix run):**
 
-- **Does A4C Team provide better coding outcomes per unit of token cost than Squad?** No. A4C Team failed to produce any implementation (lead did not delegate). Squad completed and passed. On this run Team is not a viable competitor at any cost.
-- **Does Team's additional coordination justify its cost relative to A4C Direct?** No. Direct beat both multi-agent systems on independently verified correctness per unit consumption. Team added coordination overhead (41 credits of pure lead planning) and destroyed the outcome. Squad added a coordinator (123 credits) that bought reviewer-driven hang recovery — real value, but not enough to overcome Direct's 1.83× cost advantage on this task.
+- **Does A4C Team provide better coding outcomes per unit of token cost than Squad?** No. Pre-fix Team produced zero implementation; Squad completed and passed.
+- **Does Team's coordination justify its cost vs Direct?** Pre-fix, no. Direct beat both multi-agent systems.
 
-**If Direct beats both multi-agent systems again — yes, it did.** Additional orchestration was not economically justified for this task. The multi-agent systems' coordination costs (and in Team's case, a delegation failure) outweighed their benefits when a single competent session could locate, fix, and verify the defect.
+**Post-repair re-run:** Team's coordination defect is fixed — the lead
+delegates, the coder implements, and hidden acceptance passes 5/5. The
+failure mode that destroyed the original Team run (lead completes with
+zero children after tool-cap exhaustion) no longer occurs; tool-limit hits
+are now visible in metrics and coordination tools remain available.
 
-**If Squad produces a better result — it did not produce a better result.** It produced an equally correct result at higher cost. Its only unique advantage was catching a self-inflicted test hang during its own run — a recovery capability that A4C Direct did not need because it did not introduce the hang.
+Remaining economic caveat: Direct still completed the *full* intended
+workflow (implement + verify + handoff for human review) in one clean
+session. Team's re-run left the coder over budget and the reviewer
+unstarted, so its lower credit count is not a like-for-like lifecycle
+completion. On a single sample, Direct remains the safest economically
+verified winner; Team is no longer disqualified.
 
-**If A4C loses — A4C Team loses.** Direct wins. Team's failure mode here (lead terminates without spawning a coder on an unfamiliar large codebase) is a distinct, non-budget coordination defect that should be investigated separately — outside this benchmark, per execution discipline.
+**If A4C loses — the original A4C Team lost; it has since been repaired.**
+Direct still wins on lifecycle completeness. Squad still costs ~2× Direct
+for an equivalent result.
 
 ---
 
-*Evidence: `results/2026-10-15-large-repo-run1/` — raw usage events, per-run acceptance logs, final diffs, task inspect JSON, run metadata. Measurement: Copilot CLI `assistant_usage_events` (host-reported), filtered by working-directory watermark; models verified `gpt-5.5` on all 287 events.*
+*Evidence: `results/2026-10-15-large-repo-run1/` (three-way) and
+`results/2026-10-15-large-repo-team-rerun/` (post-fix team). Measurement:
+Copilot CLI `assistant_usage_events` (host-reported), filtered by
+working-directory watermark; models verified `gpt-5.5`.*

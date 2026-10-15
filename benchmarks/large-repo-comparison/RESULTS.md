@@ -161,7 +161,44 @@ However, the absolute coordinator cost (123 credits, 857k total-in) still exceed
 
 ---
 
-## 8. Direct ranking (completed, correct work)
+## 8. Team-mode repair re-run (post-fix verification)
+
+After the zero-proposal / coordination-tool fix (`9939d5d`), the A4C Team
+leg was re-run on the identical pinned commit, task, model, and budget:
+
+| Metric | Team before fix | **Team after fix** |
+|---|---|---|
+| Lead activities | 1 (alone, completed) | **lead + coder + reviewer enqueued** |
+| Lead proposals recorded | 0 | **2** (observability field) |
+| Lead tool-limit hits | (unknown — claimed "tools failing") | **6** (visible in metrics) |
+| Coder ran? | never spawned | **yes** — implemented `cypher.{c,h}` + tests |
+| Acceptance | FAIL 1/5 | **PASS 5/5** |
+| Lead billed | 41,508 | 35,612 |
+| Coder billed | — | 217,769 (over 180k allocation → activity failed) |
+| Total AI credits | 41.15 | 367.01 |
+| Sessions / turns | 1 / 11 | 3 / 64 |
+| Wall | 59 s | 720 s (12 min) |
+
+**Coordination fix verified.** The lead delegated promptly; 6 tool-limit
+rejections hit exploration tools only — `governed_propose_activity` remained
+available (exempt from the cap) and both children were proposed. The coder
+produced a correct, acceptance-passing implementation in the worktree.
+
+**Secondary observation (not part of this fix):** the coder's 180k allocation
+was insufficient for implement + full-suite verification on this 5,722-test
+C codebase (consumed 217,769; overrun recorded; reviewer never ran). The
+worktree still contained a complete, correct fix when acceptance ran — the
+budget exhaustion happened after the implementation was already valid.
+A4C Direct on the same task completed within 166k billed. A future
+improvement could scale child budgets with expected validation cost, or
+treat "implementation already verified by native tests" as terminal success
+before repair-loop overruns.
+
+Raw evidence: `results/2026-10-15-large-repo-team-rerun/`.
+
+---
+
+## 9. Direct ranking (completed, correct work)
 
 1. **A4C Direct** — independently verified PASS at the lowest cost (481 credits), lowest input (6.2M), and shortest wall time (23 min). Minimal, correct, tested fix.
 2. **Squad** — independently verified PASS, with genuine reviewer-driven recovery, but at 1.83× the cost and 2.6× the wall time of Direct. Coordinator overhead is no longer the majority of the run but remains substantial in absolute terms.

@@ -1,0 +1,154 @@
+{
+  "task_id": "task-1792076256752253000",
+  "original_objective": "# Task: Support property-to-property comparisons in Cypher WHERE clauses\n\n## Problem\n\nThe Cypher query subset supported by `src/cypher/cypher.c` fails to parse a WHERE condition that compares one variable's property with another variable's property. The query aborts with `expected value at pos N` at the right-hand operand.\n\nExamples that fail on the current code:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.name \u003c\u003e b.name RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WITH a, b WHERE a.file_path = b.file_path RETURN a.name, b.name\n```\n\nProperty-to-literal comparisons already work and must keep working:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE b.file_path = 'demo.go' RETURN a.name, b.name\n```\n\n## Required behavior\n\nExtend the WHERE parser and evaluator so that when the right-hand side of a comparison operator is another `variable.property` expression (not a string/number/boolean literal), the condition compares the two resolved property values for the current binding.\n\n1. `a.prop = b.prop` — true when the two resolved string values are equal.\n2. `a.prop \u003c\u003e b.prop` — true when the two resolved string values differ.\n3. All existing comparison operators that make sense on property values (`\u003e`, `\u003c`, `\u003e=`, `\u003c=`) should also accept a property right-hand side, evaluated the same way as when the right-hand side is a numeric literal (via `strtod`).\n4. The property right-hand side must resolve through the same binding mechanism used for the left-hand side (`node_prop` / bare-alias name), so File, Function, and other node property paths all work.\n5. Property-to-literal and bare-alias comparisons must continue to work exactly as before.\n6. The change must work in both the early WHERE (after MATCH) and post-WITH WHERE paths, since they share the same parser and evaluator.\n\n## Where to change\n\n- Parser: `parse_condition_expr` in `src/cypher/cypher.c` currently rejects a non-literal right-hand side with `expected value at pos %d`.\n- Condition model: `cbm_condition_t` in `src/cypher/cypher.h` currently only stores a literal `value`.\n- Evaluator: `eval_condition` / `resolve_condition_value` in `src/cypher/cypher.c` currently resolve only the left-hand side against the binding.\n\n## Constraints\n\n- Do not break any existing Cypher behavior (WHERE with literals, regex, CONTAINS, STARTS WITH, ENDS WITH, IN, IS NULL, IS NOT NULL, HAS_LABEL, EXISTS, AND/OR/XOR/NOT).\n- Keep the error path for genuinely unsupported right-hand sides (e.g. function calls on the RHS if not already supported) clear and non-crashing.\n- Add unit tests in the existing Cypher test suite covering property-to-property `=`, `\u003c\u003e`, and at least one ordering operator, plus a WITH-path case.\n- The full project test suite (`make -f Makefile.cbm SANITIZE= test`) must still pass.\n\n## How to verify\n\n```sh\nmake -f Makefile.cbm SANITIZE= cbm\n./build/c/codebase-memory-mcp cli index_repository '{\"repo_path\":\"/tmp/demo\",\"mode\":\"full\",\"name\":\"demo\"}'\n./build/c/codebase-memory-mcp cli query_graph '{\"project\":\"demo\",\"query\":\"MATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\"}'\n```\n\nBefore the fix this errors with `expected value at pos N`. After the fix it returns only CALLS edges whose source and target files are the same.",
+  "strategy": "team",
+  "created_at": "2026-10-15T11:57:39.163084-03:00",
+  "allocated_budget": 2000000,
+  "consumed_budget": 253381,
+  "status": "completed",
+  "branch": "a4c/task-1792076256752253000",
+  "participating_agents": [
+    "lead",
+    "coder",
+    "reviewer"
+  ],
+  "activities": [
+    {
+      "activity_id": "task-1792076256752253000",
+      "agent_id": "lead",
+      "objective": "# Task: Support property-to-property comparisons in Cypher WHERE clauses\n\n## Problem\n\nThe Cypher query subset supported by `src/cypher/cypher.c` fails to parse a WHERE condition that compares one variable's property with another variable's property. The query aborts with `expected value at pos N` at the right-hand operand.\n\nExamples that fail on the current code:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.name \u003c\u003e b.name RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WITH a, b WHERE a.file_path = b.file_path RETURN a.name, b.name\n```\n\nProperty-to-literal comparisons already work and must keep working:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE b.file_path = 'demo.go' RETURN a.name, b.name\n```\n\n## Required behavior\n\nExtend the WHERE parser and evaluator so that when the right-hand side of a comparison operator is another `variable.property` expression (not a string/number/boolean literal), the condition compares the two resolved property values for the current binding.\n\n1. `a.prop = b.prop` — true when the two resolved string values are equal.\n2. `a.prop \u003c\u003e b.prop` — true when the two resolved string values differ.\n3. All existing comparison operators that make sense on property values (`\u003e`, `\u003c`, `\u003e=`, `\u003c=`) should also accept a property right-hand side, evaluated the same way as when the right-hand side is a numeric literal (via `strtod`).\n4. The property right-hand side must resolve through the same binding mechanism used for the left-hand side (`node_prop` / bare-alias name), so File, Function, and other node property paths all work.\n5. Property-to-literal and bare-alias comparisons must continue to work exactly as before.\n6. The change must work in both the early WHERE (after MATCH) and post-WITH WHERE paths, since they share the same parser and evaluator.\n\n## Where to change\n\n- Parser: `parse_condition_expr` in `src/cypher/cypher.c` currently rejects a non-literal right-hand side with `expected value at pos %d`.\n- Condition model: `cbm_condition_t` in `src/cypher/cypher.h` currently only stores a literal `value`.\n- Evaluator: `eval_condition` / `resolve_condition_value` in `src/cypher/cypher.c` currently resolve only the left-hand side against the binding.\n\n## Constraints\n\n- Do not break any existing Cypher behavior (WHERE with literals, regex, CONTAINS, STARTS WITH, ENDS WITH, IN, IS NULL, IS NOT NULL, HAS_LABEL, EXISTS, AND/OR/XOR/NOT).\n- Keep the error path for genuinely unsupported right-hand sides (e.g. function calls on the RHS if not already supported) clear and non-crashing.\n- Add unit tests in the existing Cypher test suite covering property-to-property `=`, `\u003c\u003e`, and at least one ordering operator, plus a WITH-path case.\n- The full project test suite (`make -f Makefile.cbm SANITIZE= test`) must still pass.\n\n## How to verify\n\n```sh\nmake -f Makefile.cbm SANITIZE= cbm\n./build/c/codebase-memory-mcp cli index_repository '{\"repo_path\":\"/tmp/demo\",\"mode\":\"full\",\"name\":\"demo\"}'\n./build/c/codebase-memory-mcp cli query_graph '{\"project\":\"demo\",\"query\":\"MATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\"}'\n```\n\nBefore the fix this errors with `expected value at pos N`. After the fix it returns only CALLS edges whose source and target files are the same.",
+      "status": "completed",
+      "budget_used": 35612,
+      "outputs": {
+        "proposals_recorded": 2,
+        "session_id": "fe8894ab-c150-497f-ab88-a77bc050992e",
+        "summary": "I’ll inspect the Cypher parser/model/evaluator and existing tests just enough to hand off implementation and independent verification with precise targets.The core structs and parser area are identified; I’m narrowing the handoff to the exact parser/evaluator/test touchpoints rather than changing code here.The evaluator uses a single `cbm_condition_t` LHS resolver and literal `value`; I’m checking the rest of condition evaluation plus locating the test suite before delegating.I have enough context for a surgical implementation handoff: update the condition AST to distinguish literal RHS from variable/property RHS, reuse existing binding resolution, and add Cypher tests.I’ll also queue an independent review focused on parser/evaluator compatibility and the requested regression coverage.**Delegated.** Implementation is assigned to `coder` with exact parser/model/evaluator/test requirements, and independent verification is queued for `reviewer` after implementation.\n\nKey handoff points: extend `cbm_condition_t` to represent RHS `IDENT[.IDENT]`, parse it in `parse_condition_expr`, resolve it through the same binding path as the LHS in `eval_condition`, preserve all existing literal/operator behavior, and add tests for `=`, `\u003c\u003e`, ordering, post-`WITH` WHERE, and literal regression.",
+        "tool_limit_hits": 6
+      },
+      "metrics": {
+        "wall_clock_duration": 29525288083,
+        "provider_wait_duration": 29522136290,
+        "model_duration": 29522136290,
+        "tool_duration": 3150001,
+        "prompt_tokens": 161667,
+        "completion_tokens": 1945,
+        "total_tokens": 163612,
+        "billed_tokens": 35612,
+        "peak_context_tokens": 31431,
+        "reasoning_tokens": 207,
+        "cached_tokens": 128000,
+        "reported_cost_usd": 52.5,
+        "model_invocations": 1,
+        "tool_calls": 0,
+        "file_reads_count": 10,
+        "proposals_recorded": 2,
+        "tool_limit_hits": 6
+      },
+      "capability_profile": {
+        "id": "profile-architecture-investigation",
+        "name": "Architecture Investigation",
+        "description": "Read-only file inspection, activity delegation, and memory proposals.",
+        "allowed_tools": [
+          "governed_read_file",
+          "governed_propose_activity",
+          "governed_request_human_decision",
+          "governed_propose_memory"
+        ],
+        "budget": {
+          "allocated": 0,
+          "reserved": 0,
+          "consumed": 0
+        }
+      },
+      "created_at": "2026-10-15T11:57:39.163084-03:00"
+    },
+    {
+      "activity_id": "task-1792076256752253000-sub-1",
+      "parent_id": "task-1792076256752253000",
+      "agent_id": "coder",
+      "objective": "Implement support for property-to-property RHS comparisons in Cypher WHERE clauses. Target files: `src/cypher/cypher.h`, `src/cypher/cypher.c`, and the existing Cypher C test suite (locate current tests under the repo; prior attempts at `tests/test_cypher.c`/`tests/c/test_cypher.c` may not exist). Contract: `parse_condition_expr` currently only accepts literal RHS for comparison ops and errors with `expected value at pos N`; extend it so comparison RHS may be `IDENT[.IDENT]` representing a binding-backed RHS expression. Update `cbm_condition_t` to store RHS expression metadata separately from literal `value` (e.g. RHS variable/property and/or a flag) while preserving existing fields/behavior for literals, HAS_LABEL, EXISTS, IN, IS NULL/NOT NULL, regex/string operators. Update `expr_free` and any WHERE cleanup paths to free new fields. Evaluation: in `eval_condition`, resolve RHS property/bare alias through the same binding mechanism as LHS (`resolve_condition_value`/binding logic, including nodes, edges, and post-WITH virtual aliases); then use the resolved RHS string as `expected` for `=`, `\u003c\u003e`, `\u003e`, `\u003c`, `\u003e=`, `\u003c=` and other existing comparison/string operators only where already accepted by parser. Numeric ordering must continue to use existing `strtod` comparison semantics. Preserve property-to-literal and bare-alias comparisons exactly. Unsupported RHS forms such as function calls must still fail clearly/non-crash. Both early WHERE after MATCH and post-WITH WHERE should work because they share parser/evaluator. Add unit tests in the existing Cypher test suite covering: `MATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN ...`; `a.name \u003c\u003e b.name`; at least one ordering op with property RHS (e.g. `a.start_line \u003c b.start_line` or equivalent property available in fixtures); and a WITH-path case like `MATCH ... WITH a, b WHERE a.file_path = b.file_path RETURN ...`. Also keep/add a literal comparison assertion to guard no regression. Verify with the smallest relevant test target first, then run `make -f Makefile.cbm SANITIZE= test` (or if too broad/fails for environmental reasons, report exact command/output and run `make -f Makefile.cbm SANITIZE= cbm`).",
+      "status": "failed",
+      "budget_used": 217769,
+      "error": "governance: requested budget exceeds parent allocation: session consumed 217769 tokens exceeds allocated 180000",
+      "outputs": {
+        "error": "governance: requested budget exceeds parent allocation: session consumed 217769 tokens exceeds allocated 180000",
+        "failure_reason": "budget_exhausted"
+      },
+      "metrics": {
+        "wall_clock_duration": 406712704791,
+        "provider_wait_duration": 406710125753,
+        "model_duration": 406710125753,
+        "tool_duration": 2571289,
+        "prompt_tokens": 2124408,
+        "completion_tokens": 12337,
+        "total_tokens": 2136745,
+        "billed_tokens": 217769,
+        "peak_context_tokens": 65221,
+        "overrun_tokens": 37769,
+        "reasoning_tokens": 2488,
+        "cached_tokens": 1918976,
+        "reported_cost_usd": 195,
+        "model_invocations": 1,
+        "tool_calls": 0,
+        "file_reads_count": 10,
+        "tool_limit_hits": 2
+      },
+      "capability_profile": {
+        "id": "profile-code-implementation",
+        "name": "Code Implementation",
+        "description": "Targeted file inspection, file modification in worktree, and memory proposals.",
+        "allowed_tools": [
+          "governed_read_file",
+          "governed_apply_patch",
+          "governed_propose_memory"
+        ],
+        "budget": {
+          "allocated": 0,
+          "reserved": 0,
+          "consumed": 0
+        }
+      },
+      "created_at": "2026-10-15T11:58:10.544285-03:00"
+    },
+    {
+      "activity_id": "task-1792076256752253000-sub-2",
+      "parent_id": "task-1792076256752253000",
+      "agent_id": "reviewer",
+      "objective": "Review the implementation for property-to-property RHS comparisons in Cypher WHERE. Focus files: `src/cypher/cypher.h`, `src/cypher/cypher.c`, and added/changed Cypher tests. Verify the AST/model cleanly distinguishes literal RHS from binding-backed RHS without reinterpreting existing literal strings; all new heap fields are freed in expression/WHERE cleanup; `parse_condition_expr` accepts only `IDENT[.IDENT]` as property/bare-alias RHS for comparison operators and still rejects unsupported RHS forms clearly; `eval_condition` resolves RHS through the same node/edge/virtual binding mechanism as LHS and preserves behavior for literals, bare aliases, HAS_LABEL, EXISTS, IN, IS NULL/NOT NULL, regex, CONTAINS, STARTS WITH, ENDS WITH, AND/OR/XOR/NOT. Check tests cover `=`, `\u003c\u003e`, an ordering operator, a post-WITH WHERE case, and a literal comparison regression. Run/confirm `make -f Makefile.cbm SANITIZE= test` if feasible; otherwise document the exact blocker and the strongest targeted validation run.",
+      "depends_on": [
+        "task-1792076256752253000-sub-1"
+      ],
+      "status": "pending",
+      "budget_used": 0,
+      "capability_profile": {
+        "id": "profile-independent-review",
+        "name": "Independent Review",
+        "description": "Read-only inspection of diffs and evidence, and review submission. Mutation strictly prohibited.",
+        "allowed_tools": [
+          "governed_read_file",
+          "governed_submit_review"
+        ],
+        "budget": {
+          "allocated": 0,
+          "reserved": 0,
+          "consumed": 0
+        }
+      },
+      "created_at": "2026-10-15T11:58:10.557655-03:00"
+    }
+  ],
+  "metrics_summary": {
+    "wall_clock_duration": 436237992874,
+    "provider_wait_duration": 436232262043,
+    "model_duration": 436232262043,
+    "tool_duration": 5721290,
+    "prompt_tokens": 2286075,
+    "completion_tokens": 14282,
+    "total_tokens": 2300357,
+    "overrun_tokens": 37769,
+    "model_invocations": 2,
+    "tool_calls": 0,
+    "file_reads_count": 20
+  },
+  "final_outcome": "Task failed: governance: requested budget exceeds parent allocation: session consumed 217769 tokens exceeds allocated 180000"
+}

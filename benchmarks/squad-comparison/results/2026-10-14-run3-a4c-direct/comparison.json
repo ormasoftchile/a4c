@@ -1,0 +1,70 @@
+{
+  "task": "Implement interval algebra in the `sched` package of this repository (sched.go).\n\nAdd these exported functions with exactly these signatures:\n\n    func Merge(ivs []Interval) []Interval\n    func Total(ivs []Interval) int\n    func Subtract(base Interval, others []Interval) []Interval\n    func Complement(ivs []Interval, universe Interval) []Interval\n\nBehavior contract (intervals are half-open [From, To) minute ranges):\n\n- Merge returns the canonical merged form: sorted by From, with overlapping\n  or touching intervals combined (two intervals touch when one's To equals\n  the other's From; touching intervals merge into one). Invalid intervals\n  (per Interval.IsValid) are ignored. Empty input (or all-invalid input)\n  returns an empty slice.\n- Total returns the number of minutes covered by the union of ivs, counting\n  overlapping regions once. Invalid intervals are ignored. Returns 0 for\n  empty input.\n- Subtract returns the parts of `base` not covered by any interval in\n  `others`, as canonical intervals sorted by From. If base is fully\n  covered, return an empty slice. If base is invalid, return an empty\n  slice. Entries of `others` that do not overlap base are ignored;\n  invalid entries in `others` are ignored.\n- Complement returns the gaps within `universe` not covered by ivs, as\n  canonical intervals sorted by From. If universe is invalid, return an\n  empty slice. Invalid entries in ivs are ignored. If ivs fully cover\n  universe, return an empty slice.\n\nExtend the package's test files with unit tests covering the new functions,\nincluding edge cases (empty inputs, touching intervals, full coverage,\ncontainment). Run `go test ./...` and make sure everything passes before\nfinishing. Keep changes limited to what this task requires. Do not ask\nquestions — make reasonable decisions and proceed.",
+  "model": "gpt-5.5",
+  "host": "GitHub Copilot CLI GitHub Copilot CLI 1.0.91.\nRun 'copilot update' to check for updates.",
+  "squad_cli": "/var/folders/wp/qzs8rgx10jnfrk2vkxd_slb40000gn/T/opencode/bench/squad/packages/squad-cli/dist/cli-entry.js",
+  "a4c_cli": "github.com/ormasoftchile/a4c (built from workspace)",
+  "identical_base_tree": "83c6c3ef88f77143eef8a2ed4cb02fe85926be6d",
+  "setup": {
+    "wall_seconds": 0.40486025,
+    "usage": {
+      "model_calls": 0,
+      "sessions": 0,
+      "models_by_calls": {},
+      "calls_by_initiator": {},
+      "uncached_input_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "output_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_input_tokens_incl_cache": 0,
+      "total_output_tokens": 0,
+      "reported_cost_ai_credits": 0,
+      "sum_model_call_duration_ms": 0,
+      "sub_agent_calls": 0
+    }
+  },
+  "a4c": {
+    "wall_seconds": 44.378858542,
+    "usage": {
+      "model_calls": 6,
+      "sessions": 1,
+      "models_by_calls": {
+        "gpt-5.5": 6
+      },
+      "calls_by_initiator": {
+        "agent": 5,
+        "user": 1
+      },
+      "uncached_input_tokens": 15813,
+      "cache_read_tokens": 75776,
+      "cache_write_tokens": 0,
+      "output_tokens": 4098,
+      "reasoning_tokens": 96,
+      "total_input_tokens_incl_cache": 91589,
+      "total_output_tokens": 4098,
+      "reported_cost_ai_credits": 23.989299999999997,
+      "sum_model_call_duration_ms": 35122,
+      "sub_agent_calls": 0
+    },
+    "acceptance": {
+      "harness_verdict_pass": true,
+      "package_ok_line_present": true,
+      "output": "ok  \texample.com/sched\t0.334s\n"
+    },
+    "diff_bytes_task_files": 6830,
+    "model_turns": 6,
+    "sub_agent_model_calls": 0
+  },
+  "squad": {
+    "wall_seconds": 0,
+    "usage": null,
+    "acceptance": {
+      "harness_verdict_pass": false,
+      "package_ok_line_present": false
+    },
+    "diff_bytes_task_files": 0,
+    "model_turns": 0,
+    "sub_agent_model_calls": 0
+  }
+}

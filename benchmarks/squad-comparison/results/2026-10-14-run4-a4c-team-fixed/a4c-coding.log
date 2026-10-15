@@ -1,0 +1,46 @@
+Task started: task-1792032493617040000
+Strategy: team
+Objective: Implement interval algebra in the `sched` package of this repository (sched.go).
+
+Add these exported functions with exactly these signatures:
+
+    func Merge(ivs []Interval) []Interval
+    func Total(ivs []Interval) int
+    func Subtract(base Interval, others []Interval) []Interval
+    func Complement(ivs []Interval, universe Interval) []Interval
+
+Behavior contract (intervals are half-open [From, To) minute ranges):
+
+- Merge returns the canonical merged form: sorted by From, with overlapping
+  or touching intervals combined (two intervals touch when one's To equals
+  the other's From; touching intervals merge into one). Invalid intervals
+  (per Interval.IsValid) are ignored. Empty input (or all-invalid input)
+  returns an empty slice.
+- Total returns the number of minutes covered by the union of ivs, counting
+  overlapping regions once. Invalid intervals are ignored. Returns 0 for
+  empty input.
+- Subtract returns the parts of `base` not covered by any interval in
+  `others`, as canonical intervals sorted by From. If base is fully
+  covered, return an empty slice. If base is invalid, return an empty
+  slice. Entries of `others` that do not overlap base are ignored;
+  invalid entries in `others` are ignored.
+- Complement returns the gaps within `universe` not covered by ivs, as
+  canonical intervals sorted by From. If universe is invalid, return an
+  empty slice. Invalid entries in ivs are ignored. If ivs fully cover
+  universe, return an empty slice.
+
+Extend the package's test files with unit tests covering the new functions,
+including edge cases (empty inputs, touching intervals, full coverage,
+containment). Run `go test ./...` and make sure everything passes before
+finishing. Keep changes limited to what this task requires. Do not ask
+questions — make reasonable decisions and proceed.
+Executing with coder (max 30 steps)...
+
+Executed 3 activities for task task-1792032493617040000:
+  -> [task-1792032493617040000] Agent: lead       Status: completed    Consumed: 8336 tokens
+  -> [task-1792032493617040000-sub-1] Agent: coder      Status: completed    Consumed: 30848 tokens
+  -> [task-1792032493617040000-sub-2] Agent: reviewer   Status: completed    Consumed: 12949 tokens
+
+Current State: awaiting_human_review
+Worktree: .a4c/worktrees/task-1792032493617040000/tree (Branch: a4c/task-1792032493617040000)
+Changes ready for inspection. Run 'a4c task diff task-1792032493617040000' or 'a4c task accept task-1792032493617040000'.

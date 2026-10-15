@@ -1,0 +1,21 @@
+{
+  "model_calls": 14,
+  "sessions": 3,
+  "models_by_calls": {
+    "gpt-5.5": 14
+  },
+  "calls_by_initiator": {
+    "agent": 11,
+    "user": 3
+  },
+  "uncached_input_tokens": 42223,
+  "cache_read_tokens": 117248,
+  "cache_write_tokens": 0,
+  "output_tokens": 9910,
+  "reasoning_tokens": 2379,
+  "total_input_tokens_incl_cache": 159471,
+  "total_output_tokens": 9910,
+  "reported_cost_ai_credits": 56.7039,
+  "sum_model_call_duration_ms": 97945,
+  "sub_agent_calls": 0
+}

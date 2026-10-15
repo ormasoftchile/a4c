@@ -104,6 +104,9 @@ func TestMilestone10_01_DurableBudgetPersistenceAndCrashRecovery(t *testing.T) {
 func TestMilestone10_02_ConcurrentSiblingBudgetAllocation(t *testing.T) {
 	dir := t.TempDir()
 	gov := spike.NewPolicyGovernor([]string{"governed_read_file"})
+	// Isolates concurrency safety with uniform small allocations; disable
+	// the viability floor (an economics concern) for exact capacity math.
+	gov.SetBudgetFloor(0, 0)
 	if err := gov.SetStorageDir(filepath.Join(dir, "budgets")); err != nil {
 		t.Fatalf("set storage dir: %v", err)
 	}

@@ -7,23 +7,29 @@ import (
 
 // AgentMessage represents an inbound or outbound message in an agent session.
 type AgentMessage struct {
-	Role       string    `json:"role"`
-	Content    string    `json:"content"`
-	ToolCalls  []string  `json:"tool_calls,omitempty"`
-	Timestamp  time.Time `json:"timestamp"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	ToolCalls []string  `json:"tool_calls,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // UsageInfo reports token and cost metrics for a session or invocation.
 type UsageInfo struct {
-	PromptTokens      int     `json:"prompt_tokens"`
-	CompletionTokens  int     `json:"completion_tokens"`
-	TotalTokens       int     `json:"total_tokens"`
-	PeakContextTokens int     `json:"peak_context_tokens,omitempty"`
-	OverrunTokens     int     `json:"overrun_tokens,omitempty"`
-	ReasoningTokens   int     `json:"reasoning_tokens,omitempty"`
-	CachedTokens      int     `json:"cached_tokens,omitempty"`
-	ReportedCostUSD   float64 `json:"reported_cost_usd,omitempty"`
-	EstimatedCostUSD  float64 `json:"estimated_cost_usd"`
+	PromptTokens      int `json:"prompt_tokens"`
+	CompletionTokens  int `json:"completion_tokens"`
+	TotalTokens       int `json:"total_tokens"`
+	PeakContextTokens int `json:"peak_context_tokens,omitempty"`
+	OverrunTokens     int `json:"overrun_tokens,omitempty"`
+	ReasoningTokens   int `json:"reasoning_tokens,omitempty"`
+	CachedTokens      int `json:"cached_tokens,omitempty"`
+	// BilledTokens counts budget-relevant consumption using the host's
+	// usage semantics: uncached input + output (cache reads are re-served
+	// context, not new consumption; PromptTokens keeps the total-input
+	// figure for reporting). Providers that do not report cache detail
+	// should leave this 0; consumers fall back to TotalTokens.
+	BilledTokens     int     `json:"billed_tokens,omitempty"`
+	ReportedCostUSD  float64 `json:"reported_cost_usd,omitempty"`
+	EstimatedCostUSD float64 `json:"estimated_cost_usd"`
 }
 
 // AgentConfig configures a governed session for an agent.

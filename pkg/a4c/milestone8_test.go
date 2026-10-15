@@ -104,17 +104,18 @@ func TestMilestone8_03_CoordinatorCapabilityEnforcementAndHandoff(t *testing.T) 
 		switch agentID {
 		case "lead":
 			// Lead publishes an activity proposal to coder and reviewer
+			// (budgets at viable scale for a 100k parent task).
 			session.Config().OnProposeActivity(spike.ActivityProposal{
 				ProposalID:      "sub-coder-1",
 				ProposedAgentID: "coder",
 				Objective:       "Implement diagnostic inspector",
-				RequestedBudget: spike.Budget{Allocated: 20000},
+				RequestedBudget: spike.Budget{Allocated: 40000},
 			})
 			session.Config().OnProposeActivity(spike.ActivityProposal{
 				ProposalID:      "sub-reviewer-1",
 				ProposedAgentID: "reviewer",
 				Objective:       "Verify diagnostics output natively",
-				RequestedBudget: spike.Budget{Allocated: 10000},
+				RequestedBudget: spike.Budget{Allocated: 30000},
 				DependsOn:       []string{"sub-coder-1"},
 			})
 		case "coder":
@@ -136,7 +137,7 @@ func TestMilestone8_03_CoordinatorCapabilityEnforcementAndHandoff(t *testing.T) 
 	runner := &mockTestRunner{}
 	coord := spike.NewTeamCoordinator(dir, store, roster, memory, gov, journal, runner, fakeProv)
 
-	taskReq, err := coord.SubmitTask("Build diagnostics feature", spike.Budget{Allocated: 50000}, nil)
+	taskReq, err := coord.SubmitTask("Build diagnostics feature", spike.Budget{Allocated: 100000}, nil)
 	if err != nil {
 		t.Fatalf("task submission failed: %v", err)
 	}

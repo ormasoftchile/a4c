@@ -40,6 +40,112 @@ type PolicyGovernor struct {
 	activeBudgets       map[string]*Budget
 	budgetRecords       map[string]*BudgetRecord
 	authorizedProposals map[string]*ActivityRequest
+	minChildBudget      float64
+	parentReserve       float64
+}
+
+const (
+	// DefaultMinChildBudgetTokens is the smallest viable allocation for a child
+	// activity session. Measured host baseline (GitHub Copilot CLI 1.0.91,
+	// gpt-5.5, 2026-10 benchmark): a fresh specialist session's first model
+	// call alone costs ~12k uncached input tokens before any work begins
+	// (system prompt + charter + tool schemas), so a child allocated less
+	// than this can never begin meaningfully. The default is ~2x that
+	// measured baseline so a child can complete its first call plus a few
+	// tool turns. Enforced only when the parent carries a token budget large
+	// enough to fund a viable child plus the coordination reserve.
+	DefaultMinChildBudgetTokens = 25000.0
+	// DefaultParentBudgetReserveTokens keeps part of the parent's budget
+	// un-reservable by any single child so the parent retains capacity for
+	// its own coordination turns and a required subsequent activity
+	// (typically the reviewer) after the child settles.
+	DefaultParentBudgetReserveTokens = 10000.0
+)
+
+// SetBudgetFloor configures the viable child-allocation floor and the parent
+// coordination reserve. A non-positive minChild disables floor enforcement.
+func (g *PolicyGovernor) SetBudgetFloor(minChild, parentReserve float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.minChildBudget = minChild
+	g.parentReserve = parentReserve
+}
+
+// MinChildBudget returns the configured viable child-allocation floor.
+func (g *PolicyGovernor) MinChildBudget() float64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.minChildBudget
+}
+
+// ParentReserve returns the configured parent coordination reserve.
+func (g *PolicyGovernor) ParentReserve() float64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.parentReserve
+}
+
+// AvailableFor reports the remaining (unreserved, unconsumed) budget of an
+// activity, or 0 when the activity has no tracked budget.
+func (g *PolicyGovernor) AvailableFor(activityID string) float64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if b, ok := g.activeBudgets[activityID]; ok {
+		return b.Available()
+	}
+	return 0
+}
+
+// ReallocateChild re-funds a child activity from its parent's remaining
+// budget after an explicit budget-exhaustion recovery decision. It never
+// grants capacity beyond the parent's available budget minus the coordination
+// reserve, and it never invents a parent budget that does not exist.
+func (g *PolicyGovernor) ReallocateChild(parentID, childID string, newAllocated float64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	p, ok := g.activeBudgets[parentID]
+	if !ok || p.Allocated <= 0 {
+		return fmt.Errorf("governor: parent %q has no tracked token budget to reallocate from", parentID)
+	}
+	if newAllocated > p.Available()-g.parentReserve {
+		return fmt.Errorf("%w: reallocation %.0f exceeds parent available %.0f after reserve %.0f",
+			ErrBudgetExceeded, newAllocated, p.Available(), g.parentReserve)
+	}
+	p.Reserved += newAllocated
+	g.activeBudgets[childID] = &Budget{Allocated: newAllocated}
+	if rec, ok := g.budgetRecords[parentID]; ok {
+		rec.Reserved = p.Reserved
+		rec.UpdatedAt = time.Now()
+		_ = g.persistBudgetLocked(parentID)
+	}
+	if cRec, ok := g.budgetRecords[childID]; ok {
+		cRec.Allocated = newAllocated
+		cRec.Reserved = 0
+		cRec.Consumed = 0
+		cRec.Status = "active"
+		cRec.UpdatedAt = time.Now()
+		_ = g.persistBudgetLocked(childID)
+	} else {
+		g.budgetRecords[childID] = &BudgetRecord{
+			ID:        childID,
+			ParentID:  parentID,
+			Allocated: newAllocated,
+			Status:    "active",
+			UpdatedAt: time.Now(),
+		}
+		_ = g.persistBudgetLocked(childID)
+	}
+	g.logTxLocked(BudgetTx{
+		TxID:      fmt.Sprintf("tx-realloc-%d-%s", time.Now().UnixNano(), childID),
+		Type:      TxReserve,
+		ParentID:  parentID,
+		ChildID:   childID,
+		Allocated: newAllocated,
+		Status:    "committed",
+		Timestamp: time.Now().UTC(),
+	})
+	return nil
 }
 
 func NewPolicyGovernor(allowedTools []string) *PolicyGovernor {
@@ -53,6 +159,8 @@ func NewPolicyGovernor(allowedTools []string) *PolicyGovernor {
 		activeBudgets:       make(map[string]*Budget),
 		budgetRecords:       make(map[string]*BudgetRecord),
 		authorizedProposals: make(map[string]*ActivityRequest),
+		minChildBudget:      DefaultMinChildBudgetTokens,
+		parentReserve:       DefaultParentBudgetReserveTokens,
 	}
 }
 
@@ -208,9 +316,28 @@ func (g *PolicyGovernor) AuthorizeProposal(parent ActivityRequest, proposal Acti
 	}
 
 	requested := proposal.RequestedBudget.Allocated
-	if budget.Allocated > 0 && requested > budget.Available() {
-		return nil, fmt.Errorf("%w: requested %.2f exceeds parent available %.2f",
-			ErrBudgetExceeded, requested, budget.Available())
+	if budget.Allocated > 0 {
+		// Viability enforcement applies only when the parent is itself sized
+		// to fund a viable child plus the coordination reserve; below that
+		// scale the human-set parent budget remains the sole binding
+		// constraint (preserves legacy semantics for small fixtures).
+		if g.minChildBudget > 0 && budget.Allocated >= g.minChildBudget+g.parentReserve {
+			if requested < g.minChildBudget {
+				childMax := budget.Available() - g.parentReserve
+				if childMax < g.minChildBudget {
+					return nil, fmt.Errorf("%w: proposed child budget %.0f tokens is below the viable minimum %.0f and the parent cannot fund it (available %.0f, coordination reserve %.0f); propose a smaller-scope activity, reallocate from another source, or escalate",
+						ErrInsufficientBudget, requested, g.minChildBudget, budget.Available(), g.parentReserve)
+				}
+				requested = g.minChildBudget
+			}
+			if childMax := budget.Available() - g.parentReserve; requested > childMax {
+				return nil, fmt.Errorf("%w: requested %.2f exceeds parent available %.2f after retaining coordination reserve %.2f",
+					ErrBudgetExceeded, requested, budget.Available(), g.parentReserve)
+			}
+		} else if requested > budget.Available() {
+			return nil, fmt.Errorf("%w: requested %.2f exceeds parent available %.2f",
+				ErrBudgetExceeded, requested, budget.Available())
+		}
 	}
 
 	// Deduct requested from parent reservation
@@ -257,6 +384,13 @@ func (g *PolicyGovernor) AuthorizeProposal(parent ActivityRequest, proposal Acti
 		DependsOn: proposal.DependsOn,
 		Budget:    childBudget,
 		CreatedAt: time.Now(),
+	}
+	if requested != proposal.RequestedBudget.Allocated {
+		if childReq.Inputs == nil {
+			childReq.Inputs = map[string]any{}
+		}
+		childReq.Inputs["budget_adjusted_from"] = proposal.RequestedBudget.Allocated
+		childReq.Inputs["budget_viable_minimum"] = g.minChildBudget
 	}
 
 	childBudgetCopy := childBudget

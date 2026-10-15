@@ -242,7 +242,7 @@ func (s *AntigravitySessionAdapter) Send(ctx context.Context, prompt string) (*A
 	if isReviewer {
 		fullPrompt += "\n\n[INSTRUCTION]: You are performing an independent code review. Inspect the code strictly read-only. Do NOT modify any files. If approving, include [REVIEW_APPROVED] in your response. If rejecting, include [REVIEW_REJECTED: reason]."
 	} else if strings.EqualFold(s.config.AgentID, "lead") || strings.EqualFold(s.config.AgentID, "alice") {
-		fullPrompt += "\n\n[INSTRUCTION]: Propose delegated subtasks using a JSON block: ```json\n{\"proposals\": [{\"proposal_id\": \"...\", \"proposed_agent_id\": \"coder\", \"objective\": \"...\", \"budget_tokens\": 20000}]}\n```"
+		fullPrompt += "\n\n[INSTRUCTION]: Propose delegated subtasks using a JSON block: ```json\n{\"proposals\": [{\"proposal_id\": \"...\", \"proposed_agent_id\": \"coder\", \"objective\": \"...\", \"budget_tokens\": 30000}]}\n```\nPropose budgets that cover full expected context overhead; the runtime raises proposals below the viable minimum and rejects proposals the parent cannot afford."
 	}
 
 	// Prepare agy command arguments

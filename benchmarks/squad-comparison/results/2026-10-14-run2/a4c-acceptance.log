@@ -1,0 +1,14 @@
+# example.com/sched [example.com/sched.test]
+./sched_acceptance_test.go:27:26: undefined: Merge
+./sched_acceptance_test.go:28:42: undefined: Merge
+./sched_acceptance_test.go:29:36: undefined: Merge
+./sched_acceptance_test.go:30:48: undefined: Merge
+./sched_acceptance_test.go:31:34: undefined: Merge
+./sched_acceptance_test.go:32:32: undefined: Merge
+./sched_acceptance_test.go:33:36: undefined: Merge
+./sched_acceptance_test.go:34:32: undefined: Merge
+./sched_acceptance_test.go:38:12: undefined: Total
+./sched_acceptance_test.go:41:12: undefined: Total
+./sched_acceptance_test.go:41:12: too many errors
+FAIL	example.com/sched [build failed]
+FAIL

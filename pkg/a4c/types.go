@@ -7,6 +7,7 @@ import (
 
 var (
 	ErrBudgetExceeded           = errors.New("governance: requested budget exceeds parent allocation")
+	ErrInsufficientBudget       = errors.New("governance: parent budget cannot fund a viable child allocation")
 	ErrUnauthorizedTool         = errors.New("governance: unauthorized tool execution channel")
 	ErrUnfinishedIntentDetected = errors.New("reconciliation: unfinished external intent detected on restart")
 	ErrWorkspaceConcurrentEdit  = errors.New("evidence: workspace content modified concurrently during validation")
@@ -72,6 +73,7 @@ type ExecutionMetrics struct {
 	PromptTokens           int           `json:"prompt_tokens"`
 	CompletionTokens       int           `json:"completion_tokens"`
 	TotalTokens            int           `json:"total_tokens"`
+	BilledTokens           int           `json:"billed_tokens,omitempty"` // uncached input + output (budget-relevant consumption)
 	PeakContextTokens      int           `json:"peak_context_tokens,omitempty"`
 	OverrunTokens          int           `json:"overrun_tokens,omitempty"`
 	ReasoningTokens        int           `json:"reasoning_tokens,omitempty"`
@@ -83,14 +85,23 @@ type ExecutionMetrics struct {
 	FileReadsCount         int           `json:"file_reads_count,omitempty"`
 }
 
+// BilledConsumption returns the budget-relevant token consumption for a
+// usage snapshot: billed tokens when reported, else the legacy total.
+func (u UsageInfo) BilledConsumption() float64 {
+	if u.BilledTokens > 0 {
+		return float64(u.BilledTokens)
+	}
+	return float64(u.TotalTokens)
+}
+
 // ActivityLimits sets bounded economic and turn constraints for an activity.
 type ActivityLimits struct {
-	MaxModelTurns        int `json:"max_model_turns,omitempty"`
-	MaxToolCalls         int `json:"max_tool_calls,omitempty"`
-	MaxReadFileLines     int `json:"max_read_file_lines,omitempty"`
-	MaxDiffLines         int `json:"max_diff_lines,omitempty"`
-	MaxValidationOutput  int `json:"max_validation_output,omitempty"`
-	MaxRevisions         int `json:"max_revisions,omitempty"`
+	MaxModelTurns       int `json:"max_model_turns,omitempty"`
+	MaxToolCalls        int `json:"max_tool_calls,omitempty"`
+	MaxReadFileLines    int `json:"max_read_file_lines,omitempty"`
+	MaxDiffLines        int `json:"max_diff_lines,omitempty"`
+	MaxValidationOutput int `json:"max_validation_output,omitempty"`
+	MaxRevisions        int `json:"max_revisions,omitempty"`
 }
 
 // ActivityFilter specifies criteria for querying historical or active activities.
@@ -174,7 +185,6 @@ type ActivityResult struct {
 	StructuralArtifactID string             `json:"structural_artifact_id,omitempty"`
 }
 
-
 // AgentIdentity models a persistent team member identity.
 type AgentIdentity struct {
 	ID           string   `json:"id"`
@@ -242,15 +252,15 @@ const (
 
 // IntentRecord logs the durable pre-mutation intent before touching external systems.
 type IntentRecord struct {
-	IntentID    string         `json:"intent_id"`
-	ActivityID  string         `json:"activity_id"`
-	Action      string         `json:"action"` // e.g. "create_pull_request"
-	Target      string         `json:"target"` // e.g. "branch/feature-1"
-	PayloadHash string         `json:"payload_hash"`
-	Status      IntentStatus   `json:"status"`
-	ExternalID  string         `json:"external_id,omitempty"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
+	IntentID    string       `json:"intent_id"`
+	ActivityID  string       `json:"activity_id"`
+	Action      string       `json:"action"` // e.g. "create_pull_request"
+	Target      string       `json:"target"` // e.g. "branch/feature-1"
+	PayloadHash string       `json:"payload_hash"`
+	Status      IntentStatus `json:"status"`
+	ExternalID  string       `json:"external_id,omitempty"`
+	CreatedAt   time.Time    `json:"created_at"`
+	UpdatedAt   time.Time    `json:"updated_at"`
 }
 
 // ValidationEvidence represents verifiable proof that tests ran against a specific snapshot.
@@ -274,22 +284,22 @@ type ValidationEvidence struct {
 
 // TaskCheckpoint captures authoritative task and engineering state for cross-host continuation.
 type TaskCheckpoint struct {
-	TaskID               string              `json:"task_id"`
-	Objective            string              `json:"objective"`
-	ActiveActivityID     string              `json:"active_activity_id,omitempty"`
-	SpecialistID         string              `json:"specialist_id"`
-	SpecialistRole       string              `json:"specialist_role,omitempty"`
-	WorktreePath         string              `json:"worktree_path"`
-	WorktreeBranch       string              `json:"worktree_branch"`
-	CurrentSnapshotSHA   string              `json:"current_snapshot_sha"`
-	GitStatusSummary     string              `json:"git_status_summary,omitempty"`
-	ModifiedFiles        []string            `json:"modified_files,omitempty"`
-	NewFiles             []string            `json:"new_files,omitempty"`
-	AcceptedDecisions    []string            `json:"accepted_decisions,omitempty"`
-	CompletedWork        []string            `json:"completed_work,omitempty"`
-	RemainingObligations []string            `json:"remaining_obligations,omitempty"`
-	ValidationEvidence   *ValidationEvidence `json:"validation_evidence,omitempty"`
-	Strategy             ExecutionStrategy   `json:"strategy"`
+	TaskID                   string              `json:"task_id"`
+	Objective                string              `json:"objective"`
+	ActiveActivityID         string              `json:"active_activity_id,omitempty"`
+	SpecialistID             string              `json:"specialist_id"`
+	SpecialistRole           string              `json:"specialist_role,omitempty"`
+	WorktreePath             string              `json:"worktree_path"`
+	WorktreeBranch           string              `json:"worktree_branch"`
+	CurrentSnapshotSHA       string              `json:"current_snapshot_sha"`
+	GitStatusSummary         string              `json:"git_status_summary,omitempty"`
+	ModifiedFiles            []string            `json:"modified_files,omitempty"`
+	NewFiles                 []string            `json:"new_files,omitempty"`
+	AcceptedDecisions        []string            `json:"accepted_decisions,omitempty"`
+	CompletedWork            []string            `json:"completed_work,omitempty"`
+	RemainingObligations     []string            `json:"remaining_obligations,omitempty"`
+	ValidationEvidence       *ValidationEvidence `json:"validation_evidence,omitempty"`
+	Strategy                 ExecutionStrategy   `json:"strategy"`
 	SourceRuntime            string              `json:"source_runtime,omitempty"`
 	TargetRuntime            string              `json:"target_runtime,omitempty"`
 	Model                    string              `json:"model,omitempty"`
@@ -314,4 +324,3 @@ type EscalateTaskRequest struct {
 	Reviewer    string            `json:"reviewer,omitempty"`
 	Reason      string            `json:"reason,omitempty"`
 }
-

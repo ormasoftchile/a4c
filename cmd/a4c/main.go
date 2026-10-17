@@ -15,25 +15,54 @@ import (
 	"time"
 
 	"github.com/ormasoftchile/a4c/pkg/a4c"
-	a4cmcp "github.com/ormasoftchile/a4c/pkg/a4c/mcp"
 	"github.com/ormasoftchile/a4c/pkg/a4c/knowledge"
+	a4cmcp "github.com/ormasoftchile/a4c/pkg/a4c/mcp"
 )
 
-const banner = `
-   ▄████████     ▄████████   ▄████████ 
-  ███    ███    ███    ███  ███    ███ 
-  ███    ███    ███    █▀   ███    █▀  
-  ███    ███   ▄███▄▄▄      ███        
-▀███████████  ▀▀███▀▀▀    ▀███████████ 
-  ███    ███  ▀███████████         ███ 
-  ███    ███    ███    ███   ▄█    ███ 
-  ███    █▀     ███    ███ ▄████████▀  
-                ███    ███             
-Agents for Coding — Governed Local AI Engineering Team
-`
+// ANSI colors for the A4C wordmark: bright white over bright red, with gray
+// separators between the letters.
+const (
+	ansiReset = "\x1b[0m"
+	ansiWhite = "\x1b[0;97m"
+	ansiRed   = "\x1b[0;91m"
+	ansiGray  = "\x1b[0;37m"
+)
+
+// bannerWordmarkColored is a compact three-row half-block rendering of A4C. It
+// reads cleanly above short usage output and inside narrow terminals.
+const bannerWordmarkColored = ansiWhite + "▀▀█" + ansiGray + " " + ansiWhite + "█ █" + ansiGray + "  " + ansiWhite + "█▀" + ansiReset + "\n" +
+	ansiRed + "█▀█" + ansiGray + " " + ansiRed + "▀▀█▀" + ansiGray + " " + ansiRed + "█" + ansiGray + " " + ansiReset + "\n" +
+	ansiRed + "▀▀▀" + ansiGray + " " + ansiWhite + "  " + ansiRed + "▀" + ansiGray + "  " + ansiRed + "▀▀" + ansiReset
+
+const bannerWordmarkPlain = "▀▀█ █ █  █▀\n" +
+	"█▀█ ▀▀█▀ █ \n" +
+	"▀▀▀   ▀  ▀▀"
+
+const bannerTagline = "Agents for Coding — Governed Local AI Engineering Team"
+
+// colorsEnabled reports whether ANSI color may be emitted: stdout must be an
+// interactive terminal and NO_COLOR must be unset. This matches the
+// ModeCharDevice checks used elsewhere in this file, so piped output, CI logs,
+// and captured test output stay free of escape sequences.
+func colorsEnabled() bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	stat, err := os.Stdout.Stat()
+	return err == nil && (stat.Mode()&os.ModeCharDevice) != 0
+}
+
+// banner renders the wordmark, tagline, and trailing newline.
+func banner() string {
+	wordmark := bannerWordmarkPlain
+	if colorsEnabled() {
+		wordmark = bannerWordmarkColored
+	}
+	return "\n" + wordmark + "\n" + bannerTagline + "\n"
+}
 
 func printUsage() {
-	fmt.Print(banner)
+	fmt.Print(banner())
 	fmt.Print(`Usage: a4c <command> [options]
 
 Commands:
@@ -1310,9 +1339,6 @@ func runMCP(args []string) {
 		os.Exit(1)
 	}
 }
-
-
-
 
 func runStatus(args []string) {
 	_, storeDir, rosterDir, memDir, _ := getPaths(".")

@@ -27,6 +27,13 @@ A4C establishes strict ownership boundaries between the coding host and the engi
 - **Cross-Host Continuation**: Authoritative checkpoints enabling work started on one host to resume on another host without transcript replay.
 - **Human Acceptance & Integration**: Explicit engineer sign-off (`a4c task accept`) and clean merge integration (`a4c task integrate`).
 
+Worktree removal fails closed: Git inspection or removal errors are reported without
+discarding recovery records or recursively deleting task directories. Forced removal
+permits dirty worktrees, but does not bypass Git errors or locks. Evidence and other
+task artifacts stored alongside the worktree are preserved after successful removal.
+If Git removes the worktree but saving its released record fails, A4C reports that
+partial completion and retains the in-memory record for recovery.
+
 ---
 
 ## 2. Execution Strategies

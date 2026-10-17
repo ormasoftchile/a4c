@@ -304,6 +304,7 @@ func (m *WorktreeManager) ListWorktrees() []*WorktreeRecord {
 
 // RemoveWorktree safely removes a worktree if it has no uncommitted changes.
 // If uncommitted changes exist and force is false, it returns ErrWorktreeDirty to preserve work.
+// Git errors preserve the worktree record; task artifacts outside the worktree are never removed.
 func (m *WorktreeManager) RemoveWorktree(ctx context.Context, taskID string, force bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -317,7 +318,10 @@ func (m *WorktreeManager) RemoveWorktree(ctx context.Context, taskID string, for
 	cmdStat := exec.CommandContext(ctx, "git", "status", "--porcelain")
 	cmdStat.Dir = rec.WorktreePath
 	out, err := cmdStat.CombinedOutput()
-	if err == nil && len(strings.TrimSpace(string(out))) > 0 && !force {
+	if err != nil {
+		return fmt.Errorf("worktree: git status failed for %s: %s (%w)", rec.WorktreePath, strings.TrimSpace(string(out)), err)
+	}
+	if len(strings.TrimSpace(string(out))) > 0 && !force {
 		return fmt.Errorf("%w: path %s has uncommitted changes", ErrWorktreeDirty, rec.WorktreePath)
 	}
 
@@ -327,12 +331,17 @@ func (m *WorktreeManager) RemoveWorktree(ctx context.Context, taskID string, for
 		cmdRm = exec.CommandContext(ctx, "git", "worktree", "remove", "--force", rec.WorktreePath)
 	}
 	cmdRm.Dir = m.rootDir
-	_ = cmdRm.Run()
+	if out, err := cmdRm.CombinedOutput(); err != nil {
+		return fmt.Errorf("worktree: git removal failed for %s: %s (%w)", rec.WorktreePath, strings.TrimSpace(string(out)), err)
+	}
 
-	_ = os.RemoveAll(filepath.Dir(rec.WorktreePath))
-	rec.LeaseHeld = false
-	rec.Status = WorktreeStatusReleased
-	_ = m.persist(rec)
+	released := *rec
+	released.LeaseHeld = false
+	released.Status = WorktreeStatusReleased
+	released.UpdatedAt = time.Now()
+	if err := m.persist(&released); err != nil {
+		return fmt.Errorf("worktree: removed %s but failed to persist released record: %w", rec.WorktreePath, err)
+	}
 	delete(m.records, taskID)
 	return nil
 }

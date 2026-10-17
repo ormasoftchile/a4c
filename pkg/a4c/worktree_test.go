@@ -3,9 +3,11 @@ package a4c_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	spike "github.com/ormasoftchile/a4c/pkg/a4c"
@@ -19,7 +21,7 @@ func setupTestGitRepo(t *testing.T) string {
 	runCmd(t, dir, "git", "init")
 	runCmd(t, dir, "git", "config", "user.name", "Test User")
 	runCmd(t, dir, "git", "config", "user.email", "test@example.com")
-	
+
 	dummyFile := filepath.Join(dir, "README.md")
 	if err := os.WriteFile(dummyFile, []byte("# Test Repo\n"), 0644); err != nil {
 		t.Fatalf("failed to write dummy file: %v", err)
@@ -189,5 +191,143 @@ func TestWorktree_04_ReleaseAndPersistenceRecovery(t *testing.T) {
 	}
 	if rec2.LeaseHeld {
 		t.Fatalf("lease should not be held after release")
+	}
+}
+
+func TestWorktree_RemovalPreservesWorkOnGitErrors(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		for _, failure := range []string{"status", "locked", "canceled"} {
+			t.Run(fmt.Sprintf("%s/force=%t", failure, force), func(t *testing.T) {
+				repoDir := setupTestGitRepo(t)
+				stateDir := filepath.Join(repoDir, ".a4c", "worktrees")
+				mgr, err := spike.NewWorktreeManager(repoDir, stateDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := context.Background()
+				rec, err := mgr.AcquireWorktree(ctx, "task-removal-error", "coder")
+				if err != nil {
+					t.Fatal(err)
+				}
+				original := *rec
+				workFile := filepath.Join(rec.WorktreePath, "README.md")
+				before, err := os.ReadFile(workFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch failure {
+				case "status":
+					if err := os.WriteFile(filepath.Join(rec.WorktreePath, ".git"), []byte("invalid git metadata\n"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				case "locked":
+					runCmd(t, repoDir, "git", "worktree", "lock", rec.WorktreePath)
+				case "canceled":
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithCancel(ctx)
+					cancel()
+				}
+
+				err = mgr.RemoveWorktree(ctx, rec.TaskID, force)
+				if err == nil {
+					t.Fatal("expected removal error")
+				}
+				if failure == "canceled" && !errors.Is(err, context.Canceled) {
+					t.Fatalf("expected wrapped cancellation, got %v", err)
+				}
+				after, err := os.ReadFile(workFile)
+				if err != nil || string(after) != string(before) {
+					t.Fatalf("worktree contents were lost: %q, %v", after, err)
+				}
+				retained, err := mgr.GetWorktree(rec.TaskID)
+				if err != nil || *retained != original {
+					t.Fatalf("recovery record changed: %+v, %v", retained, err)
+				}
+				reloaded, err := spike.NewWorktreeManager(repoDir, stateDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				retained, err = reloaded.GetWorktree(rec.TaskID)
+				if err != nil || !retained.LeaseHeld || retained.Status != spike.WorktreeStatusActive {
+					t.Fatalf("durable recovery record lost: %+v, %v", retained, err)
+				}
+			})
+		}
+	}
+}
+
+func TestWorktree_RemovalPreservesTaskArtifacts(t *testing.T) {
+	repoDir := setupTestGitRepo(t)
+	stateDir := filepath.Join(repoDir, ".a4c", "worktrees")
+	mgr, err := spike.NewWorktreeManager(repoDir, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := mgr.AcquireWorktree(context.Background(), "task-artifacts", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(filepath.Dir(rec.WorktreePath), "validation.log")
+	if err := os.WriteFile(artifact, []byte("preserved evidence\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mgr.RemoveWorktree(context.Background(), rec.TaskID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(rec.WorktreePath); !os.IsNotExist(err) {
+		t.Fatalf("worktree still exists: %v", err)
+	}
+	if data, err := os.ReadFile(artifact); err != nil || string(data) != "preserved evidence\n" {
+		t.Fatalf("task evidence was lost: %q, %v", data, err)
+	}
+	if _, err := mgr.GetWorktree(rec.TaskID); !errors.Is(err, spike.ErrWorktreeNotFound) {
+		t.Fatalf("expected removed in-memory record, got %v", err)
+	}
+	reloaded, err := spike.NewWorktreeManager(repoDir, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released, err := reloaded.GetWorktree(rec.TaskID)
+	if err != nil || released.LeaseHeld || released.Status != spike.WorktreeStatusReleased {
+		t.Fatalf("released record was not persisted: %+v, %v", released, err)
+	}
+}
+
+func TestWorktree_RemovalReportsPersistenceFailure(t *testing.T) {
+	repoDir := setupTestGitRepo(t)
+	stateDir := filepath.Join(repoDir, ".a4c", "worktrees")
+	mgr, err := spike.NewWorktreeManager(repoDir, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := mgr.AcquireWorktree(context.Background(), "task-persist-error", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := *rec
+	tmpRecord := filepath.Join(stateDir, rec.TaskID+".json.tmp")
+	if err := os.Mkdir(tmpRecord, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mgr.RemoveWorktree(context.Background(), rec.TaskID, false); err == nil || !strings.Contains(err.Error(), "failed to persist released record") {
+		t.Fatalf("expected explicit metadata persistence error, got %v", err)
+	}
+	if retained, err := mgr.GetWorktree(rec.TaskID); err != nil || *retained != original {
+		t.Fatalf("recovery record changed after persistence error: %+v, %v", retained, err)
+	}
+	if _, err := os.Stat(rec.WorktreePath); !os.IsNotExist(err) {
+		t.Fatalf("Git did not remove the worktree: %v", err)
+	}
+	if err := os.Remove(tmpRecord); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := spike.NewWorktreeManager(repoDir, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reloaded.AcquireWorktree(context.Background(), rec.TaskID, "coder"); err != nil {
+		t.Fatalf("failed to recover worktree after partial removal: %v", err)
 	}
 }

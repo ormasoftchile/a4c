@@ -40,7 +40,11 @@ func NewOpenCodeProvider(endpoint, model string, mgr *OpenCodeServerManager) *Op
 		endpoint:     endpoint,
 		defaultModel: model,
 		serverMgr:    mgr,
-		httpClient:   &http.Client{Timeout: 300 * time.Second},
+		// No client-level Timeout: it would cap EVERY request, including a
+		// legitimate long-running /wait. Per-request transport budgets are
+		// applied via context in doControl instead, and the overall turn is
+		// bounded by the activity deadline in sendTurn.
+		httpClient: &http.Client{},
 	}
 }
 
@@ -179,13 +183,18 @@ func (p *OpenCodeProvider) buildSession(ctx context.Context, existingID string, 
 			u.RawQuery = q.Encode()
 		}
 
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(bodyBytes))
+		// Bound session creation with a transport timeout (the shared client
+		// has no global Timeout, so per-request contexts govern control calls).
+		reqCtx, cancelReq := context.WithTimeout(ctx, ocTransportTimeout)
+		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", u.String(), bytes.NewReader(bodyBytes))
 		if err != nil {
+			cancelReq()
 			return nil, err
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 
 		resp, err := p.httpClient.Do(httpReq)
+		cancelReq()
 		if err != nil {
 			return nil, fmt.Errorf("opencode: create session: %w", err)
 		}
@@ -317,7 +326,9 @@ func (s *OpenCodeSessionAdapter) Cancel() error {
 		return nil
 	}
 
-	req, err := http.NewRequest("POST", fmt.Sprintf("%s/session/%s/abort", endpoint, sessionID), nil)
+	reqCtx, cancelReq := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelReq()
+	req, err := http.NewRequestWithContext(reqCtx, "POST", fmt.Sprintf("%s/session/%s/abort", endpoint, sessionID), nil)
 	if err != nil {
 		return err
 	}
@@ -363,7 +374,6 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 
 	sessionID := s.sessionID
 	endpoint := s.provider.endpoint
-	httpClient := s.provider.httpClient
 	providerID := s.providerID
 	modelID := s.modelID
 	s.mu.Unlock()
@@ -392,9 +402,19 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 
 	promptText := prompt
 	if isReviewer {
-		promptText += "\n\n[INSTRUCTION]: Inspect the changes strictly read-only. If approving, include [REVIEW_APPROVED] in your response. If rejecting, include [REVIEW_REJECTED: reason]."
+		promptText += "\n\n[INSTRUCTION]: Inspect the changes strictly read-only. If approving, include [REVIEW_APPROVED] in your response. If you find a concrete implementation defect, include [REVIEW_REJECTED: reason]. If the implementation looks correct but you cannot verify because evidence or capabilities are missing, include [REVIEW_BLOCKED: reason] -- this is NOT a rejection and will not trigger code changes."
 	} else if strings.EqualFold(s.config.AgentID, "lead") || strings.EqualFold(s.config.AgentID, "alice") {
 		promptText += "\n\n[INSTRUCTION]: Delegate tasks using a JSON block: ```json\n{\"proposals\": [{\"proposal_id\": \"...\", \"proposed_agent_id\": \"coder\", \"objective\": \"...\", \"budget_tokens\": 30000}]}\n```\nPropose budgets that cover full expected context overhead; the runtime raises proposals below the viable minimum and rejects proposals the parent cannot afford."
+	}
+
+	// A4C Knowledge: this host's MCP transport cannot bind a tool call to an
+	// activity by itself, so the coordinator-issued execution-context token is
+	// injected into the session and the model relays it as context_token. This
+	// is weaker than Copilot's per-session MCP env binding and is documented as
+	// such; the HMAC still authenticates the token and a completed activity's
+	// token fails its StatusClaimed check.
+	if s.config.KnowledgeToken != "" {
+		promptText += "\n\n[KNOWLEDGE]: The A4C Knowledge MCP server exposes knowledge_record and knowledge_query. Record significant engineering understanding (hypothesis, finding, decision, experiment result) via knowledge_record, passing this execution-context token as context_token: " + s.config.KnowledgeToken + "\nRetrieve prior knowledge via knowledge_query. Do not record routine implementation steps."
 	}
 
 	reqPayload := map[string]any{
@@ -419,103 +439,20 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST",
-		fmt.Sprintf("%s/session/%s/message", endpoint, sessionID),
-		bytes.NewReader(payloadBytes))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
+	// Execute the turn via OpenCode's asynchronous lifecycle (prompt_async +
+	// /wait polling + message fetch). This separates the transport timeout
+	// from the overall activity deadline so a healthy long-running build is
+	// not killed by an HTTP timeout, while still bounding total duration.
 	tStart := time.Now()
-	resp, err := httpClient.Do(httpReq)
+	msgResp, turnErr := s.sendTurn(ctx, sessionID, endpoint, payloadBytes, modelID)
 	waitDur := time.Since(tStart)
-
-	if err != nil {
-		if pe := ClassifyProviderError("opencode", modelID, err, ""); pe != nil {
-			return nil, pe
-		}
-		return nil, fmt.Errorf("opencode: send request: %w", err)
-	}
-	defer resp.Body.Close()
 
 	s.mu.Lock()
 	s.providerWaitDuration += waitDur
 	s.mu.Unlock()
 
-	if resp.StatusCode != http.StatusOK {
-		var errData any
-		_ = json.NewDecoder(resp.Body).Decode(&errData)
-		rawErr := fmt.Sprintf("status %d: %v", resp.StatusCode, errData)
-		if resp.StatusCode == http.StatusTooManyRequests {
-			return nil, &ProviderError{
-				Kind:        ProviderFailureRateLimited,
-				HostID:      "opencode",
-				Model:       modelID,
-				Message:     rawErr,
-				Retryable:   true,
-				OriginalErr: errors.New(rawErr),
-			}
-		}
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			return nil, &ProviderError{
-				Kind:        ProviderFailureAuthInvalid,
-				HostID:      "opencode",
-				Model:       modelID,
-				Message:     rawErr,
-				Retryable:   false,
-				OriginalErr: errors.New(rawErr),
-			}
-		}
-		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusBadGateway {
-			return nil, &ProviderError{
-				Kind:        ProviderFailureTemporaryOutage,
-				HostID:      "opencode",
-				Model:       modelID,
-				Message:     rawErr,
-				Retryable:   true,
-				OriginalErr: errors.New(rawErr),
-			}
-		}
-		if pe := ClassifyProviderError("opencode", modelID, errors.New(rawErr), rawErr); pe != nil {
-			return nil, pe
-		}
-		return nil, fmt.Errorf("opencode: message request status %d: %v", resp.StatusCode, errData)
-	}
-
-	var msgResp struct {
-		Info struct {
-			ID      string  `json:"id"`
-			Role    string  `json:"role"`
-			Cost    float64 `json:"cost"`
-			ModelID string  `json:"modelID"`
-			Tokens  struct {
-				Total     int `json:"total"`
-				Input     int `json:"input"`
-				Output    int `json:"output"`
-				Reasoning int `json:"reasoning"`
-				Cache     struct {
-					Read  int `json:"read"`
-					Write int `json:"write"`
-				} `json:"cache"`
-			} `json:"tokens"`
-		} `json:"info"`
-		Parts []struct {
-			Type   string `json:"type"`
-			Text   string `json:"text,omitempty"`
-			Reason string `json:"reason,omitempty"`
-			Tokens struct {
-				Total     int `json:"total"`
-				Input     int `json:"input"`
-				Output    int `json:"output"`
-				Reasoning int `json:"reasoning"`
-			} `json:"tokens,omitempty"`
-			Cost float64 `json:"cost,omitempty"`
-		} `json:"parts"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&msgResp); err != nil {
-		return nil, fmt.Errorf("opencode: decode message response: %w", err)
+	if turnErr != nil {
+		return nil, turnErr
 	}
 
 	// Extract text content from parts
@@ -585,62 +522,16 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 }
 
 func (s *OpenCodeSessionAdapter) parseStructuredOutputs(content string) {
-	// Parse review submissions: [SUBMIT_REVIEW: approved=true/false, comments="..."]
+	// Structured, host-independent review verdict protocol. OpenCode has no
+	// custom-tool registration API, so the governed verdict is carried in the
+	// reviewer's structured output and parsed deterministically by
+	// extractReviewVerdict (directives, then JSON, then conservative verdict
+	// words). A missing verdict is never treated as a rejection.
 	if s.config.OnSubmitReview != nil {
-		if strings.Contains(content, "[SUBMIT_REVIEW:") {
-			approved := strings.Contains(content, "approved=true")
-			comments := "Review completed"
-			if idx := strings.Index(content, "comments="); idx != -1 {
-				sub := content[idx+len("comments="):]
-				if end := strings.Index(sub, "]"); end != -1 {
-					comments = strings.Trim(strings.TrimSpace(sub[:end]), "\"")
-				}
-			}
-			s.config.OnSubmitReview(ReviewResult{
-				ActivityID: s.config.AgentID,
-				ReviewerID: s.config.AgentID,
-				Approved:   approved,
-				Comments:   comments,
-				Timestamp:  time.Now(),
-			})
-		} else if strings.Contains(content, "[REVIEW_APPROVED]") {
-			s.config.OnSubmitReview(ReviewResult{
-				ActivityID: s.config.AgentID,
-				ReviewerID: s.config.AgentID,
-				Approved:   true,
-				Comments:   "Approved via model directive",
-				Timestamp:  time.Now(),
-			})
-		} else if strings.Contains(content, "[REVIEW_REJECTED:") {
-			reason := "Rejected"
-			idx := strings.Index(content, "[REVIEW_REJECTED:")
-			sub := content[idx+len("[REVIEW_REJECTED:"): ]
-			if end := strings.Index(sub, "]"); end != -1 {
-				reason = strings.TrimSpace(sub[:end])
-			}
-			s.config.OnSubmitReview(ReviewResult{
-				ActivityID: s.config.AgentID,
-				ReviewerID: s.config.AgentID,
-				Approved:   false,
-				Comments:   reason,
-				Timestamp:  time.Now(),
-			})
-		} else if strings.Contains(strings.ToLower(content), "approved") || strings.Contains(strings.ToLower(content), "lgtm") {
-			s.config.OnSubmitReview(ReviewResult{
-				ActivityID: s.config.AgentID,
-				ReviewerID: s.config.AgentID,
-				Approved:   true,
-				Comments:   "Approved based on review assessment",
-				Timestamp:  time.Now(),
-			})
-		} else if strings.Contains(strings.ToLower(content), "reject") || strings.Contains(strings.ToLower(content), "revision needed") {
-			s.config.OnSubmitReview(ReviewResult{
-				ActivityID: s.config.AgentID,
-				ReviewerID: s.config.AgentID,
-				Approved:   false,
-				Comments:   "Rejected based on review assessment",
-				Timestamp:  time.Now(),
-			})
+		if rev, ok := extractReviewVerdict(content); ok {
+			rev.ActivityID = s.config.AgentID
+			rev.ReviewerID = s.config.AgentID
+			s.config.OnSubmitReview(rev)
 		}
 	}
 

@@ -1,0 +1,87 @@
+{
+  "model_calls": 5,
+  "sessions": 5,
+  "uncached_input_tokens": 2742,
+  "cache_read_tokens": 39488,
+  "total_input_tokens_incl_cache": 13662,
+  "output_tokens": 2077,
+  "reasoning_tokens": 194,
+  "reported_cost_usd": 0.0021534464000000004,
+  "billed_tokens": 0,
+  "activities": [
+    {
+      "id": "impl-1",
+      "agent": "coder",
+      "runtime": "opencode",
+      "model": "opencode-go/mimo-v2.5",
+      "status": "completed",
+      "total_tokens": 22161,
+      "prompt_tokens": 2694,
+      "completion_tokens": 113,
+      "cached_tokens": 19328,
+      "reasoning_tokens": 26,
+      "reported_cost_usd": 0.0004701984,
+      "model_invocations": 1
+    },
+    {
+      "id": "task-1792164160919049000-review-reviewretry-1-reviewretry-2",
+      "agent": "reviewer",
+      "runtime": null,
+      "model": null,
+      "status": "awaiting_human",
+      "total_tokens": 8295,
+      "prompt_tokens": 4930,
+      "completion_tokens": 260,
+      "cached_tokens": 3072,
+      "reasoning_tokens": 33,
+      "reported_cost_usd": 0.0007808416,
+      "model_invocations": 1
+    },
+    {
+      "id": "task-1792164160919049000-review-reviewretry-1",
+      "agent": "reviewer",
+      "runtime": null,
+      "model": null,
+      "status": "completed",
+      "total_tokens": 7243,
+      "prompt_tokens": 3956,
+      "completion_tokens": 173,
+      "cached_tokens": 3072,
+      "reasoning_tokens": 42,
+      "reported_cost_usd": 0.0006226416,
+      "model_invocations": 1
+    },
+    {
+      "id": "task-1792164160919049000-review",
+      "agent": "reviewer",
+      "runtime": "opencode",
+      "model": "opencode-go/mimo-v2.5",
+      "status": "completed",
+      "total_tokens": 8125,
+      "prompt_tokens": 246,
+      "completion_tokens": 60,
+      "cached_tokens": 7744,
+      "reasoning_tokens": 75,
+      "reported_cost_usd": 9.39232e-05,
+      "model_invocations": 1
+    },
+    {
+      "id": "task-1792164160919049000",
+      "agent": "lead",
+      "runtime": "opencode",
+      "model": "opencode-go/mimo-v2.5",
+      "status": "completed",
+      "total_tokens": 31838,
+      "prompt_tokens": 1836,
+      "completion_tokens": 1471,
+      "cached_tokens": 6272,
+      "reasoning_tokens": 18,
+      "reported_cost_usd": 0.0001858416,
+      "model_invocations": 1
+    }
+  ],
+  "models_by_activity": {
+    "opencode-go/mimo-v2.5": 3,
+    "unknown": 2
+  }
+}

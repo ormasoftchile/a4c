@@ -1,0 +1,58 @@
+{
+  "model_calls": 3,
+  "sessions": 3,
+  "uncached_input_tokens": 0,
+  "cache_read_tokens": 119040,
+  "total_input_tokens_incl_cache": 8945,
+  "output_tokens": 2232,
+  "reasoning_tokens": 1880,
+  "reported_cost_usd": 0.002736972,
+  "billed_tokens": 0,
+  "activities": [
+    {
+      "id": "cypher-prop-to-prop-comparison",
+      "agent": "coder",
+      "runtime": "opencode",
+      "model": "opencode-go/mimo-v2.5",
+      "status": "completed",
+      "total_tokens": 63093,
+      "prompt_tokens": 3930,
+      "completion_tokens": 420,
+      "cached_tokens": 58368,
+      "reasoning_tokens": 375,
+      "reported_cost_usd": 0.0009362304,
+      "model_invocations": 1
+    },
+    {
+      "id": "task-1792172543408576000-review",
+      "agent": "reviewer",
+      "runtime": "opencode",
+      "model": "opencode-go/mimo-v2.5",
+      "status": "completed",
+      "total_tokens": 53538,
+      "prompt_tokens": 4337,
+      "completion_tokens": 647,
+      "cached_tokens": 47424,
+      "reasoning_tokens": 1130,
+      "reported_cost_usd": 0.0012375272,
+      "model_invocations": 1
+    },
+    {
+      "id": "task-1792172543408576000",
+      "agent": "lead",
+      "runtime": "opencode",
+      "model": "opencode-go/mimo-v2.5",
+      "status": "completed",
+      "total_tokens": 15466,
+      "prompt_tokens": 678,
+      "completion_tokens": 1165,
+      "cached_tokens": 13248,
+      "reasoning_tokens": 375,
+      "reported_cost_usd": 0.0005632144,
+      "model_invocations": 1
+    }
+  ],
+  "models_by_activity": {
+    "opencode-go/mimo-v2.5": 3
+  }
+}

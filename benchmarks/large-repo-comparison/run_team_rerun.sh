@@ -41,6 +41,18 @@ wm() { python3 "$MEASURE" watermark "$USAGE_DB"; }
 log "phase 1: a4c init"
 w=$(wm)
 (cd "$OUT/a4c-team" && "$A4C_BIN" init .) > "$OUT/a4c-team-setup.log" 2>&1 || true
+# Author the trusted project verification contract BEFORE the coder runs. This
+# is trusted configuration (authored by the harness), not a coder-generated
+# file, so it pins the C test command regardless of any files the coder adds.
+# LIBGIT2_* are emptied because this environment has incompatible libgit2
+# headers (same configuration the independent acceptance harness uses).
+cat > "$OUT/a4c-team/.a4c/verify.json" <<'VERIFY'
+{
+  "command": ["make", "-f", "Makefile.cbm", "SANITIZE=", "LIBGIT2_CFLAGS=", "LIBGIT2_LIBS=", "test"],
+  "kind": "make",
+  "timeout_seconds": 5400
+}
+VERIFY
 python3 "$MEASURE" collect "$USAGE_DB" "$w" "$OUT/a4c-team" "$OUT/a4c-team-setup-usage.json" >/dev/null
 
 log "phase 2: A4C Team coding"

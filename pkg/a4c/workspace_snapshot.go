@@ -23,6 +23,7 @@ func NewWorkspaceSnapshotter() *WorkspaceSnapshotter {
 			".squad":       true,
 			".a4c":         true,
 			"bin":          true,
+			"build":        true, // generated build artifacts (matches .gitignore); not source
 			".codetopo":    true,
 		},
 	}

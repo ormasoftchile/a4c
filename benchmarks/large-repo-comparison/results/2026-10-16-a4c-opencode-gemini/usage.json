@@ -1,0 +1,30 @@
+{
+  "model_calls": 1,
+  "sessions": 1,
+  "uncached_input_tokens": 0,
+  "cache_read_tokens": 0,
+  "total_input_tokens_incl_cache": 0,
+  "output_tokens": 0,
+  "reasoning_tokens": 0,
+  "reported_cost_usd": 0.0,
+  "billed_tokens": 0,
+  "activities": [
+    {
+      "id": "task-1792153788862254000",
+      "agent": "lead",
+      "runtime": "opencode",
+      "model": "opencode-go/gemini-4-argon-contributor",
+      "status": "failed",
+      "total_tokens": 0,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0,
+      "reported_cost_usd": 0.0,
+      "model_invocations": 1
+    }
+  ],
+  "models_by_activity": {
+    "opencode-go/gemini-4-argon-contributor": 1
+  }
+}

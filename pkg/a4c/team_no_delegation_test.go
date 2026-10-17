@@ -141,8 +141,23 @@ func TestTeam_LeadWithProposalCompletes(t *testing.T) {
 	if n, ok := result.Outputs["proposals_recorded"].(int); !ok || n != 1 {
 		t.Errorf("expected proposals_recorded=1, got %v", result.Outputs["proposals_recorded"])
 	}
-	if len(result.Proposals) != 1 {
-		t.Errorf("expected 1 proposal on result, got %d", len(result.Proposals))
+	// The lead proposed 1 coder; mandatory-review policy enforcement then
+	// schedules an independent reviewer for the final candidate, so the result
+	// carries both the lead's coder and the coordinator-scheduled reviewer.
+	if len(result.Proposals) != 2 {
+		t.Errorf("expected 2 proposals (coder + enforced reviewer), got %d", len(result.Proposals))
+	}
+	hasCoder, hasReviewer := false, false
+	for _, p := range result.Proposals {
+		if p.ProposedAgentID == "coder" {
+			hasCoder = true
+		}
+		if p.ProposedAgentID == "reviewer" {
+			hasReviewer = true
+		}
+	}
+	if !hasCoder || !hasReviewer {
+		t.Errorf("expected both a coder and an enforced reviewer proposal, got %+v", result.Proposals)
 	}
 }
 

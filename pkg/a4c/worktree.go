@@ -121,7 +121,42 @@ func (m *WorktreeManager) EnsureGitRepo(ctx context.Context) error {
 		cmdCommit.Dir = m.rootDir
 		_ = cmdCommit.Run()
 	}
+	// Ensure A4C operational state is never staged into a deliverable diff.
+	// `git add -A` (run by hosts/harnesses) respects info/exclude, so .a4c
+	// evidence, logs, and metadata stay out of the submitted patch.
+	m.ensureA4CExcludedFromGit(ctx)
 	return nil
+}
+
+// ensureA4CExcludedFromGit appends ".a4c/" to the repository's info/exclude so
+// A4C operational artifacts are never staged by `git add -A` or shown in diffs.
+func (m *WorktreeManager) ensureA4CExcludedFromGit(ctx context.Context) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
+	cmd.Dir = m.rootDir
+	out, err := cmd.Output()
+	if err != nil {
+		return
+	}
+	gitCommon := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(gitCommon) {
+		gitCommon = filepath.Join(m.rootDir, gitCommon)
+	}
+	excludePath := filepath.Join(gitCommon, "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
+		return
+	}
+	existing, _ := os.ReadFile(excludePath)
+	for _, line := range strings.Split(string(existing), "\n") {
+		if strings.TrimSpace(line) == ".a4c/" {
+			return // already excluded
+		}
+	}
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString("\n# A4C operational state (evidence, logs, metadata) — never part of the deliverable\n.a4c/\n")
 }
 
 // AcquireWorktree creates or resumes an isolated Git worktree for the given task.
@@ -185,12 +220,39 @@ func (m *WorktreeManager) AcquireWorktree(ctx context.Context, taskID, ownerAgen
 		UpdatedAt:    time.Now(),
 	}
 
+	// Carry trusted project configuration (e.g. .a4c/verify.json) from the
+	// main repository into the worktree so project verification uses the
+	// authored contract rather than guessing. This is trusted config authored
+	// before the coder ran, not a coder-generated file.
+	m.copyTrustedConfig(worktreeDir)
+
 	if err := m.persist(record); err != nil {
 		return nil, err
 	}
 
 	m.records[taskID] = record
 	return record, nil
+}
+
+// copyTrustedConfig copies trusted A4C configuration files from the main repo
+// into a freshly created worktree.
+func (m *WorktreeManager) copyTrustedConfig(worktreeDir string) {
+	trusted := []string{
+		filepath.Join(".a4c", "verify.json"),
+		filepath.Join(".a4c", "knowledge.json"),
+	}
+	for _, rel := range trusted {
+		src := filepath.Join(m.rootDir, rel)
+		data, err := os.ReadFile(src)
+		if err != nil {
+			continue
+		}
+		dst := filepath.Join(worktreeDir, rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			continue
+		}
+		_ = os.WriteFile(dst, data, 0o600)
+	}
 }
 
 // ReleaseWorktree releases the active lease on a worktree without deleting uncommitted changes.
@@ -274,4 +336,3 @@ func (m *WorktreeManager) RemoveWorktree(ctx context.Context, taskID string, for
 	delete(m.records, taskID)
 	return nil
 }
-

@@ -108,6 +108,10 @@ type ActivityLimits struct {
 	MaxDiffLines        int `json:"max_diff_lines,omitempty"`
 	MaxValidationOutput int `json:"max_validation_output,omitempty"`
 	MaxRevisions        int `json:"max_revisions,omitempty"`
+	// MaxVerificationAttempts bounds how many times the coordinator will
+	// collect evidence and retry a review that ends verification_blocked.
+	// It is independent of MaxRevisions, which governs coding revisions only.
+	MaxVerificationAttempts int `json:"max_verification_attempts,omitempty"`
 }
 
 // ActivityFilter specifies criteria for querying historical or active activities.
@@ -231,6 +235,11 @@ const (
 	ReviewVerdictApproved   ReviewVerdict = "approved"
 	ReviewVerdictRejected   ReviewVerdict = "rejected"
 	ReviewVerdictIncomplete ReviewVerdict = "incomplete"
+	// ReviewVerdictVerificationBlocked records that the reviewer could not
+	// establish correctness because evidence or capability was unavailable,
+	// WITHOUT asserting any implementation defect. It must never consume a
+	// coding revision.
+	ReviewVerdictVerificationBlocked ReviewVerdict = "verification_blocked"
 )
 
 // ReviewResult encapsulates deterministic peer review artifacts.
@@ -286,6 +295,42 @@ type ValidationEvidence struct {
 	StartedAt           time.Time     `json:"started_at"`
 	CompletedAt         time.Time     `json:"completed_at"`
 	Valid               bool          `json:"valid"`
+	// TestsExecuted is the number of test cases the command actually ran.
+	// Zero means the command was vacuous (e.g. `go test` on a repository
+	// with no Go test files) and therefore proves nothing about the change.
+	TestsExecuted int `json:"tests_executed,omitempty"`
+	// Vacuous marks evidence whose command ran but exercised no tests.
+	// Vacuous evidence is never treated as VALID: it is a verification gap,
+	// not proof of correctness.
+	Vacuous bool `json:"vacuous,omitempty"`
+	// SourceRevision is the git HEAD the verification validated, so evidence
+	// is tied to the code revision under review.
+	SourceRevision string `json:"source_revision,omitempty"`
+}
+
+// CoderHandoff is the structured completion artifact a coder publishes for a
+// reviewer. It exists so a reviewer can verify without re-deriving what the
+// coder already established. Every field is optional; missing fields are
+// reported as verification gaps rather than defects.
+type CoderHandoff struct {
+	FilesChanged         []string `json:"files_changed,omitempty"`
+	FilesAdded           []string `json:"files_added,omitempty"`
+	BehaviorSummary      string   `json:"behavior_summary,omitempty"`
+	TestsAdded           []string `json:"tests_added,omitempty"`
+	TestsUpdated         []string `json:"tests_updated,omitempty"`
+	VerificationCmds     []string `json:"verification_commands,omitempty"`
+	TestExitCodes        []int    `json:"test_exit_codes,omitempty"`
+	TestLogPaths         []string `json:"test_log_paths,omitempty"`
+	KnownLimitations     []string `json:"known_limitations,omitempty"`
+	ValidationEvidenceID string   `json:"validation_evidence_id,omitempty"`
+}
+
+// ReviewFinding is one item surfaced to the reviewer, either a concrete defect
+// candidate or a diff-hygiene warning the reviewer must adjudicate.
+type ReviewFinding struct {
+	Kind    string `json:"kind"` // "defect" | "diff_hygiene" | "verification_gap"
+	Path    string `json:"path,omitempty"`
+	Message string `json:"message"`
 }
 
 // TaskCheckpoint captures authoritative task and engineering state for cross-host continuation.

@@ -7,3 +7,13 @@ bin/
 .codetopo/
 /a4c
 experiments/
+
+# Benchmark run artifacts: cloned repos, worktrees, and compiled binaries are
+# machine-local and heavy. Only the small evidence artifacts (logs, diffs,
+# usage JSON, task-inspect) are tracked.
+benchmarks/large-repo-comparison/results/*/a4c
+benchmarks/large-repo-comparison/results/*/a4c-team
+benchmarks/large-repo-comparison/results/*/repo
+benchmarks/large-repo-comparison/results/*/a4c-direct-final-src/
+benchmarks/large-repo-comparison/results/*/a4c-team-final-src/
+benchmarks/large-repo-comparison/results/*/wm-*.tmp

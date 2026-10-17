@@ -1,0 +1,97 @@
+diff --git a/src/cypher/cypher.c b/src/cypher/cypher.c
+index 77bc710..fc668fd 100644
+--- a/src/cypher/cypher.c
++++ b/src/cypher/cypher.c
+@@ -754,6 +754,8 @@ static void expr_free(cbm_expr_t *e) {
+             safe_str_free(&cur->cond.property);
+             safe_str_free(&cur->cond.op);
+             safe_str_free(&cur->cond.value);
++            safe_str_free(&cur->cond.rhs_variable);
++            safe_str_free(&cur->cond.rhs_property);
+             for (int i = 0; i < cur->cond.in_value_count; i++) {
+                 safe_str_free(&cur->cond.in_values[i]);
+             }
+@@ -1086,6 +1088,13 @@ static cbm_expr_t *parse_condition_expr(parser_t *p) {
+     } else if (check(p, TOK_FALSE)) {
+         advance(p);
+         c.value = heap_strdup("false");
++    } else if (check(p, TOK_IDENT) && p->pos + PAIR_LEN < p->count &&
++               p->tokens[p->pos + SKIP_ONE].type == TOK_DOT &&
++               p->tokens[p->pos + PAIR_LEN].type == TOK_IDENT) {
++        /* Property-to-property comparison: a.prop = b.prop */
++        c.rhs_variable = heap_strdup(advance(p)->text);
++        advance(p); /* DOT */
++        c.rhs_property = heap_strdup(advance(p)->text);
+     } else {
+         snprintf(p->error, sizeof(p->error), "expected value at pos %d", peek(p)->pos);
+         safe_str_free(&c.variable);
+@@ -2327,23 +2336,29 @@ static void binding_set(binding_t *b, const char *var, const cbm_node_t *node) {
+     b->var_count++;
+ }
+ 
+-/* Resolve the actual property value for a condition from a binding */
+-static const char *resolve_condition_value(const cbm_condition_t *c, binding_t *b) {
+-    cbm_edge_t *e = binding_get_edge(b, c->variable);
++/* Resolve the value of a (variable, property) pair from a binding. A NULL
++ * property means bare alias (post-WITH virtual var) — use the node name. */
++static const char *resolve_var_prop(const char *variable, const char *property, binding_t *b) {
++    cbm_edge_t *e = binding_get_edge(b, variable);
+     if (e) {
+-        return edge_prop(e, c->property);
++        return edge_prop(e, property);
+     }
+-    cbm_node_t *n = binding_get(b, c->variable);
++    cbm_node_t *n = binding_get(b, variable);
+     if (!n) {
+         return NULL; /* unbound variable */
+     }
+-    if (c->property) {
+-        return node_prop(n, c->property, b->store);
++    if (property) {
++        return node_prop(n, property, b->store);
+     }
+     /* Bare alias (e.g. post-WITH virtual var) — use node name directly */
+     return n->name ? n->name : "";
+ }
+ 
++/* Resolve the actual property value for a condition from a binding */
++static const char *resolve_condition_value(const cbm_condition_t *c, binding_t *b) {
++    return resolve_var_prop(c->variable, c->property, b);
++}
++
+ /* Evaluate a comparison operator between actual and expected strings. */
+ static bool eval_comparison_op(const char *op, const char *actual, const char *expected) {
+     if (strcmp(op, "=") == 0) {
+@@ -2461,6 +2476,17 @@ static bool eval_condition(const cbm_condition_t *c, binding_t *b) {
+         return c->negated ? !result : result;
+     }
+ 
++    /* Property-to-property: resolve RHS the same way; NULL RHS follows the
++     * unbound-LHS rule above (condition passes regardless of negation). */
++    if (c->rhs_variable) {
++        const char *rhs_value = resolve_var_prop(c->rhs_variable, c->rhs_property, b);
++        if (!rhs_value) {
++            return true;
++        }
++        result = eval_comparison_op(c->op, actual, rhs_value);
++        return c->negated ? !result : result;
++    }
++
+     result = eval_comparison_op(c->op, actual, c->value);
+     return c->negated ? !result : result;
+ }
+diff --git a/src/cypher/cypher.h b/src/cypher/cypher.h
+index 5966c20..5df059b 100644
+--- a/src/cypher/cypher.h
++++ b/src/cypher/cypher.h
+@@ -188,6 +188,10 @@ typedef struct {
+     const char *op; /* "=", "<>", "=~", "CONTAINS", "STARTS WITH", "ENDS WITH",
+                        ">", "<", ">=", "<=", "IN", "IS NULL", "IS NOT NULL" */
+     const char *value;
++    /* Property-to-property RHS (a.prop = b.prop): set via heap_strdup when the
++     * RHS is a variable.property pair; both NULL when the RHS is a literal. */
++    const char *rhs_variable;
++    const char *rhs_property;
+     bool negated;           /* NOT prefix */
+     const char **in_values; /* IN [...] list */
+     int in_value_count;

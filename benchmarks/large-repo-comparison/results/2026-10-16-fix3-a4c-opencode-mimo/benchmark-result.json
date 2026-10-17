@@ -1,0 +1,12 @@
+{
+  "implementation": "failed",
+  "verification": "failed",
+  "agent_review": "not_approved",
+  "production_state": "completed",
+  "benchmark_result": "FAIL",
+  "reasons": [
+    "independent acceptance = FAIL",
+    "no completed coder activity",
+    "no approved independent agent review"
+  ]
+}

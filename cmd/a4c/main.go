@@ -16,6 +16,7 @@ import (
 
 	"github.com/ormasoftchile/a4c/pkg/a4c"
 	a4cmcp "github.com/ormasoftchile/a4c/pkg/a4c/mcp"
+	"github.com/ormasoftchile/a4c/pkg/a4c/knowledge"
 )
 
 const banner = `
@@ -62,6 +63,7 @@ Commands:
   decisions list                        List questions awaiting human engineer guidance
   decisions resolve <id> <resolution>   Resolve decision and resume paused task
   memory list                           List verified architectural conventions
+  knowledge <enable|disable|status|...> Manage the optional A4C Knowledge module
   demo [--real-copilot]                 Run full self-contained demonstration
 
 Flags:
@@ -121,6 +123,9 @@ func main() {
 
 	case "memory":
 		runMemory(args)
+
+	case "knowledge":
+		runKnowledge(args)
 
 	case "demo":
 		runDemo(args)
@@ -226,6 +231,7 @@ func runInit(args []string) {
 	dirs := []string{
 		dotDir, storeDir, rosterDir, memDir, journalDir,
 		filepath.Join(dotDir, "worktrees"),
+		filepath.Join(dotDir, "knowledge"),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0755); err != nil {
@@ -332,9 +338,20 @@ func buildService(workDir string) (*a4c.TeamServiceImpl, error) {
 	gov := a4c.NewPolicyGovernor([]string{
 		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
 		"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+		"knowledge_record", "knowledge_query",
 	})
-	coord := a4c.NewTeamCoordinator(workDir, store, roster, memStore, gov, journal, &a4c.NativeGoTestRunner{}, nil)
+	coord := a4c.NewTeamCoordinator(workDir, store, roster, memStore, gov, journal, a4c.NewProjectTestRunner(), nil)
 	coord.SetWorktreeManager(wtMgr)
+
+	// Wire the optional A4C Knowledge service (ErrDisabled is expected when off).
+	if ks, kerr := knowledge.NewService(workDir, func(activityID string) bool {
+		rec, err := store.Get(activityID)
+		return err == nil && rec != nil && rec.Status == a4c.StatusClaimed
+	}); kerr == nil {
+		coord.SetKnowledge(ks)
+	} else if !errors.Is(kerr, knowledge.ErrDisabled) {
+		fmt.Fprintf(os.Stderr, "knowledge disabled: %v\n", kerr)
+	}
 
 	return a4c.NewTeamService(workDir, store, lifecycleStore, coord, roster, memStore, journal, wtMgr), nil
 }
@@ -1283,6 +1300,7 @@ func runHost(args []string) {
 func runMCP(args []string) {
 	workDir := "."
 	role := ""
+	token := ""
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--dir" && i+1 < len(args) {
@@ -1291,7 +1309,13 @@ func runMCP(args []string) {
 		} else if (args[i] == "--role" || args[i] == "--agent") && i+1 < len(args) {
 			role = args[i+1]
 			i++
+		} else if args[i] == "--context-token" && i+1 < len(args) {
+			token = args[i+1]
+			i++
 		}
+	}
+	if token == "" {
+		token = os.Getenv("A4C_KNOWLEDGE_TOKEN")
 	}
 	svc, err := buildService(workDir)
 	if err != nil {
@@ -1299,6 +1323,17 @@ func runMCP(args []string) {
 		os.Exit(1)
 	}
 	srv := a4cmcp.NewServerWithRole(svc, role)
+
+	// Wire A4C Knowledge when enabled. ErrDisabled is expected and silent.
+	if ks, kerr := knowledge.NewService(workDir, func(activityID string) bool {
+		rec, err := svc.Store().Get(activityID)
+		return err == nil && rec != nil && rec.Status == a4c.StatusClaimed
+	}); kerr == nil {
+		srv.RegisterKnowledge(ks, token)
+	} else if !errors.Is(kerr, knowledge.ErrDisabled) {
+		fmt.Fprintf(os.Stderr, "knowledge disabled: %v\n", kerr)
+	}
+
 	if err := srv.ServeStdio(); err != nil {
 		fmt.Fprintf(os.Stderr, "MCP server exited with error: %v\n", err)
 		os.Exit(1)
@@ -1399,6 +1434,114 @@ func runMemory(args []string) {
 	}
 }
 
+// runKnowledge implements the `a4c knowledge` subcommand surface for the
+// optional A4C Knowledge module (enable/disable/status/list/query/show).
+func runKnowledge(args []string) {
+	workDir := "."
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--dir" && i+1 < len(args) {
+			workDir = args[i+1]
+			i++
+		}
+	}
+	if len(args) == 0 {
+		fmt.Println("Usage: a4c knowledge <enable|disable|status|list|query|show> [--dir path]")
+		return
+	}
+	sub := args[0]
+	cfg, _ := knowledge.ReadConfig(workDir)
+
+	switch sub {
+	case "enable":
+		cfg.Enabled = true
+		if cfg.Project == "" {
+			cfg.Project = filepath.Base(workDir)
+		}
+		if err := knowledge.WriteConfig(workDir, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "enable failed: %v\n", err)
+			return
+		}
+		// Warm the store so the DB and secret exist.
+		if ks, err := knowledge.NewService(workDir, knowledge.ActivityIsActive); err == nil {
+			_ = ks.Close()
+		}
+		fmt.Printf("A4C Knowledge enabled for project %q (db: %s)\n", cfg.Project, filepath.Join(workDir, ".a4c", "knowledge.db"))
+
+	case "disable":
+		cfg.Enabled = false
+		if err := knowledge.WriteConfig(workDir, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "disable failed: %v\n", err)
+			return
+		}
+		fmt.Println("A4C Knowledge disabled.")
+
+	case "status":
+		if !cfg.Enabled {
+			fmt.Println("A4C Knowledge: disabled (no .a4c/knowledge.json with enabled=true)")
+			return
+		}
+		ks, err := knowledge.NewService(workDir, knowledge.ActivityIsActive)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "status failed: %v\n", err)
+			return
+		}
+		defer ks.Close()
+		byKind, bySupport, byStatus, total, path, err := ks.Status()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "status failed: %v\n", err)
+			return
+		}
+		fmt.Printf("A4C Knowledge: enabled\n  project: %s\n  db: %s\n  records: %d\n", cfg.Project, path, total)
+		fmt.Printf("  by kind: %v\n  by support: %v\n  by status: %v\n", byKind, bySupport, byStatus)
+
+	case "list", "query", "show":
+		if !cfg.Enabled {
+			fmt.Println("A4C Knowledge: disabled")
+			return
+		}
+		ks, err := knowledge.NewService(workDir, knowledge.ActivityIsActive)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s failed: %v\n", sub, err)
+			return
+		}
+		defer ks.Close()
+		switch sub {
+		case "list", "query":
+			text := ""
+			if sub == "query" && len(args) > 1 && !strings.HasPrefix(args[1], "--") {
+				text = args[1]
+			}
+			res, err := ks.Query(knowledge.QueryInput{Text: text, Limit: 50})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "query failed: %v\n", err)
+				return
+			}
+			if res.Count == 0 {
+				fmt.Println("No knowledge records.")
+				return
+			}
+			for _, r := range res.Records {
+				fmt.Printf("- [%s %s/%s] %s\n", r.Kind, r.Support, r.Status, r.Statement)
+			}
+		case "show":
+			if len(args) < 2 {
+				fmt.Println("Usage: a4c knowledge show <id>")
+				return
+			}
+			rec, err := ks.Store().Get(args[1])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "show failed: %v\n", err)
+				return
+			}
+			b, _ := json.MarshalIndent(rec, "", "  ")
+			fmt.Println(string(b))
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown knowledge subcommand %q. Usage: a4c knowledge <enable|disable|status|list|query|show>\n", sub)
+	}
+}
+
 func runLoop(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	realCopilot := fs.Bool("real-copilot", false, "Use official GitHub Copilot CLI")
@@ -1425,11 +1568,12 @@ func runLoop(args []string) {
 
 	memory, _ := a4c.NewDurableMemoryStore(memDir)
 	journal, _ := a4c.NewDurableIntentJournal(journalDir)
-	runner := &a4c.NativeGoTestRunner{}
+	runner := a4c.NewProjectTestRunner()
 
 	gov := a4c.NewPolicyGovernor([]string{
 		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
 		"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+		"knowledge_record", "knowledge_query",
 	})
 	for _, m := range roster.ListMembers() {
 		gov.SetAgentTools(m.ID, m.AllowedTools)
@@ -1530,11 +1674,12 @@ func runDemo(args []string) {
 	gov := a4c.NewPolicyGovernor([]string{
 		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
 		"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+		"knowledge_record", "knowledge_query",
 	})
 	for _, m := range roster.ListMembers() {
 		gov.SetAgentTools(m.ID, m.AllowedTools)
 	}
-	runner := &a4c.NativeGoTestRunner{}
+	runner := a4c.NewProjectTestRunner()
 
 	var provider a4c.AgentProvider
 	if useReal {

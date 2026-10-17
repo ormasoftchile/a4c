@@ -1,0 +1,222 @@
+{
+  "task_id": "task-1792172543408576000",
+  "original_objective": "# Task: Support property-to-property comparisons in Cypher WHERE clauses\n\n## Problem\n\nThe Cypher query subset supported by `src/cypher/cypher.c` fails to parse a WHERE condition that compares one variable's property with another variable's property. The query aborts with `expected value at pos N` at the right-hand operand.\n\nExamples that fail on the current code:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.name \u003c\u003e b.name RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WITH a, b WHERE a.file_path = b.file_path RETURN a.name, b.name\n```\n\nProperty-to-literal comparisons already work and must keep working:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE b.file_path = 'demo.go' RETURN a.name, b.name\n```\n\n## Required behavior\n\nExtend the WHERE parser and evaluator so that when the right-hand side of a comparison operator is another `variable.property` expression (not a string/number/boolean literal), the condition compares the two resolved property values for the current binding.\n\n1. `a.prop = b.prop` — true when the two resolved string values are equal.\n2. `a.prop \u003c\u003e b.prop` — true when the two resolved string values differ.\n3. All existing comparison operators that make sense on property values (`\u003e`, `\u003c`, `\u003e=`, `\u003c=`) should also accept a property right-hand side, evaluated the same way as when the right-hand side is a numeric literal (via `strtod`).\n4. The property right-hand side must resolve through the same binding mechanism used for the left-hand side (`node_prop` / bare-alias name), so File, Function, and other node property paths all work.\n5. Property-to-literal and bare-alias comparisons must continue to work exactly as before.\n6. The change must work in both the early WHERE (after MATCH) and post-WITH WHERE paths, since they share the same parser and evaluator.\n\n## Where to change\n\n- Parser: `parse_condition_expr` in `src/cypher/cypher.c` currently rejects a non-literal right-hand side with `expected value at pos %d`.\n- Condition model: `cbm_condition_t` in `src/cypher/cypher.h` currently only stores a literal `value`.\n- Evaluator: `eval_condition` / `resolve_condition_value` in `src/cypher/cypher.c` currently resolve only the left-hand side against the binding.\n\n## Constraints\n\n- Do not break any existing Cypher behavior (WHERE with literals, regex, CONTAINS, STARTS WITH, ENDS WITH, IN, IS NULL, IS NOT NULL, HAS_LABEL, EXISTS, AND/OR/XOR/NOT).\n- Keep the error path for genuinely unsupported right-hand sides (e.g. function calls on the RHS if not already supported) clear and non-crashing.\n- Add unit tests in the existing Cypher test suite covering property-to-property `=`, `\u003c\u003e`, and at least one ordering operator, plus a WITH-path case.\n- The full project test suite (`make -f Makefile.cbm SANITIZE= test`) must still pass.\n\n## How to verify\n\n```sh\nmake -f Makefile.cbm SANITIZE= cbm\n./build/c/codebase-memory-mcp cli index_repository '{\"repo_path\":\"/tmp/demo\",\"mode\":\"full\",\"name\":\"demo\"}'\n./build/c/codebase-memory-mcp cli query_graph '{\"project\":\"demo\",\"query\":\"MATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\"}'\n```\n\nBefore the fix this errors with `expected value at pos N`. After the fix it returns only CALLS edges whose source and target files are the same.",
+  "strategy": "team",
+  "created_at": "2026-10-16T14:42:26.075994-03:00",
+  "allocated_budget": 2000000,
+  "consumed_budget": 132097,
+  "status": "completed",
+  "branch": "a4c/task-1792172543408576000",
+  "participating_agents": [
+    "lead",
+    "coder",
+    "reviewer"
+  ],
+  "activities": [
+    {
+      "activity_id": "task-1792172543408576000",
+      "agent_id": "lead",
+      "objective": "# Task: Support property-to-property comparisons in Cypher WHERE clauses\n\n## Problem\n\nThe Cypher query subset supported by `src/cypher/cypher.c` fails to parse a WHERE condition that compares one variable's property with another variable's property. The query aborts with `expected value at pos N` at the right-hand operand.\n\nExamples that fail on the current code:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.name \u003c\u003e b.name RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WITH a, b WHERE a.file_path = b.file_path RETURN a.name, b.name\n```\n\nProperty-to-literal comparisons already work and must keep working:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE b.file_path = 'demo.go' RETURN a.name, b.name\n```\n\n## Required behavior\n\nExtend the WHERE parser and evaluator so that when the right-hand side of a comparison operator is another `variable.property` expression (not a string/number/boolean literal), the condition compares the two resolved property values for the current binding.\n\n1. `a.prop = b.prop` — true when the two resolved string values are equal.\n2. `a.prop \u003c\u003e b.prop` — true when the two resolved string values differ.\n3. All existing comparison operators that make sense on property values (`\u003e`, `\u003c`, `\u003e=`, `\u003c=`) should also accept a property right-hand side, evaluated the same way as when the right-hand side is a numeric literal (via `strtod`).\n4. The property right-hand side must resolve through the same binding mechanism used for the left-hand side (`node_prop` / bare-alias name), so File, Function, and other node property paths all work.\n5. Property-to-literal and bare-alias comparisons must continue to work exactly as before.\n6. The change must work in both the early WHERE (after MATCH) and post-WITH WHERE paths, since they share the same parser and evaluator.\n\n## Where to change\n\n- Parser: `parse_condition_expr` in `src/cypher/cypher.c` currently rejects a non-literal right-hand side with `expected value at pos %d`.\n- Condition model: `cbm_condition_t` in `src/cypher/cypher.h` currently only stores a literal `value`.\n- Evaluator: `eval_condition` / `resolve_condition_value` in `src/cypher/cypher.c` currently resolve only the left-hand side against the binding.\n\n## Constraints\n\n- Do not break any existing Cypher behavior (WHERE with literals, regex, CONTAINS, STARTS WITH, ENDS WITH, IN, IS NULL, IS NOT NULL, HAS_LABEL, EXISTS, AND/OR/XOR/NOT).\n- Keep the error path for genuinely unsupported right-hand sides (e.g. function calls on the RHS if not already supported) clear and non-crashing.\n- Add unit tests in the existing Cypher test suite covering property-to-property `=`, `\u003c\u003e`, and at least one ordering operator, plus a WITH-path case.\n- The full project test suite (`make -f Makefile.cbm SANITIZE= test`) must still pass.\n\n## How to verify\n\n```sh\nmake -f Makefile.cbm SANITIZE= cbm\n./build/c/codebase-memory-mcp cli index_repository '{\"repo_path\":\"/tmp/demo\",\"mode\":\"full\",\"name\":\"demo\"}'\n./build/c/codebase-memory-mcp cli query_graph '{\"project\":\"demo\",\"query\":\"MATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\"}'\n```\n\nBefore the fix this errors with `expected value at pos N`. After the fix it returns only CALLS edges whose source and target files are the same.",
+      "status": "completed",
+      "budget_used": 15466,
+      "outputs": {
+        "mandatory_review_scheduled": true,
+        "proposals_recorded": 1,
+        "session_id": "ses_eba311dc5ffef2Mq7OAD9AtPly",
+        "summary": "I have enough context to craft a precise handoff. The change touches: the condition struct (`cypher.h:185-198`), the RHS parse branch in `parse_condition_expr` (`cypher.c:1080-1095`), the resolver/evaluator (`cypher.c:2331-2466`), condition frees (`cypher.c:1933-1942`), and `tests/test_cypher.c`.\n\n```json\n{\n  \"proposals\": [\n    {\n      \"proposal_id\": \"cypher-prop-to-prop-comparison\",\n      \"proposed_agent_id\": \"coder\",\n      \"objective\": \"Support property-to-property comparisons (a.prop = b.prop, \u003c\u003e, \u003e, \u003c, \u003e=, \u003c=) in the Cypher WHERE parser and evaluator.\\n\\nFiles:\\n- src/cypher/cypher.h — condition model `cbm_condition_t` (lines ~185-198)\\n- src/cypher/cypher.c — parser `parse_condition_expr` (RHS value branch ~lines 1080-1095), resolver `resolve_condition_value` (~2331), evaluator `eval_condition` (~2394), condition free path (~1933-1942; also check any free path for expression-tree leaf conditions)\\n- tests/test_cypher.c — existing Cypher unit test suite\\n\\nContract:\\n1. Extend `cbm_condition_t` with RHS property fields, e.g. `const char *rhs_variable; const char *rhs_property;` (heap_strdup'ed like the LHS fields; NULL when RHS is a literal — preserves all existing behavior since `value` stays the literal path).\\n2. Parser: after `c.op = parse_comparison_op(p)`, if the next tokens are `TOK_IDENT` followed by `TOK_DOT` + `TOK_IDENT`, parse them into `c.rhs_variable` / `c.rhs_property` (heap_strdup) and leave `c.value` NULL. All other RHS forms (string/number/true/false) keep the existing literal path; anything else keeps the existing `expected value at pos %d` error (free all allocated fields before returning NULL, same style as current error path).\\n3. Refactor `resolve_condition_value` into (or add) a helper `resolve_prop(binding_t *b, const char *variable, const char *property)` that does: edge lookup → edge_prop; else node lookup → node_prop (or node name if property NULL). Use it for the LHS and, when `c-\u003erhs_variable` is set, for the RHS.\\n4. `eval_condition`: when `c-\u003erhs_variable` is set, resolve the RHS via the same helper and pass both resolved strings to `eval_comparison_op(c-\u003eop, actual, rhs)` — so `=`/`\u003c\u003e` compare via strcmp and `\u003e`/`\u003c`/`\u003e=`/`\u003c=` via strtod, identical to literal-RHS semantics. Respect `c-\u003enegated` as today. Handle NULL/empty resolved values sanely (no crash; treat unbound RHS consistently with LHS behavior).\\n5. Free `rhs_variable`/`rhs_property` in every condition-free path (legacy flat array free and any expr-tree leaf free), using `safe_str_free`.\\n6. Must work identically for the early WHERE (post-MATCH) and post-WITH WHERE paths — they share this parser/evaluator, so no extra wiring should be needed; verify both.\\n\\nConstraints:\\n- Do not break existing behavior: literal comparisons, `=~`, CONTAINS, STARTS WITH, ENDS WITH, IN, IS NULL, IS NOT NULL, HAS_LABEL, EXISTS, AND/OR/XOR/NOT, bare-alias LHS comparisons (post-WITH `cnt = 5`).\\n- Unsupported RHS (e.g. function call after the operator) must still produce a clear parse error, non-crashing.\\n- Follow existing code style in cypher.c (heap_strdup, safe_str_free, snprintf error paths); no comments unless matching surrounding style.\\n\\nTests (in tests/test_cypher.c, following existing test conventions there):\\n- `a.prop = b.prop` true/false cases (e.g. CALLS edges with same vs different file_path)\\n- `a.prop \u003c\u003e b.prop`\\n- one ordering operator (e.g. `a.line \u003e b.line` or similar numeric prop)\\n- one WITH-path case: `WITH a, b WHERE a.file_path = b.file_path RETURN ...`\\n- one regression case: property-to-literal still works (e.g. `b.file_path = 'demo.go'`)\\n\\nVerification:\\n- `make -f Makefile.cbm SANITIZE= test` must pass in full (this is the required gate; also catches leaks via the sanitizer build if configured).\\n- Build with `make -f Makefile.cbm SANITIZE= cbm` and smoke-test via CLI if convenient:\\n  `./build/c/codebase-memory-mcp cli query_graph '{\\\"project\\\":\\\"demo\\\",\\\"query\\\":\\\"MATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\\\"}'` (after indexing a /tmp/demo repo) — but the unit tests are the primary gate.\",\n      \"budget_tokens\": 250000\n    }\n  ]\n}\n```",
+        "tool_limit_hits": 0
+      },
+      "metrics": {
+        "wall_clock_duration": 185029939334,
+        "provider_wait_duration": 185028877125,
+        "model_duration": 185028877125,
+        "tool_duration": 0,
+        "prompt_tokens": 678,
+        "completion_tokens": 1165,
+        "total_tokens": 15466,
+        "reasoning_tokens": 375,
+        "cached_tokens": 13248,
+        "reported_cost_usd": 0.0005632144,
+        "model_invocations": 1,
+        "tool_calls": 0,
+        "proposals_recorded": 1
+      },
+      "capability_profile": {
+        "id": "profile-architecture-investigation",
+        "name": "Architecture Investigation",
+        "description": "Read-only file inspection, activity delegation, and memory proposals.",
+        "allowed_tools": [
+          "governed_read_file",
+          "governed_propose_activity",
+          "governed_request_human_decision",
+          "governed_propose_memory"
+        ],
+        "budget": {
+          "allocated": 0,
+          "reserved": 0,
+          "consumed": 0
+        }
+      },
+      "created_at": "2026-10-16T14:42:26.075994-03:00"
+    },
+    {
+      "activity_id": "cypher-prop-to-prop-comparison",
+      "parent_id": "task-1792172543408576000",
+      "agent_id": "coder",
+      "objective": "Support property-to-property comparisons (a.prop = b.prop, \u003c\u003e, \u003e, \u003c, \u003e=, \u003c=) in the Cypher WHERE parser and evaluator.\n\nFiles:\n- src/cypher/cypher.h — condition model `cbm_condition_t` (lines ~185-198)\n- src/cypher/cypher.c — parser `parse_condition_expr` (RHS value branch ~lines 1080-1095), resolver `resolve_condition_value` (~2331), evaluator `eval_condition` (~2394), condition free path (~1933-1942; also check any free path for expression-tree leaf conditions)\n- tests/test_cypher.c — existing Cypher unit test suite\n\nContract:\n1. Extend `cbm_condition_t` with RHS property fields, e.g. `const char *rhs_variable; const char *rhs_property;` (heap_strdup'ed like the LHS fields; NULL when RHS is a literal — preserves all existing behavior since `value` stays the literal path).\n2. Parser: after `c.op = parse_comparison_op(p)`, if the next tokens are `TOK_IDENT` followed by `TOK_DOT` + `TOK_IDENT`, parse them into `c.rhs_variable` / `c.rhs_property` (heap_strdup) and leave `c.value` NULL. All other RHS forms (string/number/true/false) keep the existing literal path; anything else keeps the existing `expected value at pos %d` error (free all allocated fields before returning NULL, same style as current error path).\n3. Refactor `resolve_condition_value` into (or add) a helper `resolve_prop(binding_t *b, const char *variable, const char *property)` that does: edge lookup → edge_prop; else node lookup → node_prop (or node name if property NULL). Use it for the LHS and, when `c-\u003erhs_variable` is set, for the RHS.\n4. `eval_condition`: when `c-\u003erhs_variable` is set, resolve the RHS via the same helper and pass both resolved strings to `eval_comparison_op(c-\u003eop, actual, rhs)` — so `=`/`\u003c\u003e` compare via strcmp and `\u003e`/`\u003c`/`\u003e=`/`\u003c=` via strtod, identical to literal-RHS semantics. Respect `c-\u003enegated` as today. Handle NULL/empty resolved values sanely (no crash; treat unbound RHS consistently with LHS behavior).\n5. Free `rhs_variable`/`rhs_property` in every condition-free path (legacy flat array free and any expr-tree leaf free), using `safe_str_free`.\n6. Must work identically for the early WHERE (post-MATCH) and post-WITH WHERE paths — they share this parser/evaluator, so no extra wiring should be needed; verify both.\n\nConstraints:\n- Do not break existing behavior: literal comparisons, `=~`, CONTAINS, STARTS WITH, ENDS WITH, IN, IS NULL, IS NOT NULL, HAS_LABEL, EXISTS, AND/OR/XOR/NOT, bare-alias LHS comparisons (post-WITH `cnt = 5`).\n- Unsupported RHS (e.g. function call after the operator) must still produce a clear parse error, non-crashing.\n- Follow existing code style in cypher.c (heap_strdup, safe_str_free, snprintf error paths); no comments unless matching surrounding style.\n\nTests (in tests/test_cypher.c, following existing test conventions there):\n- `a.prop = b.prop` true/false cases (e.g. CALLS edges with same vs different file_path)\n- `a.prop \u003c\u003e b.prop`\n- one ordering operator (e.g. `a.line \u003e b.line` or similar numeric prop)\n- one WITH-path case: `WITH a, b WHERE a.file_path = b.file_path RETURN ...`\n- one regression case: property-to-literal still works (e.g. `b.file_path = 'demo.go'`)\n\nVerification:\n- `make -f Makefile.cbm SANITIZE= test` must pass in full (this is the required gate; also catches leaks via the sanitizer build if configured).\n- Build with `make -f Makefile.cbm SANITIZE= cbm` and smoke-test via CLI if convenient:\n  `./build/c/codebase-memory-mcp cli query_graph '{\"project\":\"demo\",\"query\":\"MATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\"}'` (after indexing a /tmp/demo repo) — but the unit tests are the primary gate.",
+      "status": "completed",
+      "budget_used": 63093,
+      "outputs": {
+        "budget_overrun": true,
+        "budget_overrun_note": "session exhausted budget but project tests pass on the resulting workspace; completing verified work",
+        "budget_overrun_tokens": 38093,
+        "error": "governance: requested budget exceeds parent allocation: opencode session consumed 63093 tokens exceeds allocated 25000",
+        "failure_reason": "budget_exhausted",
+        "test_output_summary": "cc -std=c11 -D_DEFAULT_SOURCE -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare  -Isrc -Ivendored -Ivendored/sqlite3 -Ivendored/mimalloc/include -Iinternal/cbm -Iinternal/cbm/vendored/ts_runtime/include  -g -O1  -o build/c/test-runner \\\n\t\ttests/test_main.c tests/test_arena.c tests/test_hash_table.c tests/test_dyn_array.c tests/test_str_intern.c tests/test_log.c tests/test_str_util.c tests/test_platform.c tests/test_dump_verify.c tests/test_extraction.c tests/test_extrac... [truncated]",
+        "validation_evidence": {
+          "activity_id": "cypher-prop-to-prop-comparison",
+          "agent_id": "coder",
+          "command": [
+            "make",
+            "-f",
+            "Makefile.cbm",
+            "SANITIZE=",
+            "LIBGIT2_CFLAGS=",
+            "LIBGIT2_LIBS=",
+            "test"
+          ],
+          "completed_at": "2026-10-16T15:17:08.099739-03:00",
+          "evidence_id": "evi-cypher-prop-to-prop-comparison-salvage-1792174628092541000",
+          "exit_code": 0,
+          "log_path": ".a4c/evidence/evi-cypher-prop-to-prop-comparison-salvage-1792174628092541000.log",
+          "output_summary": "cc -std=c11 -D_DEFAULT_SOURCE -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare  -Isrc -Ivendored -Ivendored/sqlite3 -Ivendored/mimalloc/include -Iinternal/cbm -Iinternal/cbm/vendored/ts_runtime/include  -g -O1  -o build/c/test-runner \\\n\t\ttests/test_main.c tests/test_arena.c tests/test_hash_table.c tests/test_dyn_array.c tests/test_str_intern.c tests/test_log.c tests/test_str_util.c tests/test_platform.c tests/test_dump_verify.c tests/test_extraction.c tests/test_extrac... [truncated]",
+          "source_revision": "63e3f2c7a6ba0ae444967d1f777254e9df5e381a",
+          "started_at": "2026-10-16T15:17:08.099739-03:00",
+          "task_id": "task-1792172543408576000",
+          "tests_executed": 5731,
+          "valid": true,
+          "workspace_dir": "/Volumes/Projects/a4c/benchmarks/large-repo-comparison/results/2026-10-16-ocfix-a4c-opencode-mimo/repo/.a4c/worktrees/task-1792172543408576000/tree",
+          "workspace_snapshot_id": "a17cf5b80a3c84c86c1168dff3d16e3831d8fa941e37e4e5ef1b5fa5623d1eb3"
+        }
+      },
+      "evidence_ids": [
+        "evi-cypher-prop-to-prop-comparison-salvage-1792174628092541000"
+      ],
+      "metrics": {
+        "wall_clock_duration": 1781948877750,
+        "provider_wait_duration": 1781941819583,
+        "model_duration": 1781941819583,
+        "tool_duration": 0,
+        "prompt_tokens": 3930,
+        "completion_tokens": 420,
+        "total_tokens": 63093,
+        "overrun_tokens": 38093,
+        "reasoning_tokens": 375,
+        "cached_tokens": 58368,
+        "reported_cost_usd": 0.0009362304,
+        "model_invocations": 1,
+        "tool_calls": 0
+      },
+      "capability_profile": {
+        "id": "profile-code-implementation",
+        "name": "Code Implementation",
+        "description": "Targeted file inspection, file modification in worktree, and memory proposals.",
+        "allowed_tools": [
+          "governed_read_file",
+          "governed_apply_patch",
+          "governed_propose_memory"
+        ],
+        "budget": {
+          "allocated": 0,
+          "reserved": 0,
+          "consumed": 0
+        }
+      },
+      "created_at": "2026-10-16T14:45:33.734094-03:00"
+    },
+    {
+      "activity_id": "task-1792172543408576000-review",
+      "parent_id": "task-1792172543408576000",
+      "agent_id": "reviewer",
+      "objective": "Independently review the final implementation candidate for: # Task: Support property-to-property comparisons in Cypher WHERE clauses\n\n## Problem\n\nThe Cypher query subset supported by `src/cypher/cypher.c` fails to parse a WHERE condition that compares one variable's property with another variable's property. The query aborts with `expected value at pos N` at the right-hand operand.\n\nExamples that fail on the current code:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.name \u003c\u003e b.name RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WITH a, b WHERE a.file_path = b.file_path RETURN a.name, b.name\n```\n\nProperty-to-literal comparisons already work and must keep working:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE b.file_path = 'demo.go' RETURN a.name, b.name\n```\n\n## Required behavior\n\nExtend the WHERE parser and evaluator so that when the right-hand side of a comparison operator is another `variable.property` expression (not a string/number/boolean literal), the condition compares the two resolved property values for the current binding.\n\n1. `a.prop = b.prop` — true when the two resolved string values are equal.\n2. `a.prop \u003c\u003e b.prop` — true when the two resolved string values differ.\n3. All existing comparison operators that make sense on property values (`\u003e`, `\u003c`, `\u003e=`, `\u003c=`) should also accept a property right-hand side, evaluated the same way as when the right-hand side is a numeric literal (via `strtod`).\n4. The property right-hand side must resolve through the same binding mechanism used for the left-hand side (`node_prop` / bare-alias name), so File, Function, and other node property paths all work.\n5. Property-to-literal and bare-alias comparisons must continue to work exactly as before.\n6. The change must work in both the early WHERE (after MATCH) and post-WITH WHERE paths, since they share the same parser and evaluator.\n\n## Where to change\n\n- Parser: `parse_condition_expr` in `src/cypher/cypher.c` currently rejects a non-literal right-hand side with `expected value at pos %d`.\n- Condition model: `cbm_condition_t` in `src/cypher/cypher.h` currently only stores a literal `value`.\n- Evaluator: `eval_condition` / `resolve_condition_value` in `src/cypher/cypher.c` currently resolve only the left-hand side against the binding.\n\n## Constraints\n\n- Do not break any existing Cypher behavior (WHERE with literals, regex, CONTAINS, STARTS WITH, ENDS WITH, IN, IS NULL, IS NOT NULL, HAS_LABEL, EXISTS, AND/OR/XOR/NOT).\n- Keep the error path for genuinely unsupported right-hand sides (e.g. function calls on the RHS if not already supported) clear and non-crashing.\n- Add unit tests in the existing Cypher test suite covering property-to-property `=`, `\u003c\u003e`, and at least one ordering operator, plus a WITH-path case.\n- The full project test suite (`make -f Makefile.cbm SANITIZE= test`) must still pass.\n\n## How to verify\n\n```sh\nmake -f Makefile.cbm SANITIZE= cbm\n./build/c/codebase-memory-mcp cli index_repository '{\"repo_path\":\"/tmp/demo\",\"mode\":\"full\",\"name\":\"demo\"}'\n./build/c/codebase-memory-mcp cli query_graph '{\"project\":\"demo\",\"query\":\"MATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\"}'\n```\n\nBefore the fix this errors with `expected value at pos N`. After the fix it returns only CALLS edges whose source and target files are the same.. Inspect the actual diff, tests, and verification evidence, then submit a verdict via governed_submit_review.",
+      "depends_on": [
+        "cypher-prop-to-prop-comparison",
+        "cypher-prop-to-prop-comparison"
+      ],
+      "status": "completed",
+      "budget_used": 53538,
+      "outputs": {
+        "approved": true,
+        "host_id": "opencode",
+        "model": "opencode-go/mimo-v2.5",
+        "proposals_recorded": 0,
+        "proposed_commit": "feat: Independently review the final implementation candidate for: # Task: Support property-to-property comparisons in Cypher WHERE clauses\n\n## Problem\n\nThe Cypher query subset supported by `src/cypher/cypher.c` fails to parse a WHERE condition that compares one variable's property with another variable's property. The query aborts with `expected value at pos N` at the right-hand operand.\n\nExamples that fail on the current code:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.name \u003c\u003e b.name RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WITH a, b WHERE a.file_path = b.file_path RETURN a.name, b.name\n```\n\nProperty-to-literal comparisons already work and must keep working:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE b.file_path = 'demo.go' RETURN a.name, b.name\n```\n\n## Required behavior\n\nExtend the WHERE parser and evaluator so that when the right-hand side of a comparison operator is another `variable.property` expression (not a string/number/boolean literal), the condition compares the two resolved property values for the current binding.\n\n1. `a.prop = b.prop` — true when the two resolved string values are equal.\n2. `a.prop \u003c\u003e b.prop` — true when the two resolved string values differ.\n3. All existing comparison operators that make sense on property values (`\u003e`, `\u003c`, `\u003e=`, `\u003c=`) should also accept a property right-hand side, evaluated the same way as when the right-hand side is a numeric literal (via `strtod`).\n4. The property right-hand side must resolve through the same binding mechanism used for the left-hand side (`node_prop` / bare-alias name), so File, Function, and other node property paths all work.\n5. Property-to-literal and bare-alias comparisons must continue to work exactly as before.\n6. The change must work in both the early WHERE (after MATCH) and post-WITH WHERE paths, since they share the same parser and evaluator.\n\n## Where to change\n\n- Parser: `parse_condition_expr` in `src/cypher/cypher.c` currently rejects a non-literal right-hand side with `expected value at pos %d`.\n- Condition model: `cbm_condition_t` in `src/cypher/cypher.h` currently only stores a literal `value`.\n- Evaluator: `eval_condition` / `resolve_condition_value` in `src/cypher/cypher.c` currently resolve only the left-hand side against the binding.\n\n## Constraints\n\n- Do not break any existing Cypher behavior (WHERE with literals, regex, CONTAINS, STARTS WITH, ENDS WITH, IN, IS NULL, IS NOT NULL, HAS_LABEL, EXISTS, AND/OR/XOR/NOT).\n- Keep the error path for genuinely unsupported right-hand sides (e.g. function calls on the RHS if not already supported) clear and non-crashing.\n- Add unit tests in the existing Cypher test suite covering property-to-property `=`, `\u003c\u003e`, and at least one ordering operator, plus a WITH-path case.\n- The full project test suite (`make -f Makefile.cbm SANITIZE= test`) must still pass.\n\n## How to verify\n\n```sh\nmake -f Makefile.cbm SANITIZE= cbm\n./build/c/codebase-memory-mcp cli index_repository '{\"repo_path\":\"/tmp/demo\",\"mode\":\"full\",\"name\":\"demo\"}'\n./build/c/codebase-memory-mcp cli query_graph '{\"project\":\"demo\",\"query\":\"MATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\"}'\n```\n\nBefore the fix this errors with `expected value at pos N`. After the fix it returns only CALLS edges whose source and target files are the same.. Inspect the actual diff, tests, and verification evidence, then submit a verdict via governed_submit_review. (verified by A4C reviewer \u0026 native tests)",
+        "review_comments": "Approved via model directive",
+        "reviewed_snapshot": "949cc0cc6aa33fd3bf77f3934cbdf3ea1658937da6fe43569fe35af06ad420cf",
+        "session_id": "ses_eba1135c3ffeg72649PZcB0pFn",
+        "summary": "[REVIEW_APPROVED]\n\n**Review summary**\n\n**Parser** (`parse_condition_expr`, src/cypher/cypher.c:1100-1112): The new `IDENT DOT IDENT` RHS branch is gated behind `check_at(p, 1, TOK_DOT)` after all literal branches, so string/number/boolean RHS paths are untouched. `check_at` clamps to the EOF token exactly like the existing `peek`/`advance` (lexer always appends TOK_EOF at cypher.c:412) — safe. The error path for a malformed RHS (e.g. `b.` at EOF) frees all four allocated fields and returns NULL with the error set by `expect`. Genuinely unsupported RHS (function calls) still hits the `expected value at pos %d` branch — verified by the `cypher_parse_where_prop_rhs_error` test. Bare-IDENT RHS (`a.x = b`) still errors as before; no behavior change.\n\n**Model**: `rhs_variable`/`rhs_property` added to `cbm_condition_t`; `expr_leaf` copies the struct by value (cypher.c:791-796) so fields reach the where root; both `expr_free` and `free_where` free them symmetrically, mirroring the existing `value`/`op`/`property` pattern — no leak or new double-free risk.\n\n**Evaluator** (cypher.c:2356-2372, 2491-2501): `resolve_prop` is the old `resolve_condition_value` generalized — edges first (`edge_prop`), then nodes (`node_prop` with store), then bare alias — so File/Function/other node property paths all resolve on both sides (requirement 4). Unbound RHS returns `true` (keep row), consistent with the existing unbound-LHS semantics. `=`/`\u003c\u003e` compare strings; `\u003e`,`\u003c`,`\u003e=`,`\u003c=` go through the same `strtod` path as literals via `eval_comparison_op`. Both early WHERE (cypher.c:4438) and post-WITH WHERE (cypher.c:3809-3810) share `eval_condition`, satisfying requirement 6.\n\n**Tests** (7 new, all PASS in test-output.log:776-782): `=` positive+negative, `\u003c\u003e`, `\u003e`/`\u003c` ordering, parse-structure assertions (rhs_variable/rhs_property/value==NULL), RHS-function error path, WITH-path, and a property-to-literal regression test — covering all three example queries from the objective plus the ordering and error requirements.\n\n**Evidence**: `make -f Makefile.cbm SANITIZE= ... test` exit 0, 5731 tests executed, non-vacuous, no FAIL lines in the log; the full pre-existing Cypher suite (regex, CONTAINS, STARTS/ENDS WITH, IN, IS NULL/NOT NULL, HAS_LABEL, EXISTS, AND/OR/XOR/NOT tests) still passes.",
+        "tool_limit_hits": 0,
+        "verdict": "approved"
+      },
+      "metrics": {
+        "wall_clock_duration": 221627080041,
+        "provider_wait_duration": 215590255375,
+        "model_duration": 215590255375,
+        "tool_duration": 0,
+        "prompt_tokens": 4337,
+        "completion_tokens": 647,
+        "total_tokens": 53538,
+        "reasoning_tokens": 1130,
+        "cached_tokens": 47424,
+        "reported_cost_usd": 0.0012375272,
+        "model_invocations": 1,
+        "tool_calls": 0
+      },
+      "capability_profile": {
+        "id": "profile-independent-review",
+        "name": "Independent Review",
+        "description": "Read-only inspection of diffs and evidence, and review submission. Mutation strictly prohibited.",
+        "allowed_tools": [
+          "governed_read_file",
+          "governed_submit_review"
+        ],
+        "budget": {
+          "allocated": 0,
+          "reserved": 0,
+          "consumed": 0
+        },
+        "limits": {
+          "max_model_turns": 15,
+          "max_tool_calls": 40,
+          "max_read_file_lines": 400
+        }
+      },
+      "created_at": "2026-10-16T14:45:33.74497-03:00"
+    }
+  ],
+  "evidence_ids": [
+    "evi-cypher-prop-to-prop-comparison-salvage-1792174628092541000"
+  ],
+  "review_decisions": [
+    {
+      "activity_id": "task-1792172543408576000-review",
+      "reviewer_id": "reviewer",
+      "approved": true,
+      "comments": "Approved via model directive",
+      "timestamp": "2026-10-16T14:45:33.74497-03:00"
+    }
+  ],
+  "metrics_summary": {
+    "wall_clock_duration": 2188605897125,
+    "provider_wait_duration": 2182560952083,
+    "model_duration": 2182560952083,
+    "tool_duration": 0,
+    "prompt_tokens": 8945,
+    "completion_tokens": 2232,
+    "total_tokens": 132097,
+    "overrun_tokens": 38093,
+    "model_invocations": 3,
+    "tool_calls": 0
+  },
+  "final_outcome": "Task successfully implemented, verified natively, and reviewed."
+}

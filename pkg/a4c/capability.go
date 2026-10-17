@@ -53,6 +53,10 @@ func NewCapabilityRegistry() *CapabilityRegistry {
 	})
 
 	// 3. Independent Review (Reviewer / QA)
+	// Review is read-only inspection, so a larger read budget is safe and
+	// necessary: a reviewer must be able to page through large changed files
+	// (e.g. a 2800-line test file) without exhausting its tool-call budget
+	// and then misreading truncation as missing coverage.
 	reg.RegisterProfile(CapabilityProfile{
 		ID:          ProfileIndependentReview,
 		Name:        "Independent Review",
@@ -61,6 +65,11 @@ func NewCapabilityRegistry() *CapabilityRegistry {
 			"governed_read_file",
 			"governed_submit_review",
 			"governed_request_human_decision",
+		},
+		Limits: &ActivityLimits{
+			MaxToolCalls:     40,
+			MaxReadFileLines: 400,
+			MaxModelTurns:    15,
 		},
 	})
 

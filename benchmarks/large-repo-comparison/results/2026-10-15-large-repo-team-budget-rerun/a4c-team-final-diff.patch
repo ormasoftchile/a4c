@@ -1,0 +1,581 @@
+diff --git a/doc.go b/doc.go
+new file mode 100644
+index 0000000..a0bdbd3
+--- /dev/null
++++ b/doc.go
+@@ -0,0 +1,3 @@
++// Package codebasememorymcp anchors the repository root as a Go package for
++// generic Go tooling. The installable Go wrapper remains in pkg/go.
++package codebasememorymcp
+diff --git a/go.mod b/go.mod
+new file mode 100644
+index 0000000..4d95511
+--- /dev/null
++++ b/go.mod
+@@ -0,0 +1,3 @@
++module github.com/DeusData/codebase-memory-mcp
++
++go 1.25.0
+diff --git a/src/cypher/cypher.c b/src/cypher/cypher.c
+index 77bc710..fe2b1b3 100644
+--- a/src/cypher/cypher.c
++++ b/src/cypher/cypher.c
+@@ -754,6 +754,8 @@ static void expr_free(cbm_expr_t *e) {
+             safe_str_free(&cur->cond.property);
+             safe_str_free(&cur->cond.op);
+             safe_str_free(&cur->cond.value);
++            safe_str_free(&cur->cond.rhs_variable);
++            safe_str_free(&cur->cond.rhs_property);
+             for (int i = 0; i < cur->cond.in_value_count; i++) {
+                 safe_str_free(&cur->cond.in_values[i]);
+             }
+@@ -944,6 +946,11 @@ static char *parse_comparison_op(parser_t *p) {
+     return NULL;
+ }
+ 
++static bool condition_op_allows_rhs_ref(const char *op) {
++    return strcmp(op, "=") == 0 || strcmp(op, "<>") == 0 || strcmp(op, ">") == 0 ||
++           strcmp(op, "<") == 0 || strcmp(op, ">=") == 0 || strcmp(op, "<=") == 0;
++}
++
+ /* Parse a single condition: var.prop OP value | var.prop IS [NOT] NULL | var.prop IN [...] */
+ /* Free the heap fields of a standalone node pattern (not owned by a pattern). */
+ static void free_one_node_pattern(cbm_node_pattern_t *n) {
+@@ -1086,6 +1093,21 @@ static cbm_expr_t *parse_condition_expr(parser_t *p) {
+     } else if (check(p, TOK_FALSE)) {
+         advance(p);
+         c.value = heap_strdup("false");
++    } else if (condition_op_allows_rhs_ref(c.op) && check(p, TOK_IDENT) &&
++               (p->pos + SKIP_ONE >= p->count || p->tokens[p->pos + SKIP_ONE].type != TOK_LPAREN)) {
++        const cbm_token_t *rhs_var = advance(p);
++        c.rhs_variable = heap_strdup(rhs_var->text);
++        if (match(p, TOK_DOT)) {
++            const cbm_token_t *rhs_prop = expect(p, TOK_IDENT);
++            if (!rhs_prop) {
++                safe_str_free(&c.variable);
++                safe_str_free(&c.property);
++                safe_str_free(&c.op);
++                safe_str_free(&c.rhs_variable);
++                return NULL;
++            }
++            c.rhs_property = heap_strdup(rhs_prop->text);
++        }
+     } else {
+         snprintf(p->error, sizeof(p->error), "expected value at pos %d", peek(p)->pos);
+         safe_str_free(&c.variable);
+@@ -1826,6 +1848,86 @@ static int parse_post_where(parser_t *p, cbm_query_t *q, // NOLINT(misc-no-recur
+     return 0;
+ }
+ 
++static bool pattern_defines_variable(const cbm_query_t *q, const char *variable) {
++    if (q->unwind_alias && strcmp(q->unwind_alias, variable) == 0) {
++        return true;
++    }
++    for (int pi = 0; pi < q->pattern_count; pi++) {
++        const cbm_pattern_t *pat = &q->patterns[pi];
++        for (int ni = 0; ni < pat->node_count; ni++) {
++            if (pat->nodes[ni].variable && strcmp(pat->nodes[ni].variable, variable) == 0) {
++                return true;
++            }
++        }
++        for (int ri = 0; ri < pat->rel_count; ri++) {
++            if (pat->rels[ri].variable && strcmp(pat->rels[ri].variable, variable) == 0) {
++                return true;
++            }
++        }
++    }
++    return false;
++}
++
++static bool with_clause_defines_variable(const cbm_return_clause_t *with, const char *variable) {
++    if (!with) {
++        return false;
++    }
++    for (int i = 0; i < with->count; i++) {
++        const cbm_return_item_t *item = &with->items[i];
++        if (item->alias && strcmp(item->alias, variable) == 0) {
++            return true;
++        }
++        if (!item->alias && !item->func && !item->kase && !item->property && item->variable &&
++            strcmp(item->variable, variable) == 0) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static bool validate_rhs_expr(parser_t *p, const cbm_expr_t *expr, const cbm_query_t *q,
++                              bool after_with) {
++    if (!expr) {
++        return true;
++    }
++    if (expr->type == EXPR_CONDITION && expr->cond.rhs_variable) {
++        bool defined = after_with ? with_clause_defines_variable(q->with_clause,
++                                                                  expr->cond.rhs_variable)
++                                  : pattern_defines_variable(q, expr->cond.rhs_variable);
++        if (!defined) {
++            snprintf(p->error, sizeof(p->error), "unbound RHS variable '%s' in WHERE clause",
++                     expr->cond.rhs_variable);
++            return false;
++        }
++    }
++    return validate_rhs_expr(p, expr->left, q, after_with) &&
++           validate_rhs_expr(p, expr->right, q, after_with);
++}
++
++static bool validate_where_rhs(parser_t *p, const cbm_where_clause_t *where, const cbm_query_t *q,
++                               bool after_with) {
++    if (!where) {
++        return true;
++    }
++    if (where->root) {
++        return validate_rhs_expr(p, where->root, q, after_with);
++    }
++    for (int i = 0; i < where->count; i++) {
++        if (where->conditions[i].rhs_variable) {
++            bool defined = after_with
++                               ? with_clause_defines_variable(q->with_clause,
++                                                              where->conditions[i].rhs_variable)
++                               : pattern_defines_variable(q, where->conditions[i].rhs_variable);
++            if (!defined) {
++                snprintf(p->error, sizeof(p->error), "unbound RHS variable '%s' in WHERE clause",
++                         where->conditions[i].rhs_variable);
++                return false;
++            }
++        }
++    }
++    return true;
++}
++
+ int cbm_parse(const cbm_token_t *tokens, int token_count, // NOLINT(misc-no-recursion)
+               cbm_parse_result_t *out) {
+     memset(out, 0, sizeof(*out));
+@@ -1885,6 +1987,13 @@ int cbm_parse(const cbm_token_t *tokens, int token_count, // NOLINT(misc-no-recu
+         return CBM_NOT_FOUND;
+     }
+ 
++    if (!validate_where_rhs(&p, q->where, q, false) ||
++        !validate_where_rhs(&p, q->post_with_where, q, true)) {
++        out->error = heap_strdup(p.error);
++        cbm_query_free(q);
++        return CBM_NOT_FOUND;
++    }
++
+     out->query = q;
+     return 0;
+ }
+@@ -1934,6 +2043,8 @@ static void free_where(cbm_where_clause_t *w) {
+         safe_str_free(&w->conditions[i].property);
+         safe_str_free(&w->conditions[i].op);
+         safe_str_free(&w->conditions[i].value);
++        safe_str_free(&w->conditions[i].rhs_variable);
++        safe_str_free(&w->conditions[i].rhs_property);
+         for (int j = 0; j < w->conditions[i].in_value_count; j++) {
+             safe_str_free(&w->conditions[i].in_values[j]);
+         }
+@@ -2327,23 +2438,28 @@ static void binding_set(binding_t *b, const char *var, const cbm_node_t *node) {
+     b->var_count++;
+ }
+ 
+-/* Resolve the actual property value for a condition from a binding */
+-static const char *resolve_condition_value(const cbm_condition_t *c, binding_t *b) {
+-    cbm_edge_t *e = binding_get_edge(b, c->variable);
++/* Resolve a node/edge property or bare alias from a binding. */
++static const char *resolve_binding_value(const char *variable, const char *property, binding_t *b) {
++    cbm_edge_t *e = binding_get_edge(b, variable);
+     if (e) {
+-        return edge_prop(e, c->property);
++        return edge_prop(e, property);
+     }
+-    cbm_node_t *n = binding_get(b, c->variable);
++    cbm_node_t *n = binding_get(b, variable);
+     if (!n) {
+         return NULL; /* unbound variable */
+     }
+-    if (c->property) {
+-        return node_prop(n, c->property, b->store);
++    if (property) {
++        return node_prop(n, property, b->store);
+     }
+     /* Bare alias (e.g. post-WITH virtual var) — use node name directly */
+     return n->name ? n->name : "";
+ }
+ 
++/* Resolve the actual property value for a condition from a binding */
++static const char *resolve_condition_value(const cbm_condition_t *c, binding_t *b) {
++    return resolve_binding_value(c->variable, c->property, b);
++}
++
+ /* Evaluate a comparison operator between actual and expected strings. */
+ static bool eval_comparison_op(const char *op, const char *actual, const char *expected) {
+     if (strcmp(op, "=") == 0) {
+@@ -2434,21 +2550,32 @@ static bool eval_condition(const cbm_condition_t *c, binding_t *b) {
+ 
+     const char *actual = resolve_condition_value(c, b);
+     if (!actual) {
++        if (c->rhs_variable &&
++            !resolve_binding_value(c->rhs_variable, c->rhs_property, b)) {
++            return false;
++        }
+         return true;
+     }
+ 
+-    bool result;
+-
+     /* IS NULL / IS NOT NULL */
++    bool result;
+     if (strcmp(c->op, "IS NULL") == 0) {
+-        result = (!actual || actual[0] == '\0');
++        result = actual[0] == '\0';
+         return c->negated ? !result : result;
+     }
+     if (strcmp(c->op, "IS NOT NULL") == 0) {
+-        result = (actual && actual[0] != '\0');
++        result = actual[0] != '\0';
+         return c->negated ? !result : result;
+     }
+ 
++    const char *expected = c->value;
++    if (c->rhs_variable) {
++        expected = resolve_binding_value(c->rhs_variable, c->rhs_property, b);
++        if (!expected) {
++            return false;
++        }
++    }
++
+     /* IN [...] */
+     if (strcmp(c->op, "IN") == 0) {
+         result = false;
+@@ -2461,10 +2588,12 @@ static bool eval_condition(const cbm_condition_t *c, binding_t *b) {
+         return c->negated ? !result : result;
+     }
+ 
+-    result = eval_comparison_op(c->op, actual, c->value);
++    result = eval_comparison_op(c->op, actual, expected);
+     return c->negated ? !result : result;
+ }
+ 
++static bool where_rhs_bound_expr(const cbm_expr_t *expr, binding_t *b);
++
+ /* Recursive expression tree evaluator */
+ static bool eval_expr(const cbm_expr_t *e, binding_t *b) { // NOLINT(misc-no-recursion)
+     if (!e) {
+@@ -2478,8 +2607,14 @@ static bool eval_expr(const cbm_expr_t *e, binding_t *b) { // NOLINT(misc-no-rec
+     case EXPR_OR:
+         return (eval_expr(e->left, b) || eval_expr(e->right, b)) != 0;
+     case EXPR_NOT:
++        if (!where_rhs_bound_expr(e->left, b)) {
++            return false;
++        }
+         return (!eval_expr(e->left, b)) != 0;
+     case EXPR_XOR:
++        if (!where_rhs_bound_expr(e->left, b) || !where_rhs_bound_expr(e->right, b)) {
++            return false;
++        }
+         return eval_expr(e->left, b) != eval_expr(e->right, b);
+     }
+     return true;
+@@ -2511,6 +2646,34 @@ static bool eval_where(const cbm_where_clause_t *w, binding_t *b) {
+     return is_and;
+ }
+ 
++static bool where_rhs_bound_expr(const cbm_expr_t *expr, binding_t *b) {
++    if (!expr) {
++        return true;
++    }
++    if (expr->type == EXPR_CONDITION && expr->cond.rhs_variable &&
++        !binding_get(b, expr->cond.rhs_variable) &&
++        !binding_get_edge(b, expr->cond.rhs_variable)) {
++        return false;
++    }
++    return where_rhs_bound_expr(expr->left, b) && where_rhs_bound_expr(expr->right, b);
++}
++
++static bool where_rhs_bound(const cbm_where_clause_t *where, binding_t *b) {
++    if (!where) {
++        return true;
++    }
++    if (where->root) {
++        return where_rhs_bound_expr(where->root, b);
++    }
++    for (int i = 0; i < where->count; i++) {
++        const char *variable = where->conditions[i].rhs_variable;
++        if (variable && !binding_get(b, variable) && !binding_get_edge(b, variable)) {
++            return false;
++        }
++    }
++    return true;
++}
++
+ /* Check if a string value looks like a regex pattern. */
+ static bool looks_like_regex(const char *s) {
+     if (!s) {
+@@ -3663,6 +3826,12 @@ static void execute_with_simple(cbm_return_clause_t *wc, binding_t *bindings, in
+             const char *val =
+                 project_item(&bindings[bi], &wc->items[ci], func_buf, sizeof(func_buf));
+             with_add_vbinding_var(&vb, alias, val);
++            if (!wc->items[ci].func && !wc->items[ci].property && vb.var_count > 0) {
++                cbm_node_t *n = binding_get(&bindings[bi], wc->items[ci].variable);
++                if (n) {
++                    vb.var_nodes[vb.var_count - 1].id = n->id;
++                }
++            }
+         }
+         vbindings[(*vcount)++] = vb;
+     }
+@@ -4399,7 +4568,7 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
+         binding_t b = {0};
+         b.store = store;
+         binding_set(&b, var_name, &scanned[i]);
+-        bool pass = !q->where || eval_where(q->where, &b);
++        bool pass = !q->where || !where_rhs_bound(q->where, &b) || eval_where(q->where, &b);
+         if (pass) {
+             bindings[bind_count++] = b;
+         } else {
+diff --git a/src/cypher/cypher.h b/src/cypher/cypher.h
+index 5966c20..e5089ee 100644
+--- a/src/cypher/cypher.h
++++ b/src/cypher/cypher.h
+@@ -187,7 +187,9 @@ typedef struct {
+     const char *property;
+     const char *op; /* "=", "<>", "=~", "CONTAINS", "STARTS WITH", "ENDS WITH",
+                        ">", "<", ">=", "<=", "IN", "IS NULL", "IS NOT NULL" */
+-    const char *value;
++    const char *value;        /* literal RHS */
++    const char *rhs_variable; /* property/alias RHS when value is NULL */
++    const char *rhs_property;
+     bool negated;           /* NOT prefix */
+     const char **in_values; /* IN [...] list */
+     int in_value_count;
+diff --git a/tests/test_cypher.c b/tests/test_cypher.c
+index 2e79c8b..e5c5347 100644
+--- a/tests/test_cypher.c
++++ b/tests/test_cypher.c
+@@ -335,6 +335,48 @@ TEST(cypher_parse_where_and) {
+     PASS();
+ }
+ 
++TEST(cypher_parse_where_rhs_property) {
++    cbm_query_t *q = NULL;
++    char *err = NULL;
++    int rc = cbm_cypher_parse("MATCH (a)-[:CALLS]->(b) WHERE a.file_path = b.file_path", &q, &err);
++    ASSERT_EQ(rc, 0);
++    ASSERT_NOT_NULL(q->where->root);
++    ASSERT_EQ(q->where->root->type, EXPR_CONDITION);
++    ASSERT_STR_EQ(q->where->root->cond.variable, "a");
++    ASSERT_STR_EQ(q->where->root->cond.property, "file_path");
++    ASSERT_STR_EQ(q->where->root->cond.op, "=");
++    ASSERT_NULL(q->where->root->cond.value);
++    ASSERT_STR_EQ(q->where->root->cond.rhs_variable, "b");
++    ASSERT_STR_EQ(q->where->root->cond.rhs_property, "file_path");
++
++    cbm_query_free(q);
++    PASS();
++}
++
++TEST(cypher_parse_rejects_unbound_rhs_variable) {
++    cbm_query_t *q = NULL;
++    char *err = NULL;
++    int rc = cbm_cypher_parse("MATCH (a) WHERE a.name = missing.name", &q, &err);
++    ASSERT_EQ(rc, -1);
++    ASSERT_NULL(q);
++    ASSERT_NOT_NULL(err);
++    ASSERT(strstr(err, "unbound RHS variable 'missing'") != NULL);
++    free(err);
++    PASS();
++}
++
++TEST(cypher_parse_rejects_unbound_post_with_rhs_variable) {
++    cbm_query_t *q = NULL;
++    char *err = NULL;
++    int rc = cbm_cypher_parse("MATCH (a) WITH a WHERE a.name = missing.name", &q, &err);
++    ASSERT_EQ(rc, -1);
++    ASSERT_NULL(q);
++    ASSERT_NOT_NULL(err);
++    ASSERT(strstr(err, "unbound RHS variable 'missing'") != NULL);
++    free(err);
++    PASS();
++}
++
+ TEST(cypher_parse_return_simple) {
+     cbm_query_t *q = NULL;
+     char *err = NULL;
+@@ -470,6 +512,41 @@ static cbm_store_t *setup_cypher_store(void) {
+     return s;
+ }
+ 
++static cbm_store_t *setup_cypher_property_compare_store(void) {
++    cbm_store_t *s = cbm_store_open_memory();
++    cbm_store_upsert_project(s, "test", "/tmp/test");
++
++    cbm_node_t n1 = {.project = "test",
++                     .label = "Function",
++                     .name = "Alpha",
++                     .qualified_name = "test.Alpha",
++                     .file_path = "same.go",
++                     .start_line = 1};
++    cbm_node_t n2 = {.project = "test",
++                     .label = "Function",
++                     .name = "Beta",
++                     .qualified_name = "test.Beta",
++                     .file_path = "same.go",
++                     .start_line = 2};
++    cbm_node_t n3 = {.project = "test",
++                     .label = "Function",
++                     .name = "Gamma",
++                     .qualified_name = "test.Gamma",
++                     .file_path = "other.go",
++                     .start_line = 3};
++
++    int64_t id1 = cbm_store_upsert_node(s, &n1);
++    int64_t id2 = cbm_store_upsert_node(s, &n2);
++    int64_t id3 = cbm_store_upsert_node(s, &n3);
++
++    cbm_edge_t e1 = {.project = "test", .source_id = id1, .target_id = id2, .type = "CALLS"};
++    cbm_edge_t e2 = {.project = "test", .source_id = id1, .target_id = id3, .type = "CALLS"};
++    cbm_store_insert_edge(s, &e1);
++    cbm_store_insert_edge(s, &e2);
++
++    return s;
++}
++
+ TEST(cypher_exec_match_all_functions) {
+     cbm_store_t *s = setup_cypher_store();
+     cbm_cypher_result_t r = {0};
+@@ -883,6 +960,113 @@ TEST(cypher_exec_where_numeric) {
+     PASS();
+ }
+ 
++TEST(cypher_exec_where_rhs_property_eq) {
++    cbm_store_t *s = setup_cypher_property_compare_store();
++    cbm_cypher_result_t r = {0};
++
++    int rc = cbm_cypher_execute(s,
++                                "MATCH (a:Function)-[:CALLS]->(b:Function) "
++                                "WHERE a.file_path = b.file_path "
++                                "RETURN a.name, b.name",
++                                "test", 0, &r);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r.row_count, 1);
++    ASSERT_STR_EQ(r.rows[0][0], "Alpha");
++    ASSERT_STR_EQ(r.rows[0][1], "Beta");
++
++    cbm_cypher_result_free(&r);
++    cbm_store_close(s);
++    PASS();
++}
++
++TEST(cypher_exec_optional_unbound_rhs_does_not_pass) {
++    cbm_store_t *s = setup_cypher_property_compare_store();
++    cbm_cypher_result_t r = {0};
++
++    int rc = cbm_cypher_execute(s,
++                                "MATCH (a:Function) "
++                                "OPTIONAL MATCH (a)-[:CALLS]->(b:Function) "
++                                "WHERE a.name = b.name RETURN a.name",
++                                "test", 0, &r);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r.row_count, 0);
++
++    cbm_cypher_result_free(&r);
++    cbm_store_close(s);
++    PASS();
++}
++
++TEST(cypher_exec_optional_unbound_rhs_not_does_not_pass) {
++    cbm_store_t *s = setup_cypher_property_compare_store();
++    cbm_cypher_result_t r = {0};
++
++    int rc = cbm_cypher_execute(s,
++                                "MATCH (a:Function) "
++                                "OPTIONAL MATCH (a)-[:CALLS]->(b:Function) "
++                                "WHERE NOT (a.name = b.name) RETURN a.name",
++                                "test", 0, &r);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r.row_count, 2);
++
++    cbm_cypher_result_free(&r);
++    cbm_store_close(s);
++    PASS();
++}
++
++TEST(cypher_exec_where_rhs_property_neq) {
++    cbm_store_t *s = setup_cypher_property_compare_store();
++    cbm_cypher_result_t r = {0};
++
++    int rc = cbm_cypher_execute(s,
++                                "MATCH (a:Function)-[:CALLS]->(b:Function) "
++                                "WHERE a.name <> b.name "
++                                "RETURN a.name, b.name",
++                                "test", 0, &r);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r.row_count, 2);
++
++    cbm_cypher_result_free(&r);
++    cbm_store_close(s);
++    PASS();
++}
++
++TEST(cypher_exec_where_rhs_property_ordering) {
++    cbm_store_t *s = setup_cypher_property_compare_store();
++    cbm_cypher_result_t r = {0};
++
++    int rc = cbm_cypher_execute(s,
++                                "MATCH (a:Function)-[:CALLS]->(b:Function) "
++                                "WHERE a.start_line < b.start_line "
++                                "RETURN a.name, b.name",
++                                "test", 0, &r);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r.row_count, 2);
++
++    cbm_cypher_result_free(&r);
++    cbm_store_close(s);
++    PASS();
++}
++
++TEST(cypher_exec_with_where_rhs_property_eq) {
++    cbm_store_t *s = setup_cypher_property_compare_store();
++    cbm_cypher_result_t r = {0};
++
++    int rc = cbm_cypher_execute(s,
++                                "MATCH (a:Function)-[:CALLS]->(b:Function) "
++                                "WITH a, b "
++                                "WHERE a.file_path = b.file_path "
++                                "RETURN a.name, b.name",
++                                "test", 0, &r);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r.row_count, 1);
++    ASSERT_STR_EQ(r.rows[0][0], "Alpha");
++    ASSERT_STR_EQ(r.rows[0][1], "Beta");
++
++    cbm_cypher_result_free(&r);
++    cbm_store_close(s);
++    PASS();
++}
++
+ /* --- Ported from cypher_test.go: TestExecuteDistinct --- */
+ TEST(cypher_exec_distinct) {
+     cbm_store_t *s = setup_cypher_store();
+@@ -2546,6 +2730,9 @@ SUITE(cypher) {
+     RUN_TEST(cypher_parse_where_clause);
+     RUN_TEST(cypher_parse_where_regex);
+     RUN_TEST(cypher_parse_where_and);
++    RUN_TEST(cypher_parse_where_rhs_property);
++    RUN_TEST(cypher_parse_rejects_unbound_rhs_variable);
++    RUN_TEST(cypher_parse_rejects_unbound_post_with_rhs_variable);
+     RUN_TEST(cypher_parse_return_simple);
+     RUN_TEST(cypher_parse_return_count);
+     RUN_TEST(cypher_parse_return_order_limit);
+@@ -2584,6 +2771,12 @@ SUITE(cypher) {
+     RUN_TEST(cypher_exec_defines_edge);
+     RUN_TEST(cypher_exec_no_results);
+     RUN_TEST(cypher_exec_where_numeric);
++    RUN_TEST(cypher_exec_where_rhs_property_eq);
++    RUN_TEST(cypher_exec_optional_unbound_rhs_does_not_pass);
++    RUN_TEST(cypher_exec_optional_unbound_rhs_not_does_not_pass);
++    RUN_TEST(cypher_exec_where_rhs_property_neq);
++    RUN_TEST(cypher_exec_where_rhs_property_ordering);
++    RUN_TEST(cypher_exec_with_where_rhs_property_eq);
+     /* Go test ports */
+     RUN_TEST(cypher_exec_distinct);
+     RUN_TEST(cypher_exec_with_distinct_issue238);

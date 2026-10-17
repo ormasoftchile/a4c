@@ -1,6 +1,7 @@
 package a4c
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -18,6 +19,15 @@ type HandoffArtifact struct {
 	Inputs             map[string]any
 	ProfileDescription string
 	Checkpoint         *TaskCheckpoint
+
+	// Review-evidence bundle. Populated only for reviewer activities so a
+	// reviewer can verify without re-deriving what the coder already
+	// established, and without needing unrestricted command execution.
+	ReviewEvidenceDir   string
+	FilesChanged        []string
+	CoderHandoff        *CoderHandoff
+	PriorFindings       []ReviewFinding
+	DiffHygieneWarnings []string
 }
 
 // HandoffBuilder builds concise, token-efficient prompt handoffs.
@@ -63,7 +73,76 @@ func (b *HandoffBuilder) BuildPrompt(artifact HandoffArtifact) string {
 		trimmedDiff := b.truncateDiff(artifact.Diff)
 		sb.WriteString(fmt.Sprintf("Changes Under Review:\n%s\n", trimmedDiff))
 		sb.WriteString(fmt.Sprintf("Native Evidence: %s\n", artifact.ValidationEvidence))
-		sb.WriteString("Instructions: Review the implementation independently for correctness, edge cases, test coverage, and specification compliance against the objective and native test evidence. You are strictly read-only. Indicate your verdict with [REVIEW_APPROVED] or [REVIEW_REJECTED: reason] and your review findings.\n")
+
+		if len(artifact.FilesChanged) > 0 {
+			sb.WriteString(fmt.Sprintf("Files Changed (%d):\n", len(artifact.FilesChanged)))
+			for _, f := range artifact.FilesChanged {
+				sb.WriteString(fmt.Sprintf("  - %s\n", f))
+			}
+		}
+
+		if artifact.CoderHandoff != nil {
+			h := artifact.CoderHandoff
+			sb.WriteString("\nCoder Completion Handoff (already established by the implementer; do not re-derive):\n")
+			if h.BehaviorSummary != "" {
+				sb.WriteString(fmt.Sprintf("  Behavior: %s\n", h.BehaviorSummary))
+			}
+			if len(h.TestsAdded) > 0 {
+				sb.WriteString(fmt.Sprintf("  Tests added: %s\n", strings.Join(h.TestsAdded, ", ")))
+			}
+			if len(h.TestsUpdated) > 0 {
+				sb.WriteString(fmt.Sprintf("  Tests updated: %s\n", strings.Join(h.TestsUpdated, ", ")))
+			}
+			if len(h.VerificationCmds) > 0 {
+				sb.WriteString(fmt.Sprintf("  Verification commands executed: %s\n", strings.Join(h.VerificationCmds, "; ")))
+			}
+			if len(h.TestExitCodes) > 0 {
+				codes := make([]string, len(h.TestExitCodes))
+				for i, c := range h.TestExitCodes {
+					codes[i] = fmt.Sprintf("%d", c)
+				}
+				sb.WriteString(fmt.Sprintf("  Test exit codes: %s\n", strings.Join(codes, ", ")))
+			}
+			if len(h.KnownLimitations) > 0 {
+				sb.WriteString(fmt.Sprintf("  Known limitations declared by coder: %s\n", strings.Join(h.KnownLimitations, "; ")))
+			}
+		}
+
+		if len(artifact.PriorFindings) > 0 {
+			sb.WriteString("\nPrior Review Findings (from earlier rounds; do not re-derive):\n")
+			for _, f := range artifact.PriorFindings {
+				loc := ""
+				if f.Path != "" {
+					loc = fmt.Sprintf(" (%s)", f.Path)
+				}
+				sb.WriteString(fmt.Sprintf("  [%s]%s %s\n", f.Kind, loc, f.Message))
+			}
+		}
+
+		if len(artifact.DiffHygieneWarnings) > 0 {
+			sb.WriteString("\nDiff Hygiene Warnings (unexpected/unrelated files flagged automatically; assess relevance, do not blindly reject):\n")
+			for _, w := range artifact.DiffHygieneWarnings {
+				sb.WriteString(fmt.Sprintf("  - %s\n", w))
+			}
+		}
+
+		if artifact.ReviewEvidenceDir != "" {
+			sb.WriteString(fmt.Sprintf(
+				"\nEvidence Bundle (read-only, inside YOUR workspace under %s/):\n"+
+					"  - %s/diff.patch           full baseline-to-candidate source diff\n"+
+					"  - %s/changed-files.txt    each changed file with line count and test names + line numbers\n"+
+					"  - %s/test-output.log      the COMPLETE verification log (read this for full test output)\n"+
+					"  - %s/evidence.json        verification command, exit code, tests executed, vacuous flag\n"+
+					"  - %s/coder-handoff.json   structured implementer summary\n"+
+					"  - %s/prior-reviews.json   earlier findings and coder responses\n"+
+					"To establish that tests exist, read changed-files.txt (it lists test names and line numbers) rather than paging whole test files. To inspect a specific region of a large file, use ranged reads (start_line/end_line). You may also use any read-only search tool available to you.\n",
+				artifact.ReviewEvidenceDir, artifact.ReviewEvidenceDir, artifact.ReviewEvidenceDir,
+				artifact.ReviewEvidenceDir, artifact.ReviewEvidenceDir, artifact.ReviewEvidenceDir,
+				artifact.ReviewEvidenceDir))
+		}
+
+		sb.WriteString("Instructions: Review the implementation independently for correctness, edge cases, test coverage, and specification compliance against the objective and the evidence above. You are strictly read-only. You may not run commands; consume the recorded evidence and logs instead.\n")
+		sb.WriteString("Verdicts: If you find a concrete implementation defect, respond [REVIEW_REJECTED: reason] with specific code/behavior. If the implementation looks correct but you CANNOT establish verification because evidence or capabilities are missing, respond [REVIEW_BLOCKED: reason] -- this is NOT a rejection and will not trigger code changes. If verified and defect-free, respond [REVIEW_APPROVED].\n")
 
 	default:
 		// Specialist / Coder: use native tools directly in worktree
@@ -145,6 +224,38 @@ func (b *HandoffBuilder) BuildContinuationPrompt(chk TaskCheckpoint) string {
 // BuildContinuationPrompt provides a package-level helper to generate continuation prompts.
 func BuildContinuationPrompt(chk TaskCheckpoint) string {
 	return NewHandoffBuilder().BuildContinuationPrompt(chk)
+}
+
+// checkpointFromInput rehydrates a TaskCheckpoint from an activity's Inputs
+// map. A checkpoint stored in-memory is a *TaskCheckpoint, but after the
+// activity record round-trips through JSON persistence it becomes a
+// map[string]any. Without this rehydration, a restarted coordinator silently
+// loses the continuation framing (the type assertion fails) and the resumed
+// activity is rebuilt from its initial prompt instead of durable state.
+func CheckpointFromInput(v any) *TaskCheckpoint {
+	switch c := v.(type) {
+	case nil:
+		return nil
+	case *TaskCheckpoint:
+		return c
+	case TaskCheckpoint:
+		return &c
+	case map[string]any:
+		b, err := json.Marshal(c)
+		if err != nil {
+			return nil
+		}
+		var chk TaskCheckpoint
+		if err := json.Unmarshal(b, &chk); err != nil {
+			return nil
+		}
+		if chk.TaskID == "" && chk.Objective == "" {
+			return nil
+		}
+		return &chk
+	default:
+		return nil
+	}
 }
 
 func (b *HandoffBuilder) truncateDiff(diff string) string {

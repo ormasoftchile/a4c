@@ -256,14 +256,20 @@ func TestDogfood_03_MandatoryEvidenceEnforcement(t *testing.T) {
 		t.Fatalf("step failed: %v", err)
 	}
 
-	// Reviewer approval must be overridden to false because no native evidence exists
+	// Reviewer approval must be overridden to false because no native evidence exists.
+	// The verdict is verification_blocked (a verification gap), not a rejection,
+	// because no implementation defect was demonstrated.
 	approved, _ := res.Outputs["approved"].(bool)
 	if approved {
 		t.Fatalf("coordinator allowed reviewer approval without native test evidence!")
 	}
 	comments, _ := res.Outputs["review_comments"].(string)
-	if !strings.Contains(comments, "no valid native test evidence") {
-		t.Fatalf("expected evidence rejection comment, got %q", comments)
+	if !strings.Contains(comments, "no native test evidence") && !strings.Contains(comments, "no valid native test evidence") {
+		t.Fatalf("expected evidence verification-gap comment, got %q", comments)
+	}
+	verdict, _ := res.Outputs["verdict"].(string)
+	if verdict == string(spike.ReviewVerdictApproved) {
+		t.Fatalf("INVARIANT VIOLATION: missing evidence must never yield approved, got %q", verdict)
 	}
 }
 

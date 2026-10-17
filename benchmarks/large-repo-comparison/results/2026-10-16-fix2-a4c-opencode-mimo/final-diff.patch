@@ -1,0 +1,39 @@
+diff --git a/src/cypher/cypher.c b/src/cypher/cypher.c
+index 77bc710..8921eab 100644
+--- a/src/cypher/cypher.c
++++ b/src/cypher/cypher.c
+@@ -754,6 +754,8 @@ static void expr_free(cbm_expr_t *e) {
+             safe_str_free(&cur->cond.property);
+             safe_str_free(&cur->cond.op);
+             safe_str_free(&cur->cond.value);
++            safe_str_free(&cur->cond.rhs_variable);
++            safe_str_free(&cur->cond.rhs_property);
+             for (int i = 0; i < cur->cond.in_value_count; i++) {
+                 safe_str_free(&cur->cond.in_values[i]);
+             }
+@@ -1934,6 +1936,8 @@ static void free_where(cbm_where_clause_t *w) {
+         safe_str_free(&w->conditions[i].property);
+         safe_str_free(&w->conditions[i].op);
+         safe_str_free(&w->conditions[i].value);
++        safe_str_free(&w->conditions[i].rhs_variable);
++        safe_str_free(&w->conditions[i].rhs_property);
+         for (int j = 0; j < w->conditions[i].in_value_count; j++) {
+             safe_str_free(&w->conditions[i].in_values[j]);
+         }
+diff --git a/src/cypher/cypher.h b/src/cypher/cypher.h
+index 5966c20..f9d621e 100644
+--- a/src/cypher/cypher.h
++++ b/src/cypher/cypher.h
+@@ -187,7 +187,12 @@ typedef struct {
+     const char *property;
+     const char *op; /* "=", "<>", "=~", "CONTAINS", "STARTS WITH", "ENDS WITH",
+                        ">", "<", ">=", "<=", "IN", "IS NULL", "IS NOT NULL" */
++    /* Literal RHS: `value` holds the RHS literal. Property RHS (comparison
++     * ops only): `rhs_variable`/`rhs_property` hold the right-hand
++     * variable.property; `value` stays NULL. */
+     const char *value;
++    const char *rhs_variable;
++    const char *rhs_property;
+     bool negated;           /* NOT prefix */
+     const char **in_values; /* IN [...] list */
+     int in_value_count;

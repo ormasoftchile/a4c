@@ -36,6 +36,11 @@ type SubmitReviewParams struct {
 	Approved bool     `json:"approved" jsonschema:"true if changes are verified and satisfy the specification; false otherwise"`
 	Comments string   `json:"comments" jsonschema:"detailed review comments, findings, or reasons for rejection"`
 	Blockers []string `json:"blockers,omitempty" jsonschema:"optional list of specific blocking defects found during review"`
+	// Verdict optionally records the typed outcome directly. Use "approved",
+	// "rejected" (concrete implementation defect), or "verification_blocked"
+	// (could not establish correctness because evidence/capabilities are
+	// missing; NOT a defect). When empty, it is inferred from Approved.
+	Verdict string `json:"verdict,omitempty" jsonschema:"optional typed verdict: approved | rejected | verification_blocked"`
 }
 
 type RequestHumanDecisionParams struct {
@@ -61,6 +66,8 @@ type CopilotSessionAdapter struct {
 	turnCount      int
 	abortFn        func()
 	budgetAbort    sync.Once
+	reviewRecorded bool
+	reviewVerdict  ReviewVerdict
 }
 
 func (s *CopilotSessionAdapter) SessionID() string {
@@ -443,18 +450,21 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		maxToolCalls = 10
 	}
 
-	checkToolLimits := func() error {
+	// Shared tool-governance boundary. Terminal lifecycle operations (delegate,
+	// submit a verdict, escalate) are exempt from the exploration call cap so a
+	// reviewer that exhausted its read budget can still submit its verdict, and
+	// a lead can still delegate. They remain permission- and budget-controlled
+	// and are bounded by a separate terminal-op cap.
+	enforcer := newToolBudgetEnforcer(maxToolCalls, config.OnToolLimitHit)
+
+	checkToolLimits := func(toolName string) error {
 		if err := adapter.checkActionBudget("tool call"); err != nil {
+			if config.OnToolLimitHit != nil {
+				config.OnToolLimitHit(toolName)
+			}
 			return err
 		}
-		adapter.mu.Lock()
-		adapter.toolCallCount++
-		calls := adapter.toolCallCount
-		adapter.mu.Unlock()
-		if calls > maxToolCalls {
-			return fmt.Errorf("%w: maximum %d calls allowed per session", ErrToolCallLimitExceeded, maxToolCalls)
-		}
-		return nil
+		return enforcer.check(toolName)
 	}
 
 	readFileTool := copilot.DefineTool("governed_read_file", "Read file content from workspace",
@@ -462,7 +472,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			tStart := time.Now()
 			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
 
-			if err := checkToolLimits(); err != nil {
+			if err := checkToolLimits("governed_read_file"); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -491,7 +501,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			tStart := time.Now()
 			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
 
-			if err := checkToolLimits(); err != nil {
+			if err := checkToolLimits("governed_apply_patch"); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -529,7 +539,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			tStart := time.Now()
 			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
 
-			if err := checkToolLimits(); err != nil {
+			if err := checkToolLimits("governed_propose_activity"); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -554,7 +564,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			tStart := time.Now()
 			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
 
-			if err := checkToolLimits(); err != nil {
+			if err := checkToolLimits("governed_submit_review"); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -569,10 +579,40 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 				Blockers:   params.Blockers,
 				Timestamp:  time.Now(),
 			}
+			// Honour an explicit typed verdict; otherwise infer from Approved.
+			switch strings.ToLower(strings.TrimSpace(params.Verdict)) {
+			case string(ReviewVerdictApproved):
+				rev.Verdict = ReviewVerdictApproved
+				rev.Approved = true
+			case string(ReviewVerdictRejected):
+				rev.Verdict = ReviewVerdictRejected
+				rev.Approved = false
+			case string(ReviewVerdictVerificationBlocked):
+				rev.Verdict = ReviewVerdictVerificationBlocked
+				rev.Approved = false
+			default:
+				if params.Approved {
+					rev.Verdict = ReviewVerdictApproved
+				} else {
+					rev.Verdict = ReviewVerdictRejected
+				}
+			}
+			// Idempotent terminal submission: the first recorded verdict wins.
+			// A duplicate submit_review acknowledges the existing verdict and
+			// does not overwrite it, so a retry cannot change a settled outcome.
+			adapter.mu.Lock()
+			if adapter.reviewRecorded {
+				prior := adapter.reviewVerdict
+				adapter.mu.Unlock()
+				return fmt.Sprintf("Review already recorded (Verdict=%s); duplicate submission ignored.", prior), nil
+			}
+			adapter.reviewRecorded = true
+			adapter.reviewVerdict = rev.Verdict
+			adapter.mu.Unlock()
 			if config.OnSubmitReview != nil {
 				config.OnSubmitReview(rev)
 			}
-			return fmt.Sprintf("Review recorded (Approved=%t): %s", params.Approved, params.Comments), nil
+			return fmt.Sprintf("Review recorded (Verdict=%s): %s", rev.Verdict, params.Comments), nil
 		})
 
 	requestHumanDecisionTool := copilot.DefineTool("governed_request_human_decision", "Escalate a decision to the human engineer",
@@ -580,7 +620,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			tStart := time.Now()
 			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
 
-			if err := checkToolLimits(); err != nil {
+			if err := checkToolLimits("governed_request_human_decision"); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -609,7 +649,7 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			tStart := time.Now()
 			defer func() { adapter.recordToolDuration(time.Since(tStart)) }()
 
-			if err := checkToolLimits(); err != nil {
+			if err := checkToolLimits("governed_propose_memory"); err != nil {
 				return nil, err
 			}
 			if config.Governor != nil {
@@ -692,6 +732,15 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		availableTools = append(availableTools, "governed_propose_memory")
 	}
 
+	// Read-only host-native navigation/search tools for non-mutating roles.
+	// These let a reviewer target a specific region of a large file or search
+	// for a test symbol without paging the whole file and exhausting its
+	// governed read budget. They are strictly read-only, so the review boundary
+	// is preserved.
+	if !mutating {
+		availableTools = append(availableTools, "read", "grep", "list")
+	}
+
 	modelToUse := p.model
 	if config.Model != "" {
 		modelToUse = config.Model
@@ -717,6 +766,37 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 	}
 	if !mutating {
 		sessionConfig.AvailableTools = availableTools
+	}
+
+	// Bind A4C Knowledge to this session via a per-session stdio MCP server whose
+	// env carries this activity's execution-context token. The MCP server process
+	// is created and destroyed with the session, so a delayed call from a
+	// completed activity carries that activity's token (and fails its
+	// StatusClaimed check) rather than being attributed to a later activity.
+	if config.KnowledgeToken != "" {
+		// Point the MCP server at the MAIN workspace that owns the shared
+		// knowledge DB, not the disposable worktree, so knowledge state is
+		// shared across worktrees and hosts.
+		mcpDir := config.KnowledgeDir
+		if mcpDir == "" {
+			mcpDir = config.WorkspaceDir
+		}
+		// Spawn the MCP server via an ABSOLUTE path to this running binary.
+		// A bare "a4c" would rely on the host's PATH, which frequently does not
+		// include the A4C binary — silently leaving the knowledge tools
+		// unexposed. os.Executable() is authoritative.
+		a4cBin := "a4c"
+		if exe, err := os.Executable(); err == nil && exe != "" {
+			a4cBin = exe
+		}
+		fmt.Fprintf(os.Stderr, "[a4c-knowledge] configuring copilot session MCP server bin=%s dir=%s\n", a4cBin, mcpDir)
+		sessionConfig.MCPServers = map[string]copilot.MCPServerConfig{
+			"a4c": copilot.MCPStdioServerConfig{
+				Command: a4cBin,
+				Args:    []string{"mcp", "--dir", mcpDir},
+				Env:     map[string]string{"A4C_KNOWLEDGE_TOKEN": config.KnowledgeToken},
+			},
+		}
 	}
 
 	copilotSession, err := p.client.CreateSession(ctx, sessionConfig)

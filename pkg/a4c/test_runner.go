@@ -3,7 +3,11 @@ package a4c
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -24,6 +28,79 @@ func (r *NativeGoTestRunner) RunTests(ctx context.Context, workspaceDir string) 
 		return -1, string(out), err
 	}
 	return 0, string(out), nil
+}
+
+// goPackageResult matches a per-package `go test` result line:
+// "ok   \tpkg\t0.1s", "FAIL\tpkg\t0.1s", or "?   \tpkg\t[no test files]".
+var goPackageResult = regexp.MustCompile(`(?m)^(ok|FAIL|\?)\s`)
+
+// goTestCase matches a verbose per-test line: "--- PASS: TestFoo (0.00s)".
+var goTestCase = regexp.MustCompile(`(?m)^\s*--- (PASS|FAIL|SKIP): `)
+
+// AnalyzeGoTestOutput reports how many tests a `go test` invocation actually
+// executed and whether the run was vacuous. Vacuous means the command ran but
+// exercised no tests, so it proves nothing about a change and must never be
+// treated as VALID (it would convert "no tests ran" into a false pass).
+//
+// Detection is deliberately conservative so custom/non-Go runners that emit an
+// opaque but non-empty "PASS" message are NOT misclassified as vacuous. A run
+// is vacuous only when every Go package reported "[no test files]" or the
+// command produced no output at all.
+func AnalyzeGoTestOutput(output string) (testsExecuted int, vacuous bool) {
+	// Prefer precise per-test counts when verbose lines are present.
+	if n := len(goTestCase.FindAllString(output, -1)); n > 0 {
+		return n, false
+	}
+	// Count packages that actually ran tests (ok/FAIL) vs "[no test files]" (?).
+	ran, noTestFiles := 0, 0
+	for _, m := range goPackageResult.FindAllStringSubmatch(output, -1) {
+		switch m[1] {
+		case "ok", "FAIL":
+			ran++
+		case "?":
+			noTestFiles++
+		}
+	}
+	if ran > 0 {
+		return ran, false
+	}
+	// No package ran tests. Vacuous only for an explicit `go test` "no test
+	// files" result or completely empty output -- not for opaque custom output.
+	if noTestFiles > 0 {
+		return 0, true
+	}
+	if strings.TrimSpace(output) == "" {
+		return 0, true
+	}
+	// Non-empty output with no Go structure: non-vacuous but uncounted.
+	return 0, false
+}
+
+// WriteDurableTestLog persists full test output to a durable, reviewer-readable
+// artifact under <workspace>/.a4c/evidence/ and returns its relative path.
+// The full log is what a reviewer inspects; only a summary is embedded in
+// prompts. Returns "" when the log cannot be written.
+func WriteDurableTestLog(workspaceDir, evidenceID, output string) string {
+	if workspaceDir == "" || evidenceID == "" {
+		return ""
+	}
+	dir := filepath.Join(workspaceDir, ".a4c", "evidence")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	safeID := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, evidenceID)
+	path := filepath.Join(dir, safeID+".log")
+	if err := os.WriteFile(path, []byte(output), 0o600); err != nil {
+		return ""
+	}
+	return filepath.Join(".a4c", "evidence", safeID+".log")
 }
 
 type GovernedExecutionCoordinator struct {
@@ -161,4 +238,3 @@ func (c *GovernedExecutionCoordinator) ExecuteNext(ctx context.Context) (*Activi
 
 	return res, nil
 }
-

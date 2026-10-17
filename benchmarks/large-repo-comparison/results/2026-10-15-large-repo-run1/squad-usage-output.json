@@ -1,0 +1,244 @@
+{
+  "totalPremiumRequestCost": 7.5,
+  "totalUserRequests": 1,
+  "totalNanoAiu": 879269700000,
+  "tokenDetails": {
+    "input": {
+      "tokenCount": 512165
+    },
+    "cache_read": {
+      "tokenCount": 9823744
+    },
+    "cache_write": {
+      "tokenCount": 0
+    },
+    "output": {
+      "tokenCount": 44000
+    }
+  },
+  "totalApiDurationMs": 772719,
+  "sessionStartTime": "2026-10-15T13:08:59.976Z",
+  "codeChanges": {
+    "linesAdded": 450,
+    "linesRemoved": 67,
+    "filesModifiedCount": 2,
+    "filesModified": [
+      "/Volumes/Projects/a4c/benchmarks/large-repo-comparison/results/2026-10-15-large-repo-run1/squad/src/cypher/cypher.c",
+      "/Volumes/Projects/a4c/benchmarks/large-repo-comparison/results/2026-10-15-large-repo-run1/squad/tests/test_cypher.c"
+    ]
+  },
+  "modelMetrics": {
+    "gpt-5.5": {
+      "requests": {
+        "count": 181,
+        "cost": 7.5
+      },
+      "usage": {
+        "inputTokens": 10335909,
+        "outputTokens": 44000,
+        "cacheReadTokens": 9823744,
+        "cacheWriteTokens": 0,
+        "reasoningTokens": 17910
+      },
+      "cacheExpiresAt": "2026-10-15T14:38:18.869Z",
+      "totalNanoAiu": 879269700000,
+      "tokenDetails": {
+        "input": {
+          "tokenCount": 512165
+        },
+        "cache_read": {
+          "tokenCount": 9823744
+        },
+        "cache_write": {
+          "tokenCount": 0
+        },
+        "output": {
+          "tokenCount": 44000
+        }
+      }
+    }
+  },
+  "agentMetrics": {
+    "main": {
+      "totalApiDurationMs": 77337,
+      "totalNanoAiu": 123482000000,
+      "modelMetrics": {
+        "gpt-5.5": {
+          "requests": {
+            "count": 18,
+            "cost": 7.5
+          },
+          "usage": {
+            "inputTokens": 856672,
+            "outputTokens": 5134,
+            "cacheReadTokens": 711680,
+            "cacheWriteTokens": 0,
+            "reasoningTokens": 1659
+          },
+          "totalNanoAiu": 123482000000,
+          "tokenDetails": {
+            "input": {
+              "tokenCount": 144992
+            },
+            "cache_read": {
+              "tokenCount": 711680
+            },
+            "cache_write": {
+              "tokenCount": 0
+            },
+            "output": {
+              "tokenCount": 5134
+            }
+          }
+        }
+      }
+    },
+    "271e7c55-2461-40fc-bf76-6243fef17098": {
+      "agentName": "general-purpose",
+      "agentDisplayName": "lead",
+      "totalApiDurationMs": 272536,
+      "totalNanoAiu": 303218200000,
+      "modelMetrics": {
+        "gpt-5.5": {
+          "requests": {
+            "count": 62,
+            "cost": 0
+          },
+          "usage": {
+            "inputTokens": 4007318,
+            "outputTokens": 15868,
+            "cacheReadTokens": 3884544,
+            "cacheWriteTokens": 0,
+            "reasoningTokens": 5697
+          },
+          "totalNanoAiu": 303218200000,
+          "tokenDetails": {
+            "input": {
+              "tokenCount": 122774
+            },
+            "cache_read": {
+              "tokenCount": 3884544
+            },
+            "cache_write": {
+              "tokenCount": 0
+            },
+            "output": {
+              "tokenCount": 15868
+            }
+          }
+        }
+      }
+    },
+    "e247fb77-b1dd-4907-9b71-4b0461b70112": {
+      "agentName": "general-purpose",
+      "agentDisplayName": "reviewer",
+      "totalApiDurationMs": 63838,
+      "totalNanoAiu": 50259400000,
+      "modelMetrics": {
+        "gpt-5.5": {
+          "requests": {
+            "count": 18,
+            "cost": 0
+          },
+          "usage": {
+            "inputTokens": 506606,
+            "outputTokens": 3282,
+            "cacheReadTokens": 473088,
+            "cacheWriteTokens": 0,
+            "reasoningTokens": 1765
+          },
+          "totalNanoAiu": 50259400000,
+          "tokenDetails": {
+            "input": {
+              "tokenCount": 33518
+            },
+            "cache_read": {
+              "tokenCount": 473088
+            },
+            "cache_write": {
+              "tokenCount": 0
+            },
+            "output": {
+              "tokenCount": 3282
+            }
+          }
+        }
+      }
+    },
+    "a82bfe8e-113b-4375-a27e-814ab1a8e247": {
+      "agentName": "general-purpose",
+      "agentDisplayName": "reviewer",
+      "totalApiDurationMs": 175191,
+      "totalNanoAiu": 179272200000,
+      "modelMetrics": {
+        "gpt-5.5": {
+          "requests": {
+            "count": 41,
+            "cost": 0
+          },
+          "usage": {
+            "inputTokens": 2078922,
+            "outputTokens": 9872,
+            "cacheReadTokens": 1977344,
+            "cacheWriteTokens": 0,
+            "reasoningTokens": 4348
+          },
+          "totalNanoAiu": 179272200000,
+          "tokenDetails": {
+            "input": {
+              "tokenCount": 101578
+            },
+            "cache_read": {
+              "tokenCount": 1977344
+            },
+            "cache_write": {
+              "tokenCount": 0
+            },
+            "output": {
+              "tokenCount": 9872
+            }
+          }
+        }
+      }
+    },
+    "0a372ea3-85f1-4d4d-9c71-c0aa6feb8ecf": {
+      "agentName": "general-purpose",
+      "agentDisplayName": "reviewer",
+      "totalApiDurationMs": 183817,
+      "totalNanoAiu": 223037900000,
+      "modelMetrics": {
+        "gpt-5.5": {
+          "requests": {
+            "count": 42,
+            "cost": 0
+          },
+          "usage": {
+            "inputTokens": 2886391,
+            "outputTokens": 9844,
+            "cacheReadTokens": 2777088,
+            "cacheWriteTokens": 0,
+            "reasoningTokens": 4441
+          },
+          "totalNanoAiu": 223037900000,
+          "tokenDetails": {
+            "input": {
+              "tokenCount": 109303
+            },
+            "cache_read": {
+              "tokenCount": 2777088
+            },
+            "cache_write": {
+              "tokenCount": 0
+            },
+            "output": {
+              "tokenCount": 9844
+            }
+          }
+        }
+      }
+    }
+  },
+  "currentModel": "gpt-5.5",
+  "lastCallInputTokens": 61608,
+  "lastCallOutputTokens": 296
+}

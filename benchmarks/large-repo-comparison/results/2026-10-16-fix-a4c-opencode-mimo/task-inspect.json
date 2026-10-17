@@ -1,0 +1,56 @@
+{
+  "task_id": "task-1792161467737924000",
+  "original_objective": "# Task: Support property-to-property comparisons in Cypher WHERE clauses\n\n## Problem\n\nThe Cypher query subset supported by `src/cypher/cypher.c` fails to parse a WHERE condition that compares one variable's property with another variable's property. The query aborts with `expected value at pos N` at the right-hand operand.\n\nExamples that fail on the current code:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.name \u003c\u003e b.name RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WITH a, b WHERE a.file_path = b.file_path RETURN a.name, b.name\n```\n\nProperty-to-literal comparisons already work and must keep working:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE b.file_path = 'demo.go' RETURN a.name, b.name\n```\n\n## Required behavior\n\nExtend the WHERE parser and evaluator so that when the right-hand side of a comparison operator is another `variable.property` expression (not a string/number/boolean literal), the condition compares the two resolved property values for the current binding.\n\n1. `a.prop = b.prop` — true when the two resolved string values are equal.\n2. `a.prop \u003c\u003e b.prop` — true when the two resolved string values differ.\n3. All existing comparison operators that make sense on property values (`\u003e`, `\u003c`, `\u003e=`, `\u003c=`) should also accept a property right-hand side, evaluated the same way as when the right-hand side is a numeric literal (via `strtod`).\n4. The property right-hand side must resolve through the same binding mechanism used for the left-hand side (`node_prop` / bare-alias name), so File, Function, and other node property paths all work.\n5. Property-to-literal and bare-alias comparisons must continue to work exactly as before.\n6. The change must work in both the early WHERE (after MATCH) and post-WITH WHERE paths, since they share the same parser and evaluator.\n\n## Where to change\n\n- Parser: `parse_condition_expr` in `src/cypher/cypher.c` currently rejects a non-literal right-hand side with `expected value at pos %d`.\n- Condition model: `cbm_condition_t` in `src/cypher/cypher.h` currently only stores a literal `value`.\n- Evaluator: `eval_condition` / `resolve_condition_value` in `src/cypher/cypher.c` currently resolve only the left-hand side against the binding.\n\n## Constraints\n\n- Do not break any existing Cypher behavior (WHERE with literals, regex, CONTAINS, STARTS WITH, ENDS WITH, IN, IS NULL, IS NOT NULL, HAS_LABEL, EXISTS, AND/OR/XOR/NOT).\n- Keep the error path for genuinely unsupported right-hand sides (e.g. function calls on the RHS if not already supported) clear and non-crashing.\n- Add unit tests in the existing Cypher test suite covering property-to-property `=`, `\u003c\u003e`, and at least one ordering operator, plus a WITH-path case.\n- The full project test suite (`make -f Makefile.cbm SANITIZE= test`) must still pass.\n\n## How to verify\n\n```sh\nmake -f Makefile.cbm SANITIZE= cbm\n./build/c/codebase-memory-mcp cli index_repository '{\"repo_path\":\"/tmp/demo\",\"mode\":\"full\",\"name\":\"demo\"}'\n./build/c/codebase-memory-mcp cli query_graph '{\"project\":\"demo\",\"query\":\"MATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\"}'\n```\n\nBefore the fix this errors with `expected value at pos N`. After the fix it returns only CALLS edges whose source and target files are the same.",
+  "strategy": "team",
+  "created_at": "2026-10-16T11:37:50.514348-03:00",
+  "allocated_budget": 2000000,
+  "consumed_budget": 0,
+  "status": "failed",
+  "branch": "a4c/task-1792161467737924000",
+  "participating_agents": [
+    "lead"
+  ],
+  "activities": [
+    {
+      "activity_id": "task-1792161467737924000",
+      "agent_id": "lead",
+      "objective": "# Task: Support property-to-property comparisons in Cypher WHERE clauses\n\n## Problem\n\nThe Cypher query subset supported by `src/cypher/cypher.c` fails to parse a WHERE condition that compares one variable's property with another variable's property. The query aborts with `expected value at pos N` at the right-hand operand.\n\nExamples that fail on the current code:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WHERE a.name \u003c\u003e b.name RETURN a.name, b.name\nMATCH (a)-[:CALLS]-\u003e(b) WITH a, b WHERE a.file_path = b.file_path RETURN a.name, b.name\n```\n\nProperty-to-literal comparisons already work and must keep working:\n\n```\nMATCH (a)-[:CALLS]-\u003e(b) WHERE b.file_path = 'demo.go' RETURN a.name, b.name\n```\n\n## Required behavior\n\nExtend the WHERE parser and evaluator so that when the right-hand side of a comparison operator is another `variable.property` expression (not a string/number/boolean literal), the condition compares the two resolved property values for the current binding.\n\n1. `a.prop = b.prop` — true when the two resolved string values are equal.\n2. `a.prop \u003c\u003e b.prop` — true when the two resolved string values differ.\n3. All existing comparison operators that make sense on property values (`\u003e`, `\u003c`, `\u003e=`, `\u003c=`) should also accept a property right-hand side, evaluated the same way as when the right-hand side is a numeric literal (via `strtod`).\n4. The property right-hand side must resolve through the same binding mechanism used for the left-hand side (`node_prop` / bare-alias name), so File, Function, and other node property paths all work.\n5. Property-to-literal and bare-alias comparisons must continue to work exactly as before.\n6. The change must work in both the early WHERE (after MATCH) and post-WITH WHERE paths, since they share the same parser and evaluator.\n\n## Where to change\n\n- Parser: `parse_condition_expr` in `src/cypher/cypher.c` currently rejects a non-literal right-hand side with `expected value at pos %d`.\n- Condition model: `cbm_condition_t` in `src/cypher/cypher.h` currently only stores a literal `value`.\n- Evaluator: `eval_condition` / `resolve_condition_value` in `src/cypher/cypher.c` currently resolve only the left-hand side against the binding.\n\n## Constraints\n\n- Do not break any existing Cypher behavior (WHERE with literals, regex, CONTAINS, STARTS WITH, ENDS WITH, IN, IS NULL, IS NOT NULL, HAS_LABEL, EXISTS, AND/OR/XOR/NOT).\n- Keep the error path for genuinely unsupported right-hand sides (e.g. function calls on the RHS if not already supported) clear and non-crashing.\n- Add unit tests in the existing Cypher test suite covering property-to-property `=`, `\u003c\u003e`, and at least one ordering operator, plus a WITH-path case.\n- The full project test suite (`make -f Makefile.cbm SANITIZE= test`) must still pass.\n\n## How to verify\n\n```sh\nmake -f Makefile.cbm SANITIZE= cbm\n./build/c/codebase-memory-mcp cli index_repository '{\"repo_path\":\"/tmp/demo\",\"mode\":\"full\",\"name\":\"demo\"}'\n./build/c/codebase-memory-mcp cli query_graph '{\"project\":\"demo\",\"query\":\"MATCH (a)-[:CALLS]-\u003e(b) WHERE a.file_path = b.file_path RETURN a.name, b.name\"}'\n```\n\nBefore the fix this errors with `expected value at pos N`. After the fix it returns only CALLS edges whose source and target files are the same.",
+      "status": "failed",
+      "budget_used": 0,
+      "error": "coordinator: lead completed without proposing any child activities",
+      "outputs": {
+        "error": "coordinator: lead completed without proposing any child activities",
+        "failure_reason": "no_delegation",
+        "guidance": "delegate implementation to 'coder' via governed_propose_activity before ending the turn; coordination tools (propose_activity, request_human_decision) are exempt from the tool-call cap",
+        "last_tool_limit": "",
+        "lead_summary": "",
+        "proposals_recorded": 0,
+        "tool_limit_hits": 0
+      },
+      "metrics": {
+        "wall_clock_duration": 13855026833,
+        "provider_wait_duration": 13854966291,
+        "model_duration": 13854966291,
+        "tool_duration": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "model_invocations": 1,
+        "tool_calls": 0
+      },
+      "created_at": "2026-10-16T11:37:50.514348-03:00"
+    }
+  ],
+  "metrics_summary": {
+    "wall_clock_duration": 13855026833,
+    "provider_wait_duration": 13854966291,
+    "model_duration": 13854966291,
+    "tool_duration": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0,
+    "model_invocations": 1,
+    "tool_calls": 0
+  },
+  "final_outcome": "Task failed: coordinator: lead completed without proposing any child activities"
+}

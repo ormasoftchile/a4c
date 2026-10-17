@@ -9,6 +9,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/ormasoftchile/a4c/pkg/a4c"
+	"github.com/ormasoftchile/a4c/pkg/a4c/knowledge"
 )
 
 // Server wraps the mark3labs MCP server with A4C team service handlers.
@@ -16,6 +17,14 @@ type Server struct {
 	mcpServer *server.MCPServer
 	service   a4c.TeamService
 	role      string
+
+	// knowledge is the optional A4C Knowledge service. Nil when the module is
+	// disabled, in which case no knowledge tools are registered.
+	knowledge *knowledge.Service
+	// knowledgeToken is the execution-context token bound to this server
+	// process at launch (Copilot per-session MCP env). When empty, callers must
+	// supply a per-activity context_token argument.
+	knowledgeToken string
 }
 
 // NewServer initializes an MCP server exposing canonical A4C team tools.

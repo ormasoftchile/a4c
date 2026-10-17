@@ -1,0 +1,239 @@
+diff --git a/src/cypher/cypher.c b/src/cypher/cypher.c
+index 77bc710..9cbd2dc 100644
+--- a/src/cypher/cypher.c
++++ b/src/cypher/cypher.c
+@@ -754,6 +754,8 @@ static void expr_free(cbm_expr_t *e) {
+             safe_str_free(&cur->cond.property);
+             safe_str_free(&cur->cond.op);
+             safe_str_free(&cur->cond.value);
++            safe_str_free(&cur->cond.rhs_variable);
++            safe_str_free(&cur->cond.rhs_property);
+             for (int i = 0; i < cur->cond.in_value_count; i++) {
+                 safe_str_free(&cur->cond.in_values[i]);
+             }
+@@ -1086,6 +1088,21 @@ static cbm_expr_t *parse_condition_expr(parser_t *p) {
+     } else if (check(p, TOK_FALSE)) {
+         advance(p);
+         c.value = heap_strdup("false");
++    } else if (check(p, TOK_IDENT) &&
++               (p->pos + SKIP_ONE >= p->count ||
++                p->tokens[p->pos + SKIP_ONE].type != TOK_LPAREN)) {
++        c.rhs_variable = heap_strdup(advance(p)->text);
++        if (match(p, TOK_DOT)) {
++            const cbm_token_t *rprop = expect(p, TOK_IDENT);
++            if (!rprop) {
++                safe_str_free(&c.variable);
++                safe_str_free(&c.property);
++                safe_str_free(&c.op);
++                safe_str_free(&c.rhs_variable);
++                return NULL;
++            }
++            c.rhs_property = heap_strdup(rprop->text);
++        }
+     } else {
+         snprintf(p->error, sizeof(p->error), "expected value at pos %d", peek(p)->pos);
+         safe_str_free(&c.variable);
+@@ -1934,6 +1951,8 @@ static void free_where(cbm_where_clause_t *w) {
+         safe_str_free(&w->conditions[i].property);
+         safe_str_free(&w->conditions[i].op);
+         safe_str_free(&w->conditions[i].value);
++        safe_str_free(&w->conditions[i].rhs_variable);
++        safe_str_free(&w->conditions[i].rhs_property);
+         for (int j = 0; j < w->conditions[i].in_value_count; j++) {
+             safe_str_free(&w->conditions[i].in_values[j]);
+         }
+@@ -2327,23 +2346,32 @@ static void binding_set(binding_t *b, const char *var, const cbm_node_t *node) {
+     b->var_count++;
+ }
+ 
+-/* Resolve the actual property value for a condition from a binding */
+-static const char *resolve_condition_value(const cbm_condition_t *c, binding_t *b) {
+-    cbm_edge_t *e = binding_get_edge(b, c->variable);
++/* Resolve a (variable, property) pair from a binding */
++static const char *resolve_var_prop_value(const char *variable, const char *property,
++                                          binding_t *b) {
++    if (!variable) {
++        return NULL;
++    }
++    cbm_edge_t *e = binding_get_edge(b, variable);
+     if (e) {
+-        return edge_prop(e, c->property);
++        return edge_prop(e, property);
+     }
+-    cbm_node_t *n = binding_get(b, c->variable);
++    cbm_node_t *n = binding_get(b, variable);
+     if (!n) {
+         return NULL; /* unbound variable */
+     }
+-    if (c->property) {
+-        return node_prop(n, c->property, b->store);
++    if (property) {
++        return node_prop(n, property, b->store);
+     }
+     /* Bare alias (e.g. post-WITH virtual var) — use node name directly */
+     return n->name ? n->name : "";
+ }
+ 
++/* Resolve the actual property value for a condition from a binding */
++static const char *resolve_condition_value(const cbm_condition_t *c, binding_t *b) {
++    return resolve_var_prop_value(c->variable, c->property, b);
++}
++
+ /* Evaluate a comparison operator between actual and expected strings. */
+ static bool eval_comparison_op(const char *op, const char *actual, const char *expected) {
+     if (strcmp(op, "=") == 0) {
+@@ -2461,7 +2489,15 @@ static bool eval_condition(const cbm_condition_t *c, binding_t *b) {
+         return c->negated ? !result : result;
+     }
+ 
+-    result = eval_comparison_op(c->op, actual, c->value);
++    const char *expected = c->value;
++    if (c->rhs_variable) {
++        expected = resolve_var_prop_value(c->rhs_variable, c->rhs_property, b);
++        if (!expected) {
++            return true;
++        }
++    }
++
++    result = eval_comparison_op(c->op, actual, expected ? expected : "");
+     return c->negated ? !result : result;
+ }
+ 
+@@ -3663,6 +3699,15 @@ static void execute_with_simple(cbm_return_clause_t *wc, binding_t *bindings, in
+             const char *val =
+                 project_item(&bindings[bi], &wc->items[ci], func_buf, sizeof(func_buf));
+             with_add_vbinding_var(&vb, alias, val);
++            /* Tag the carried virtual var with the node id when the item is a bare
++             * node variable so node_prop can re-fetch its full properties post-WITH. */
++            if (!wc->items[ci].property && !wc->items[ci].func && !wc->items[ci].kase &&
++                wc->items[ci].variable) {
++                cbm_node_t *gn = binding_get(&bindings[bi], wc->items[ci].variable);
++                if (gn && gn->id > 0 && vb.var_count > 0) {
++                    vb.var_nodes[vb.var_count - 1].id = gn->id;
++                }
++            }
+         }
+         vbindings[(*vcount)++] = vb;
+     }
+diff --git a/src/cypher/cypher.h b/src/cypher/cypher.h
+index 5966c20..32af668 100644
+--- a/src/cypher/cypher.h
++++ b/src/cypher/cypher.h
+@@ -188,7 +188,9 @@ typedef struct {
+     const char *op; /* "=", "<>", "=~", "CONTAINS", "STARTS WITH", "ENDS WITH",
+                        ">", "<", ">=", "<=", "IN", "IS NULL", "IS NOT NULL" */
+     const char *value;
+-    bool negated;           /* NOT prefix */
++    const char *rhs_variable; /* non-NULL when RHS is var[.prop] comparison */
++    const char *rhs_property; /* NULL when RHS is a bare variable/alias */
++    bool negated;             /* NOT prefix */
+     const char **in_values; /* IN [...] list */
+     int in_value_count;
+     /* EXISTS { (var)-[:value]->() } predicate (op=="EXISTS"): `variable` is the
+diff --git a/tests/test_cypher.c b/tests/test_cypher.c
+index 2e79c8b..e7b9f49 100644
+--- a/tests/test_cypher.c
++++ b/tests/test_cypher.c
+@@ -2521,6 +2521,94 @@ TEST(cypher_multi_prop_projection_no_alias) {
+     PASS();
+ }
+ 
++/* Property-to-property WHERE comparisons (=, <>, ordering, and post-WITH). */
++TEST(cypher_where_prop_to_prop) {
++    cbm_store_t *s = setup_cypher_http_store();
++
++    /* 1. Equality: ValidateOrder and SubmitOrder are both in service.go;
++     * add a CALLS edge ValidateOrder -> SubmitOrder so we have a same-file edge
++     * and a cross-file edge HandleOrder (main.go) -> SubmitOrder (service.go). */
++    cbm_node_t *vo = NULL;
++    int vo_cnt = 0;
++    cbm_store_find_nodes_by_name(s, "test", "ValidateOrder", &vo, &vo_cnt);
++    cbm_node_t *so = NULL;
++    int so_cnt = 0;
++    cbm_store_find_nodes_by_name(s, "test", "SubmitOrder", &so, &so_cnt);
++    cbm_node_t *ho = NULL;
++    int ho_cnt = 0;
++    cbm_store_find_nodes_by_name(s, "test", "HandleOrder", &ho, &ho_cnt);
++    ASSERT_EQ(vo_cnt, 1);
++    ASSERT_EQ(so_cnt, 1);
++    ASSERT_EQ(ho_cnt, 1);
++
++    cbm_edge_t c1 = {
++        .project = "test", .source_id = ho[0].id, .target_id = vo[0].id, .type = "CALLS"};
++    cbm_edge_t c2 = {
++        .project = "test", .source_id = vo[0].id, .target_id = so[0].id, .type = "CALLS"};
++    cbm_store_insert_edge(s, &c1);
++    cbm_store_insert_edge(s, &c2);
++    cbm_store_free_nodes(vo, vo_cnt);
++    cbm_store_free_nodes(so, so_cnt);
++    cbm_store_free_nodes(ho, ho_cnt);
++
++    /* Same file_path (=): only ValidateOrder -> SubmitOrder (both in service.go) */
++    cbm_cypher_result_t r_eq = {0};
++    int rc = cbm_cypher_execute(s,
++                                "MATCH (a:Function)-[:CALLS]->(b:Function) "
++                                "WHERE a.file_path = b.file_path "
++                                "RETURN a.name, b.name",
++                                "test", 0, &r_eq);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r_eq.row_count, 1);
++    ASSERT_STR_EQ(r_eq.rows[0][0], "ValidateOrder");
++    ASSERT_STR_EQ(r_eq.rows[0][1], "SubmitOrder");
++    cbm_cypher_result_free(&r_eq);
++
++    /* Different file_path (<>): only HandleOrder (main.go) -> ValidateOrder (service.go) */
++    cbm_cypher_result_t r_neq = {0};
++    rc = cbm_cypher_execute(s,
++                            "MATCH (a:Function)-[:CALLS]->(b:Function) "
++                            "WHERE a.file_path <> b.file_path "
++                            "RETURN a.name, b.name",
++                            "test", 0, &r_neq);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r_neq.row_count, 1);
++    ASSERT_STR_EQ(r_neq.rows[0][0], "HandleOrder");
++    ASSERT_STR_EQ(r_neq.rows[0][1], "ValidateOrder");
++    cbm_cypher_result_free(&r_neq);
++
++    /* Ordering (<): a.start_line < b.start_line
++     * ValidateOrder (start_line 5) -> SubmitOrder (start_line 25) matches;
++     * HandleOrder (start_line 10) -> ValidateOrder (start_line 5) does not. */
++    cbm_cypher_result_t r_lt = {0};
++    rc = cbm_cypher_execute(s,
++                            "MATCH (a:Function)-[:CALLS]->(b:Function) "
++                            "WHERE a.start_line < b.start_line "
++                            "RETURN a.name, b.name",
++                            "test", 0, &r_lt);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r_lt.row_count, 1);
++    ASSERT_STR_EQ(r_lt.rows[0][0], "ValidateOrder");
++    ASSERT_STR_EQ(r_lt.rows[0][1], "SubmitOrder");
++    cbm_cypher_result_free(&r_lt);
++
++    /* Post-WITH node property comparison: WITH a, b WHERE a.file_path = b.file_path */
++    cbm_cypher_result_t r_with = {0};
++    rc = cbm_cypher_execute(s,
++                            "MATCH (a:Function)-[:CALLS]->(b:Function) "
++                            "WITH a, b WHERE a.file_path = b.file_path "
++                            "RETURN a.name, b.name",
++                            "test", 0, &r_with);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r_with.row_count, 1);
++    ASSERT_STR_EQ(r_with.rows[0][0], "ValidateOrder");
++    ASSERT_STR_EQ(r_with.rows[0][1], "SubmitOrder");
++    cbm_cypher_result_free(&r_with);
++
++    cbm_store_close(s);
++    PASS();
++}
++
+ /* ══════════════════════════════════════════════════════════════════ */
+ 
+ SUITE(cypher) {
+@@ -2572,6 +2660,7 @@ SUITE(cypher) {
+     RUN_TEST(cypher_func_size_reverse);
+     RUN_TEST(cypher_func_multiarg);
+     RUN_TEST(cypher_multi_prop_projection_no_alias);
++    RUN_TEST(cypher_where_prop_to_prop);
+     RUN_TEST(cypher_exists_no_callers);
+     RUN_TEST(cypher_exists_has_outgoing_calls);
+     RUN_TEST(cypher_exec_calls_relationship);

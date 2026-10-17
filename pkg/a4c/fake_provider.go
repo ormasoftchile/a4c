@@ -214,6 +214,13 @@ func (p *FakeProvider) ResumeSession(ctx context.Context, sessionID string, conf
 			sessionResponseFunc: p.SessionResponseFunc,
 		}
 		p.sessions[sessionID] = session
+	} else {
+		// Resuming must adopt the CURRENT execution context's config so its
+		// callbacks (OnProposeActivity, OnSubmitReview, ...) target the live
+		// Step's state, not a previous run's. Real adapters create a fresh
+		// session object with the passed config; mirror that here.
+		session.config = config
+		session.sessionResponseFunc = p.SessionResponseFunc
 	}
 	return session, nil
 }

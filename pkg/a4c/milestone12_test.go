@@ -876,6 +876,24 @@ func TestMilestone12_20_EndToEndTeamDelegationWorkflow(t *testing.T) {
 
 	coord := spike.NewTeamCoordinator(workDir, store, roster, memStore, gov, journal, runner, opProvider)
 
+	// Lead must propose a child; use a custom mock response for this test only.
+	mock.customMessageResp = map[string]any{
+		"info": map[string]any{
+			"model": "opencode-go/mimo-v2.5",
+			"usage": map[string]any{
+				"input":  1200, "output": 400, "reasoning": 0,
+				"cache":  map[string]any{"read": 0, "write": 0},
+				"cost":   0.000125,
+			},
+		},
+		"parts": []map[string]any{
+			{
+				"type": "text",
+				"text": "Delegated implementation.\n```json\n{\"proposals\":[{\"proposed_agent_id\":\"coder\",\"objective\":\"Implement calculator\",\"requested_budget\":{\"allocated\":20000}}]}\n```",
+			},
+		},
+	}
+
 	// Submit task with StrategyTeam
 	req, err := coord.SubmitTaskWithStrategy("Implement safe calculator", spike.Budget{Allocated: 100000}, nil, spike.StrategyTeam)
 	if err != nil {

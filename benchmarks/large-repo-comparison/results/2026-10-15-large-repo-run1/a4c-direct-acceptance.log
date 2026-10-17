@@ -1,0 +1,13 @@
+== build production binary (no libgit2; env has incompatible headers) ==
+build: OK
+== full unit test suite ==
+unit tests: PASS (1032 lines)
+== fixture + index ==
+== acceptance queries (2 CALLS edges, both same-file) ==
+PASS same-file (a.file_path = b.file_path) (rows=2)
+PASS cross-file (a.file_path <> b.file_path) (rows=0)
+PASS name inequality (a.name <> b.name) (rows=2)
+PASS post-WITH same-file (rows=2)
+PASS property-to-literal control (rows=2)
+
+ACCEPTANCE: 5 passed, 0 failed

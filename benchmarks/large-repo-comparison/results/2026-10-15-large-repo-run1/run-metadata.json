@@ -1,0 +1,12 @@
+{
+  "run_id": "2026-10-15-large-repo-run1",
+  "src_repo": "/Volumes/Projects/codebase-memory-mcp",
+  "base_commit": "63e3f2c7a6ba0ae444967d1f777254e9df5e381a",
+  "base_tree": "9f0d68c70d2be23b4228dbd30bf8b60944242617",
+  "model": "gpt-5.5",
+  "budget_tokens": 2000000,
+  "max_steps": 50,
+  "copilot": "GitHub Copilot CLI 1.0.91.\nRun 'copilot update' to check for updates.",
+  "squad_cli": "/var/folders/wp/qzs8rgx10jnfrk2vkxd_slb40000gn/T/opencode/bench/squad/packages/squad-cli/dist/cli-entry.js",
+  "task_file": "testdata/task.txt"
+}

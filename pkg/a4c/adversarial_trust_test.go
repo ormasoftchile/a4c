@@ -363,8 +363,16 @@ func TestAdversarial_ScenarioC_NoFabricatedValidationEvidence(t *testing.T) {
 		if approved {
 			t.Fatalf("INVARIANT VIOLATION: Review must NOT approve incomplete validation metadata!")
 		}
-		if verdict != string(a4c.ReviewVerdictRejected) && verdict != string(a4c.ReviewVerdictIncomplete) {
-			t.Errorf("expected rejected/incomplete, got: %s", verdict)
+		// Incomplete/absent evidence is a verification gap, not an asserted
+		// defect, so it is reported as verification_blocked (or incomplete),
+		// never as an approval.
+		if verdict != string(a4c.ReviewVerdictRejected) &&
+			verdict != string(a4c.ReviewVerdictIncomplete) &&
+			verdict != string(a4c.ReviewVerdictVerificationBlocked) {
+			t.Errorf("expected rejected/incomplete/verification_blocked, got: %s", verdict)
+		}
+		if verdict == string(a4c.ReviewVerdictApproved) {
+			t.Errorf("INVARIANT VIOLATION: incomplete metadata must never yield approved")
 		}
 	})
 

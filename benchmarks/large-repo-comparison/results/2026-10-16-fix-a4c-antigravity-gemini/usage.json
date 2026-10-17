@@ -1,0 +1,58 @@
+{
+  "model_calls": 3,
+  "sessions": 3,
+  "uncached_input_tokens": 0,
+  "cache_read_tokens": 3849364,
+  "total_input_tokens_incl_cache": 399587,
+  "output_tokens": 42215,
+  "reasoning_tokens": 12434,
+  "reported_cost_usd": 0.0,
+  "billed_tokens": 0,
+  "activities": [
+    {
+      "id": "prop-cypher-prop-cmp",
+      "agent": "coder",
+      "runtime": "antigravity",
+      "model": "gemini-4-argon-medium",
+      "status": "completed",
+      "total_tokens": 234928,
+      "prompt_tokens": 205837,
+      "completion_tokens": 29091,
+      "cached_tokens": 2888026,
+      "reasoning_tokens": 5758,
+      "reported_cost_usd": 0.0,
+      "model_invocations": 1
+    },
+    {
+      "id": "task-1792165397654470000-review",
+      "agent": "reviewer",
+      "runtime": "antigravity",
+      "model": "gemini-4-argon-medium",
+      "status": "completed",
+      "total_tokens": 89389,
+      "prompt_tokens": 84674,
+      "completion_tokens": 4715,
+      "cached_tokens": 317943,
+      "reasoning_tokens": 1562,
+      "reported_cost_usd": 0.0,
+      "model_invocations": 1
+    },
+    {
+      "id": "task-1792165397654470000",
+      "agent": "lead",
+      "runtime": "antigravity",
+      "model": "gemini-4-argon-medium",
+      "status": "completed",
+      "total_tokens": 117485,
+      "prompt_tokens": 109076,
+      "completion_tokens": 8409,
+      "cached_tokens": 643395,
+      "reasoning_tokens": 5114,
+      "reported_cost_usd": 0.0,
+      "model_invocations": 1
+    }
+  ],
+  "models_by_activity": {
+    "gemini-4-argon-medium": 3
+  }
+}

@@ -1,0 +1,63 @@
+
+[2mLet's build your team.[0m
+
+[32m✓[0m installed squad_state MCP server to .mcp.json (@bradygaster/squad-cli@insider (@insider fallback)) — Copilot CLI will auto-load on next invocation
+[32m✓[0m removed stale squad_state from /Volumes/Projects/a4c/benchmarks/large-repo-comparison/results/2026-10-15-large-repo-run1/squad/.copilot/mcp-config.json (now lives in .mcp.json)
+[32m✓[0m .vscode/settings.json created — chat.newSession.defaultMode: "Squad"
+[32m✓[0m .squad/memory/local
+[32m✓[0m .squad/memory/policy-inbox
+[32m✓[0m .squad/memory/semantic-inbox
+[32m✓[0m .squad/memory/tombstones
+[32m✓[0m .squad/memory/config.json
+[32m✓[0m .squad/memory/index.json
+[32m✓[0m .squad/memory/audit.jsonl
+[32m✓[0m .squad/casting/registry.json
+[32m✓[0m .squad/casting/history.json
+[32m✓[0m .squad/casting/policy.json
+[32m✓[0m .squad/rai/policy.md
+[32m✓[0m .squad/rai/audit-trail.md
+[32m✓[0m .squad/fact-checker/policy.md
+[32m✓[0m .squad/fact-checker/audit-trail.md
+[32m✓[0m .squad/config.json
+[32m✓[0m .squad/agents/scribe/charter.md
+[32m✓[0m .squad/agents/scribe/history.md
+[32m✓[0m .squad/agents/ralph/charter.md
+[32m✓[0m .squad/agents/ralph/history.md
+[32m✓[0m .squad/agents/Rai/charter.md
+[32m✓[0m .squad/agents/Rai/history.md
+[32m✓[0m .squad/agents/fact-checker/charter.md
+[32m✓[0m .squad/agents/fact-checker/history.md
+[32m✓[0m .squad/identity/now.md
+[32m✓[0m .squad/identity/wisdom.md
+[32m✓[0m .squad/ceremonies.md
+[32m✓[0m .squad/decisions.md
+[32m✓[0m .squad/team.md
+[32m✓[0m .squad/routing.md
+[32m✓[0m .github/skills
+[32m✓[0m .gitattributes
+[32m✓[0m .gitignore
+[32m✓[0m .github/agents/squad.agent.md
+[32m✓[0m .squad/templates
+[32m✓[0m .github/workflows/squad-heartbeat.yml
+[32m✓[0m .github/workflows/squad-issue-assign.yml
+[32m✓[0m .github/workflows/squad-triage.yml
+[32m✓[0m .github/workflows/sync-squad-labels.yml
+[32m✓[0m .copilot/mcp-config.json
+[32m✓[0m .gitignore
+[32m✓[0m .squad/.first-run
+[2m  Non-interactive mode — skipping @copilot setup. Add later with: squad copilot enable[0m
+
+[36m[1m◆ SQUAD[0m
+
+  📁  Team workspace
+  📋  Skills & ceremonies
+  🔧  Workflows & CI
+  🧠  Identity & wisdom
+  🤖  Copilot agent prompt
+
+[32m[1mSquad initialized.[0m Run [36m[1mcopilot --agent squad[0m and tell it what you're building.
+
+[2mTip: for non-interactive scripts that need squad_state tools, add to package.json:[0m
+[2m  "squad:copilot": "copilot --agent squad --additional-mcp-config @.mcp.json"[0m
+
+✅ Applied preset 'default': 5 agents installed

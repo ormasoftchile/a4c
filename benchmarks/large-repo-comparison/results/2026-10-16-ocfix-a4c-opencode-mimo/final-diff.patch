@@ -1,0 +1,302 @@
+diff --git a/src/cypher/cypher.c b/src/cypher/cypher.c
+index 77bc710..d5495a3 100644
+--- a/src/cypher/cypher.c
++++ b/src/cypher/cypher.c
+@@ -454,6 +454,15 @@ static bool check(parser_t *p, cbm_token_type_t type) {
+     return peek(p)->type == type;
+ }
+ 
++/* Look ahead `ahead` tokens (0 = current); clamps to EOF. */
++static bool check_at(parser_t *p, int ahead, cbm_token_type_t type) {
++    int idx = p->pos + ahead;
++    if (idx >= p->count) {
++        idx = p->count - SKIP_ONE; /* EOF */
++    }
++    return p->tokens[idx].type == type;
++}
++
+ static bool match(parser_t *p, cbm_token_type_t type) {
+     if (check(p, type)) {
+         advance(p);
+@@ -754,6 +763,8 @@ static void expr_free(cbm_expr_t *e) {
+             safe_str_free(&cur->cond.property);
+             safe_str_free(&cur->cond.op);
+             safe_str_free(&cur->cond.value);
++            safe_str_free(&cur->cond.rhs_variable);
++            safe_str_free(&cur->cond.rhs_property);
+             for (int i = 0; i < cur->cond.in_value_count; i++) {
+                 safe_str_free(&cur->cond.in_values[i]);
+             }
+@@ -1086,6 +1097,19 @@ static cbm_expr_t *parse_condition_expr(parser_t *p) {
+     } else if (check(p, TOK_FALSE)) {
+         advance(p);
+         c.value = heap_strdup("false");
++    } else if (check(p, TOK_IDENT) && check_at(p, 1, TOK_DOT)) {
++        /* Property-to-property comparison: a.prop = b.prop */
++        c.rhs_variable = heap_strdup(advance(p)->text);
++        advance(p); /* DOT */
++        const cbm_token_t *rhs_prop = expect(p, TOK_IDENT);
++        if (!rhs_prop) {
++            safe_str_free(&c.variable);
++            safe_str_free(&c.property);
++            safe_str_free(&c.op);
++            safe_str_free(&c.rhs_variable);
++            return NULL;
++        }
++        c.rhs_property = heap_strdup(rhs_prop->text);
+     } else {
+         snprintf(p->error, sizeof(p->error), "expected value at pos %d", peek(p)->pos);
+         safe_str_free(&c.variable);
+@@ -1934,6 +1958,8 @@ static void free_where(cbm_where_clause_t *w) {
+         safe_str_free(&w->conditions[i].property);
+         safe_str_free(&w->conditions[i].op);
+         safe_str_free(&w->conditions[i].value);
++        safe_str_free(&w->conditions[i].rhs_variable);
++        safe_str_free(&w->conditions[i].rhs_property);
+         for (int j = 0; j < w->conditions[i].in_value_count; j++) {
+             safe_str_free(&w->conditions[i].in_values[j]);
+         }
+@@ -2327,18 +2353,19 @@ static void binding_set(binding_t *b, const char *var, const cbm_node_t *node) {
+     b->var_count++;
+ }
+ 
+-/* Resolve the actual property value for a condition from a binding */
+-static const char *resolve_condition_value(const cbm_condition_t *c, binding_t *b) {
+-    cbm_edge_t *e = binding_get_edge(b, c->variable);
++/* Resolve a variable[.property] reference from a binding: edges first, then
++ * nodes (bare alias → node name). NULL if the variable is unbound. */
++static const char *resolve_prop(binding_t *b, const char *variable, const char *property) {
++    cbm_edge_t *e = binding_get_edge(b, variable);
+     if (e) {
+-        return edge_prop(e, c->property);
++        return edge_prop(e, property);
+     }
+-    cbm_node_t *n = binding_get(b, c->variable);
++    cbm_node_t *n = binding_get(b, variable);
+     if (!n) {
+         return NULL; /* unbound variable */
+     }
+-    if (c->property) {
+-        return node_prop(n, c->property, b->store);
++    if (property) {
++        return node_prop(n, property, b->store);
+     }
+     /* Bare alias (e.g. post-WITH virtual var) — use node name directly */
+     return n->name ? n->name : "";
+@@ -2432,7 +2459,7 @@ static bool eval_condition(const cbm_condition_t *c, binding_t *b) {
+         return c->negated ? !result : result;
+     }
+ 
+-    const char *actual = resolve_condition_value(c, b);
++    const char *actual = resolve_prop(b, c->variable, c->property);
+     if (!actual) {
+         return true;
+     }
+@@ -2461,7 +2488,16 @@ static bool eval_condition(const cbm_condition_t *c, binding_t *b) {
+         return c->negated ? !result : result;
+     }
+ 
+-    result = eval_comparison_op(c->op, actual, c->value);
++    const char *expected = c->value;
++    if (c->rhs_variable) {
++        /* Property-to-property comparison (a.prop = b.prop) */
++        expected = resolve_prop(b, c->rhs_variable, c->rhs_property);
++        if (!expected) {
++            return true; /* unbound RHS — same as unbound LHS */
++        }
++    }
++
++    result = eval_comparison_op(c->op, actual, expected);
+     return c->negated ? !result : result;
+ }
+ 
+diff --git a/src/cypher/cypher.h b/src/cypher/cypher.h
+index 5966c20..7119d40 100644
+--- a/src/cypher/cypher.h
++++ b/src/cypher/cypher.h
+@@ -188,6 +188,10 @@ typedef struct {
+     const char *op; /* "=", "<>", "=~", "CONTAINS", "STARTS WITH", "ENDS WITH",
+                        ">", "<", ">=", "<=", "IN", "IS NULL", "IS NOT NULL" */
+     const char *value;
++    /* Property-to-property comparison (a.prop = b.prop): when rhs_variable is
++     * set, value stays NULL and the RHS is resolved from the binding. */
++    const char *rhs_variable;
++    const char *rhs_property;
+     bool negated;           /* NOT prefix */
+     const char **in_values; /* IN [...] list */
+     int in_value_count;
+diff --git a/tests/test_cypher.c b/tests/test_cypher.c
+index 2e79c8b..837d3a1 100644
+--- a/tests/test_cypher.c
++++ b/tests/test_cypher.c
+@@ -1695,6 +1695,156 @@ TEST(cypher_exec_where_is_not_null) {
+     PASS();
+ }
+ 
++/* Helper: two functions in the same file calling each other — for
++ * property-to-property WHERE comparisons (a.file_path = b.file_path). */
++static cbm_store_t *setup_cypher_shared_file_store(void) {
++    cbm_store_t *s = cbm_store_open_memory();
++    cbm_store_upsert_project(s, "test", "/tmp/test");
++    cbm_node_t n1 = {.project = "test",
++                     .label = "Function",
++                     .name = "Alpha",
++                     .qualified_name = "test.Alpha",
++                     .file_path = "demo.go",
++                     .start_line = 20};
++    cbm_node_t n2 = {.project = "test",
++                     .label = "Function",
++                     .name = "Beta",
++                     .qualified_name = "test.Beta",
++                     .file_path = "demo.go",
++                     .start_line = 5};
++    int64_t id1 = cbm_store_upsert_node(s, &n1);
++    int64_t id2 = cbm_store_upsert_node(s, &n2);
++    cbm_edge_t e = {.project = "test", .source_id = id1, .target_id = id2, .type = "CALLS"};
++    cbm_store_insert_edge(s, &e);
++    return s;
++}
++
++TEST(cypher_exec_where_prop_eq_prop) {
++    cbm_store_t *s = setup_cypher_shared_file_store();
++    cbm_cypher_result_t r = {0};
++
++    /* Alpha and Beta share file_path → match */
++    int rc = cbm_cypher_execute(
++        s, "MATCH (a)-[:CALLS]->(b) WHERE a.file_path = b.file_path RETURN a.name, b.name",
++        "test", 0, &r);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r.row_count, 1);
++    ASSERT_STR_EQ(cypher_get_col(&r, 0, "a.name"), "Alpha");
++    ASSERT_STR_EQ(cypher_get_col(&r, 0, "b.name"), "Beta");
++    cbm_cypher_result_free(&r);
++
++    /* Same edge, different property values → no match */
++    cbm_cypher_result_t r2 = {0};
++    rc = cbm_cypher_execute(s, "MATCH (a)-[:CALLS]->(b) WHERE a.name = b.name RETURN a.name",
++                            "test", 0, &r2);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r2.row_count, 0);
++    cbm_cypher_result_free(&r2);
++
++    cbm_store_close(s);
++    PASS();
++}
++
++TEST(cypher_exec_where_prop_neq_prop) {
++    cbm_store_t *s = setup_cypher_store();
++    cbm_cypher_result_t r = {0};
++
++    /* Every CALLS edge in the standard graph connects different files */
++    int rc = cbm_cypher_execute(
++        s, "MATCH (a)-[:CALLS]->(b) WHERE a.file_path <> b.file_path RETURN a.name, b.name",
++        "test", 0, &r);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r.row_count, 3);
++    cbm_cypher_result_free(&r);
++    cbm_store_close(s);
++    PASS();
++}
++
++TEST(cypher_exec_where_prop_gt_prop) {
++    cbm_store_t *s = setup_cypher_shared_file_store();
++    cbm_cypher_result_t r = {0};
++
++    /* Alpha(start_line=20) → Beta(start_line=5) */
++    int rc = cbm_cypher_execute(
++        s, "MATCH (a)-[:CALLS]->(b) WHERE a.start_line > b.start_line RETURN a.name",
++        "test", 0, &r);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r.row_count, 1);
++    ASSERT_STR_EQ(cypher_get_col(&r, 0, "a.name"), "Alpha");
++    cbm_cypher_result_free(&r);
++
++    cbm_cypher_result_t r2 = {0};
++    rc = cbm_cypher_execute(s, "MATCH (a)-[:CALLS]->(b) WHERE a.start_line < b.start_line "
++                               "RETURN a.name",
++                            "test", 0, &r2);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r2.row_count, 0);
++    cbm_cypher_result_free(&r2);
++    cbm_store_close(s);
++    PASS();
++}
++
++TEST(cypher_parse_where_prop_eq_prop) {
++    cbm_query_t *q = NULL;
++    char *err = NULL;
++    int rc = cbm_cypher_parse("MATCH (a)-[:CALLS]->(b) WHERE a.file_path = b.file_path RETURN a",
++                              &q, &err);
++    ASSERT_EQ(rc, 0);
++    ASSERT_NOT_NULL(q->where->root);
++    ASSERT_EQ(q->where->root->type, EXPR_CONDITION);
++    ASSERT_STR_EQ(q->where->root->cond.variable, "a");
++    ASSERT_STR_EQ(q->where->root->cond.property, "file_path");
++    ASSERT_STR_EQ(q->where->root->cond.op, "=");
++    ASSERT_NULL(q->where->root->cond.value);
++    ASSERT_STR_EQ(q->where->root->cond.rhs_variable, "b");
++    ASSERT_STR_EQ(q->where->root->cond.rhs_property, "file_path");
++    cbm_query_free(q);
++    PASS();
++}
++
++TEST(cypher_parse_where_prop_rhs_error) {
++    cbm_query_t *q = NULL;
++    char *err = NULL;
++    int rc = cbm_cypher_parse("MATCH (a)-[:CALLS]->(b) WHERE a.name = toString(b.name) RETURN a",
++                              &q, &err);
++    ASSERT_EQ(rc, -1);
++    ASSERT_NOT_NULL(err);
++    free(err);
++    PASS();
++}
++
++TEST(cypher_exec_with_where_prop_eq_prop) {
++    cbm_store_t *s = setup_cypher_shared_file_store();
++    cbm_cypher_result_t r = {0};
++    int rc = cbm_cypher_execute(s,
++                                "MATCH (a)-[:CALLS]->(b) "
++                                "WITH a, b WHERE a.file_path = b.file_path "
++                                "RETURN a.name, b.name",
++                                "test", 0, &r);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r.row_count, 1);
++    ASSERT_STR_EQ(cypher_get_col(&r, 0, "a.name"), "Alpha");
++    ASSERT_STR_EQ(cypher_get_col(&r, 0, "b.name"), "Beta");
++    cbm_cypher_result_free(&r);
++    cbm_store_close(s);
++    PASS();
++}
++
++TEST(cypher_exec_where_prop_eq_literal_regression) {
++    cbm_store_t *s = setup_cypher_shared_file_store();
++    cbm_cypher_result_t r = {0};
++    int rc = cbm_cypher_execute(s,
++                                "MATCH (a)-[:CALLS]->(b) WHERE b.file_path = 'demo.go' "
++                                "RETURN a.name, b.name",
++                                "test", 0, &r);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(r.row_count, 1);
++    ASSERT_STR_EQ(cypher_get_col(&r, 0, "b.name"), "Beta");
++    cbm_cypher_result_free(&r);
++    cbm_store_close(s);
++    PASS();
++}
++
+ TEST(cypher_exec_return_star) {
+     cbm_store_t *s = setup_cypher_store();
+     cbm_cypher_result_t r = {0};
+@@ -2624,6 +2774,13 @@ SUITE(cypher) {
+     RUN_TEST(cypher_exec_where_not_in);
+     RUN_TEST(cypher_exec_where_is_null);
+     RUN_TEST(cypher_exec_where_is_not_null);
++    RUN_TEST(cypher_exec_where_prop_eq_prop);
++    RUN_TEST(cypher_exec_where_prop_neq_prop);
++    RUN_TEST(cypher_exec_where_prop_gt_prop);
++    RUN_TEST(cypher_parse_where_prop_eq_prop);
++    RUN_TEST(cypher_parse_where_prop_rhs_error);
++    RUN_TEST(cypher_exec_with_where_prop_eq_prop);
++    RUN_TEST(cypher_exec_where_prop_eq_literal_regression);
+     RUN_TEST(cypher_exec_return_star);
+     RUN_TEST(cypher_parse_neq);
+     RUN_TEST(cypher_parse_in);

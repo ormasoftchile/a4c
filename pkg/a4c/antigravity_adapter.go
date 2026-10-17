@@ -240,9 +240,15 @@ func (s *AntigravitySessionAdapter) Send(ctx context.Context, prompt string) (*A
 
 	fullPrompt := prompt
 	if isReviewer {
-		fullPrompt += "\n\n[INSTRUCTION]: You are performing an independent code review. Inspect the code strictly read-only. Do NOT modify any files. If approving, include [REVIEW_APPROVED] in your response. If rejecting, include [REVIEW_REJECTED: reason]."
+		fullPrompt += "\n\n[INSTRUCTION]: You are performing an independent code review. Inspect the code strictly read-only. Do NOT modify any files. If approving, include [REVIEW_APPROVED] in your response. If you find a concrete implementation defect, include [REVIEW_REJECTED: reason]. If the implementation looks correct but you cannot verify because evidence or capabilities are missing, include [REVIEW_BLOCKED: reason] -- this is NOT a rejection and will not trigger code changes."
 	} else if strings.EqualFold(s.config.AgentID, "lead") || strings.EqualFold(s.config.AgentID, "alice") {
 		fullPrompt += "\n\n[INSTRUCTION]: Propose delegated subtasks using a JSON block: ```json\n{\"proposals\": [{\"proposal_id\": \"...\", \"proposed_agent_id\": \"coder\", \"objective\": \"...\", \"budget_tokens\": 30000}]}\n```\nPropose budgets that cover full expected context overhead; the runtime raises proposals below the viable minimum and rejects proposals the parent cannot afford."
+	}
+
+	// A4C Knowledge: same model-mediated token injection as OpenCode (documented
+	// as weaker than Copilot's per-session MCP env binding).
+	if s.config.KnowledgeToken != "" {
+		fullPrompt += "\n\n[KNOWLEDGE]: The A4C Knowledge MCP server exposes knowledge_record and knowledge_query. Record significant engineering understanding (hypothesis, finding, decision, experiment result) via knowledge_record, passing this execution-context token as context_token: " + s.config.KnowledgeToken + "\nRetrieve prior knowledge via knowledge_query. Do not record routine implementation steps."
 	}
 
 	// Prepare agy command arguments
@@ -348,10 +354,26 @@ func (s *AntigravitySessionAdapter) parseReviewOutputs(content string) {
 		return
 	}
 
-	if strings.Contains(content, "[REVIEW_APPROVED]") {
+	if strings.Contains(content, "[REVIEW_BLOCKED:") {
+		reason := "Verification blocked"
+		idx := strings.Index(content, "[REVIEW_BLOCKED:")
+		sub := content[idx+len("[REVIEW_BLOCKED:"):]
+		if end := strings.Index(sub, "]"); end != -1 {
+			reason = strings.TrimSpace(sub[:end])
+		}
 		s.config.OnSubmitReview(ReviewResult{
 			ActivityID: s.config.AgentID,
 			ReviewerID: s.config.AgentID,
+			Verdict:    ReviewVerdictVerificationBlocked,
+			Approved:   false,
+			Comments:   reason,
+			Timestamp:  time.Now(),
+		})
+	} else if strings.Contains(content, "[REVIEW_APPROVED]") {
+		s.config.OnSubmitReview(ReviewResult{
+			ActivityID: s.config.AgentID,
+			ReviewerID: s.config.AgentID,
+			Verdict:    ReviewVerdictApproved,
 			Approved:   true,
 			Comments:   "Approved via Antigravity review assessment",
 			Timestamp:  time.Now(),

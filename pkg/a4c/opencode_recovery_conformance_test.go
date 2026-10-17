@@ -40,8 +40,8 @@ func TestGate3_Scenario1_InterruptedModelInvocation(t *testing.T) {
 
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
-	if len(mock.abortedSessions) != 1 {
-		t.Errorf("expected 1 aborted session, got %d", len(mock.abortedSessions))
+	if len(mock.interruptedSessions) != 1 {
+		t.Errorf("expected 1 interrupted session, got %d", len(mock.interruptedSessions))
 	}
 }
 
@@ -164,15 +164,16 @@ func TestGate3_Scenario4_MidTurnBudgetExhaustion(t *testing.T) {
 
 	// Return token consumption that exceeds allocated budget
 	mock.customMessageResp = map[string]any{
-		"info": map[string]any{
-			"id": "msg-expensive",
-			"tokens": map[string]any{
-				"total":  10000,
-				"input":  6000,
-				"output": 4000,
-			},
+		"id":   "msg-expensive",
+		"type": "assistant",
+		"tokens": map[string]any{
+			"input":     6000,
+			"output":    4000,
+			"reasoning": 0,
+			"cache":     map[string]any{"read": 0, "write": 0},
 		},
-		"parts": []map[string]any{
+		"finish": "stop",
+		"content": []map[string]any{
 			{
 				"type": "text",
 				"text": "Completed task.",
@@ -256,10 +257,11 @@ func TestGate3_Scenario6_MalformedPatchFailsClosed(t *testing.T) {
 
 	// Output proposal targeting path traversal
 	mock.customMessageResp = map[string]any{
-		"info": map[string]any{
-			"tokens": map[string]any{"total": 50},
-		},
-		"parts": []map[string]any{
+		"id":     "msg-canary",
+		"type":   "assistant",
+		"finish": "stop",
+		"tokens": map[string]any{"input": 25, "output": 25, "reasoning": 0, "cache": map[string]any{"read": 0, "write": 0}},
+		"content": []map[string]any{
 			{
 				"type": "text",
 				"text": "[PROPOSE_PATCH: path=\"../../../canary.txt\"]\n```\ncorrupted canary\n```\n[END_PATCH]",
@@ -315,21 +317,20 @@ func TestGate3_Scenario8_TokenEconomicsNormalization(t *testing.T) {
 
 	// Response with explicit split tokens and cost
 	mock.customMessageResp = map[string]any{
-		"info": map[string]any{
-			"id":   "msg-norm",
-			"cost": 0.0042,
-			"tokens": map[string]any{
-				"input":     1200,
-				"output":    350,
-				"reasoning": 150,
-				"cache": map[string]any{
-					"read":  400,
-					"write": 50,
-				},
-				"total": 1700,
+		"id":   "msg-norm",
+		"type": "assistant",
+		"cost": 0.0042,
+		"tokens": map[string]any{
+			"input":     1200,
+			"output":    350,
+			"reasoning": 150,
+			"cache": map[string]any{
+				"read":  400,
+				"write": 50,
 			},
 		},
-		"parts": []map[string]any{
+		"finish": "stop",
+		"content": []map[string]any{
 			{
 				"type": "text",
 				"text": "Normalized response.",
@@ -362,8 +363,9 @@ func TestGate3_Scenario8_TokenEconomicsNormalization(t *testing.T) {
 	if usage.CachedTokens != 400 {
 		t.Errorf("expected CachedTokens 400, got %d", usage.CachedTokens)
 	}
-	if usage.TotalTokens != 1700 {
-		t.Errorf("expected TotalTokens 1700, got %d", usage.TotalTokens)
+	// v2 reports no aggregate total; the adapter computes input + output.
+	if usage.TotalTokens != 1550 {
+		t.Errorf("expected TotalTokens 1550, got %d", usage.TotalTokens)
 	}
 	if usage.ReportedCostUSD != 0.0042 {
 		t.Errorf("expected ReportedCostUSD 0.0042, got %f", usage.ReportedCostUSD)

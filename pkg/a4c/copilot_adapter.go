@@ -768,37 +768,6 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 		sessionConfig.AvailableTools = availableTools
 	}
 
-	// Bind A4C Knowledge to this session via a per-session stdio MCP server whose
-	// env carries this activity's execution-context token. The MCP server process
-	// is created and destroyed with the session, so a delayed call from a
-	// completed activity carries that activity's token (and fails its
-	// StatusClaimed check) rather than being attributed to a later activity.
-	if config.KnowledgeToken != "" {
-		// Point the MCP server at the MAIN workspace that owns the shared
-		// knowledge DB, not the disposable worktree, so knowledge state is
-		// shared across worktrees and hosts.
-		mcpDir := config.KnowledgeDir
-		if mcpDir == "" {
-			mcpDir = config.WorkspaceDir
-		}
-		// Spawn the MCP server via an ABSOLUTE path to this running binary.
-		// A bare "a4c" would rely on the host's PATH, which frequently does not
-		// include the A4C binary — silently leaving the knowledge tools
-		// unexposed. os.Executable() is authoritative.
-		a4cBin := "a4c"
-		if exe, err := os.Executable(); err == nil && exe != "" {
-			a4cBin = exe
-		}
-		fmt.Fprintf(os.Stderr, "[a4c-knowledge] configuring copilot session MCP server bin=%s dir=%s\n", a4cBin, mcpDir)
-		sessionConfig.MCPServers = map[string]copilot.MCPServerConfig{
-			"a4c": copilot.MCPStdioServerConfig{
-				Command: a4cBin,
-				Args:    []string{"mcp", "--dir", mcpDir},
-				Env:     map[string]string{"A4C_KNOWLEDGE_TOKEN": config.KnowledgeToken},
-			},
-		}
-	}
-
 	copilotSession, err := p.client.CreateSession(ctx, sessionConfig)
 	if err != nil {
 		return nil, fmt.Errorf("copilot: failed to create session: %w", err)

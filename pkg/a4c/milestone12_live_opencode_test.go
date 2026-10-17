@@ -155,6 +155,14 @@ func TestMilestone12_Live_OpenCode_ToolContainmentProof(t *testing.T) {
 	}
 }
 
+// unavailableRunner simulates a workspace without runnable verification, so a
+// budget overrun cannot be salvaged as verified work and must fail closed.
+type unavailableRunner struct{}
+
+func (unavailableRunner) RunTests(ctx context.Context, dir string) (int, string, error) {
+	return 0, "", errors.New("no test framework detected in workspace")
+}
+
 // TestMilestone12_Live_OpenCode_BudgetExhaustion_FailClosed verifies that budget exhaustion
 // triggers fail-closed termination before expensive invocations.
 func TestMilestone12_Live_OpenCode_BudgetExhaustion_FailClosed(t *testing.T) {
@@ -180,7 +188,7 @@ func TestMilestone12_Live_OpenCode_BudgetExhaustion_FailClosed(t *testing.T) {
 	gov := spike.NewPolicyGovernor([]string{"governed_read_file"})
 	journal, _ := spike.NewDurableIntentJournal(journalDir)
 
-	coord := spike.NewTeamCoordinator(dir, store, roster, memory, gov, journal, &mockTestRunner{}, prov)
+	coord := spike.NewTeamCoordinator(dir, store, roster, memory, gov, journal, unavailableRunner{}, prov)
 	defer coord.Close()
 
 	// Tiny budget of 5 tokens: immediately fails closed on admission or post-turn
@@ -189,7 +197,7 @@ func TestMilestone12_Live_OpenCode_BudgetExhaustion_FailClosed(t *testing.T) {
 		t.Fatalf("submit: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
 	_, err = coord.Step(ctx)

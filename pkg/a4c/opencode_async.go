@@ -4,15 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
 )
 
-// OpenCode long-running execution lifecycle constants.
+// OpenCode v2 long-running execution lifecycle constants.
 //
 // These separate the transport timeout (per HTTP control request) from the
 // overall activity deadline and from stall detection, so a healthy activity
@@ -22,8 +24,8 @@ import (
 // capped the entire turn and failed legitimate long-running activities.
 const (
 	// ocTransportTimeout bounds a single control-plane HTTP request (submit,
-	// wait-slice, message fetch, abort). It is a connection/response budget,
-	// NOT a cap on total activity duration.
+	// wait-slice, message fetch, interrupt). It is a connection/response
+	// budget, NOT a cap on total activity duration.
 	ocTransportTimeout = 60 * time.Second
 	// ocWaitSlice is how long each /wait poll may block before we re-check
 	// cancellation, the activity deadline, and progress.
@@ -34,71 +36,61 @@ const (
 	// ocDefaultActivityDeadline bounds a single Send (one agent turn) when the
 	// caller supplies no shorter context deadline.
 	ocDefaultActivityDeadline = 45 * time.Minute
+	// ocFallbackPollInterval is the sleep between message polls when the
+	// experimental /wait endpoint is unavailable on the server.
+	ocFallbackPollInterval = 2 * time.Second
 )
 
-// ocMessageResponse mirrors a single OpenCode assistant message, returned both
-// by the synchronous POST /message and by GET /session/{id}/message.
+// ocMessageResponse mirrors a single OpenCode v2 assistant message returned by
+// GET /api/session/{id}/message. v2 messages are a discriminated union keyed by
+// Type; only "assistant" messages carry content, a finish state, and tokens.
 type ocMessageResponse struct {
-	Info struct {
-		ID      string  `json:"id"`
-		Role    string  `json:"role"`
-		Cost    float64 `json:"cost"`
-		ModelID string  `json:"modelID"`
-		// Finish is set by the host only when the turn has completed (e.g.
-		// "stop"). An in-progress assistant message has an empty Finish, so
-		// this is the authoritative completion signal — an early partial
-		// message must not be mistaken for a finished turn.
-		Finish string `json:"finish"`
-		Tokens struct {
-			Total     int `json:"total"`
-			Input     int `json:"input"`
-			Output    int `json:"output"`
-			Reasoning int `json:"reasoning"`
-			Cache     struct {
-				Read  int `json:"read"`
-				Write int `json:"write"`
-			} `json:"cache"`
-		} `json:"tokens"`
-	} `json:"info"`
-	Parts []struct {
-		Type   string `json:"type"`
-		Text   string `json:"text,omitempty"`
-		Reason string `json:"reason,omitempty"`
-		Tokens struct {
-			Total     int `json:"total"`
-			Input     int `json:"input"`
-			Output    int `json:"output"`
-			Reasoning int `json:"reasoning"`
-		} `json:"tokens,omitempty"`
-		Cost float64 `json:"cost,omitempty"`
-	} `json:"parts"`
+	ID     string  `json:"id"`
+	Type   string  `json:"type"`
+	Finish string  `json:"finish"`
+	Cost   float64 `json:"cost"`
+	Tokens struct {
+		Input     int `json:"input"`
+		Output    int `json:"output"`
+		Reasoning int `json:"reasoning"`
+		Cache     struct {
+			Read  int `json:"read"`
+			Write int `json:"write"`
+		} `json:"cache"`
+	} `json:"tokens"`
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	Error *struct {
+		Name string `json:"name"`
+	} `json:"error,omitempty"`
 }
 
-// isComplete reports whether the assistant message represents the FINISHED
-// turn. A turn produces one assistant message per tool-call round with
-// finish="tool-calls", and a final message with finish="stop". Only the final
-// "stop" message is complete; returning on a "tool-calls" message would abandon
-// the turn mid-flight and capture only a partial (often empty) planning
-// message instead of the real result.
+// isComplete reports whether the assistant message represents a TERMINAL turn
+// state. A streaming or in-progress message has an empty Finish; a tool-round
+// message has finish="tool-calls". Only finish="stop" (success) and
+// finish="error" (host-side failure) are terminal; returning on a
+// "tool-calls" message would abandon the turn mid-flight.
 func (m *ocMessageResponse) isComplete() bool {
-	if m.Info.Finish == "stop" {
-		return true
+	if m.Type != "assistant" {
+		return false
 	}
-	for i := len(m.Parts) - 1; i >= 0; i-- {
-		if m.Parts[i].Type == "step-finish" && m.Parts[i].Reason == "stop" {
-			return true
-		}
-	}
-	return false
+	return m.Finish == "stop" || m.Finish == "error"
 }
 
-// ocMessageList is the GET /session/{id}/message response.
-type ocMessageList []ocMessageResponse
+// ocMessageList is the GET /api/session/{id}/message response envelope.
+type ocMessageList struct {
+	Data []ocMessageResponse `json:"data"`
+}
 
 // doControl issues one control-plane HTTP request bounded by a transport
-// timeout derived from the parent context. It never relies on a client-level
-// Timeout, so a long /wait slice is governed by its own context budget.
-func (s *OpenCodeSessionAdapter) doControl(ctx context.Context, method, url string, body []byte, transportTimeout time.Duration) (*http.Response, error) {
+// timeout derived from the parent context, returning the status code and the
+// fully-read body. The request context must not be canceled until the body
+// has been consumed, so the read happens inside doControl — cancelling at
+// return (the previous pattern) raced body reads against the context and
+// failed intermittently with "context canceled" on real servers.
+func (s *OpenCodeSessionAdapter) doControl(ctx context.Context, method, url string, body []byte, transportTimeout time.Duration) (int, []byte, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, transportTimeout)
 	defer cancel()
 	var rdr io.Reader
@@ -107,30 +99,37 @@ func (s *OpenCodeSessionAdapter) doControl(ctx context.Context, method, url stri
 	}
 	req, err := http.NewRequestWithContext(reqCtx, method, url, rdr)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return s.provider.httpClient.Do(req)
-}
-
-// abortSession best-effort cancels a running turn on the host.
-func (s *OpenCodeSessionAdapter) abortSession(endpoint, sessionID string) {
-	url := fmt.Sprintf("%s/session/%s/abort", endpoint, sessionID)
-	resp, err := s.doControl(context.Background(), http.MethodPost, url, nil, 30*time.Second)
-	if err == nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
+	setBasicAuth(req, s.provider.password)
+	resp, err := s.provider.httpClient.Do(req)
+	if err != nil {
+		return 0, nil, err
 	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	return resp.StatusCode, data, nil
 }
 
-// sendTurn executes one agent turn using OpenCode's asynchronous lifecycle:
-// submit via prompt_async (short transport budget), then poll /wait in slices
-// while observing cancellation, an overall activity deadline, and stall
-// detection, and finally fetch the completed assistant message via GET
-// /message. This guarantees a healthy long-running turn is not killed by a
-// transport timeout, while still bounding total duration and detecting stalls.
+// interruptSession best-effort cancels a running turn on the host.
+func (s *OpenCodeSessionAdapter) interruptSession(endpoint, sessionID string) {
+	url := fmt.Sprintf("%s/api/session/%s/interrupt", endpoint, sessionID)
+	_, _, _ = s.doControl(context.Background(), http.MethodPost, url, nil, 30*time.Second)
+}
+
+// sendTurn executes one agent turn using the OpenCode v2 lifecycle: submit via
+// POST /api/session/{id}/prompt (short transport budget), then poll the
+// experimental /wait endpoint in slices while observing cancellation, an
+// overall activity deadline, and stall detection, and finally fetch the
+// completed assistant message via GET /api/session/{id}/message. This
+// guarantees a healthy long-running turn is not killed by a transport timeout,
+// while still bounding total duration and detecting stalls.
 func (s *OpenCodeSessionAdapter) sendTurn(ctx context.Context, sessionID, endpoint string, payload []byte, modelID string) (ocMessageResponse, error) {
 	var empty ocMessageResponse
 
@@ -142,125 +141,121 @@ func (s *OpenCodeSessionAdapter) sendTurn(ctx context.Context, sessionID, endpoi
 		defer cancelAct()
 	}
 
-	// 1. Submit the turn asynchronously (short transport budget).
-	submitURL := fmt.Sprintf("%s/session/%s/prompt_async", endpoint, sessionID)
-	subResp, err := s.doControl(actCtx, http.MethodPost, submitURL, payload, ocTransportTimeout)
+	// 1. Submit the prompt (short transport budget; the turn itself runs
+	// asynchronously on the server and is observed via /wait + /message).
+	submitURL := fmt.Sprintf("%s/api/session/%s/prompt", endpoint, sessionID)
+	subStatus, _, err := s.doControl(actCtx, http.MethodPost, submitURL, payload, ocTransportTimeout)
 	if err != nil {
-		return empty, s.classifySendErr(modelID, fmt.Errorf("opencode: async submit: %w", err))
+		return empty, s.classifySendErr(modelID, fmt.Errorf("opencode: prompt submit: %w", err))
 	}
-	_, _ = io.Copy(io.Discard, subResp.Body)
-	_ = subResp.Body.Close()
-	if subResp.StatusCode == http.StatusNotFound || subResp.StatusCode == http.StatusMethodNotAllowed {
-		// Host does not support prompt_async: fall back to the synchronous
-		// POST /message (still bounded by the activity deadline via actCtx,
-		// not by a client-level transport cap).
-		return s.sendTurnSync(actCtx, endpoint, sessionID, payload, modelID)
+	if os.Getenv("A4C_OC_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "[a4c-oc-debug] prompt submit status=%d payloadBytes=%d\n", subStatus, len(payload))
 	}
-	if subResp.StatusCode != http.StatusNoContent && subResp.StatusCode != http.StatusOK {
-		return empty, s.classifySendErr(modelID, fmt.Errorf("opencode: async submit status %d", subResp.StatusCode))
+	if subStatus == http.StatusConflict {
+		return empty, s.classifySendErr(modelID, errors.New("opencode: session busy (a turn is already running)"))
+	}
+	if subStatus != http.StatusOK && subStatus != http.StatusNoContent {
+		return empty, s.classifySendErr(modelID, fmt.Errorf("opencode: prompt submit status %d", subStatus))
 	}
 
-	// 2. Poll for completion.
-	msgURL := fmt.Sprintf("%s/session/%s/message", endpoint, sessionID)
-	waitURL := fmt.Sprintf("%s/api/session/%s/wait", endpoint, sessionID)
+	// 2. Poll for completion. The message list is requested in ascending
+	// order and filtered to assistant messages so the end-scan below always
+	// sees the newest assistant message regardless of server default order.
+	msgURL := fmt.Sprintf("%s/api/session/%s/message?order=asc&type=assistant", endpoint, sessionID)
+	waitURL := fmt.Sprintf("%s/api/experimental/session/%s/wait", endpoint, sessionID)
+	waitSupported := true
+	ocDebug := os.Getenv("A4C_OC_DEBUG") != ""
 
 	var lastMsgID string
 	lastProgress := time.Now()
 	for {
 		if err := actCtx.Err(); err != nil {
-			s.abortSession(endpoint, sessionID)
+			s.interruptSession(endpoint, sessionID)
+			if ocDebug {
+				fmt.Fprintf(os.Stderr, "[a4c-oc-debug] actCtx done: %v (lastMsgID=%q)\n", err, lastMsgID)
+			}
 			if err == context.Canceled {
 				return empty, fmt.Errorf("opencode: turn canceled")
 			}
 			return empty, fmt.Errorf("opencode: activity deadline exceeded: %w", err)
 		}
 
-		// Wait a bounded slice; it returns when the session is idle or the
-		// slice elapses, whichever comes first.
-		wResp, werr := s.doControl(actCtx, http.MethodPost, waitURL, nil, ocWaitSlice)
-		if werr == nil {
-			_, _ = io.Copy(io.Discard, wResp.Body)
-			_ = wResp.Body.Close()
+		if waitSupported {
+			// Wait a bounded slice; it returns when the session is idle or the
+			// slice elapses, whichever comes first.
+			wStatus, _, werr := s.doControl(actCtx, http.MethodPost, waitURL, nil, ocWaitSlice)
+			if werr == nil {
+				if ocDebug {
+					fmt.Fprintf(os.Stderr, "[a4c-oc-debug] wait status=%d\n", wStatus)
+				}
+				if wStatus == http.StatusNotFound || wStatus == http.StatusMethodNotAllowed {
+					// Experimental /wait endpoint unavailable on this server:
+					// fall back to bounded sleep-polling (still bounded by
+					// actCtx).
+					waitSupported = false
+				}
+			}
+		} else {
+			select {
+			case <-actCtx.Done():
+				// Handled at loop top.
+			case <-time.After(ocFallbackPollInterval):
+			}
 		}
 
 		// Check for a completed assistant message. A turn is complete only
-		// when the host marks it finished (info.finish / step-finish); an
-		// early partial message with empty text must not end the turn.
+		// when the host marks it finished (finish=stop/error); an early
+		// streaming message with empty text must not end the turn.
 		msgResp, ferr := s.fetchLastAssistant(actCtx, msgURL)
-		if ferr == nil && msgResp.Info.ID != "" && msgResp.Info.Role == "assistant" && msgResp.isComplete() {
-			if msgResp.Info.ID != lastMsgID {
-				lastMsgID = msgResp.Info.ID
+		if os.Getenv("A4C_OC_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "[a4c-oc-debug] fetch err=%v id=%q type=%q finish=%q textLen=%d\n", ferr, msgResp.ID, msgResp.Type, msgResp.Finish, len(msgResp.extractContent()))
+		}
+		if ferr == nil && msgResp.ID != "" && msgResp.isComplete() {
+			if msgResp.Finish == "error" {
+				s.interruptSession(endpoint, sessionID)
+				name := "unknown"
+				if msgResp.Error != nil && msgResp.Error.Name != "" {
+					name = msgResp.Error.Name
+				}
+				return empty, fmt.Errorf("opencode: turn failed on host: %s", name)
+			}
+			if msgResp.ID != lastMsgID {
+				lastMsgID = msgResp.ID
 				lastProgress = time.Now()
 			}
 			return msgResp, nil
 		}
 		// Progress signal: a new assistant message appearing means the turn
 		// is alive even if not yet complete.
-		if ferr == nil && msgResp.Info.ID != "" && msgResp.Info.ID != lastMsgID {
-			lastMsgID = msgResp.Info.ID
+		if ferr == nil && msgResp.ID != "" && msgResp.ID != lastMsgID {
+			lastMsgID = msgResp.ID
 			lastProgress = time.Now()
 		}
 
 		if time.Since(lastProgress) > ocStallTimeout {
-			s.abortSession(endpoint, sessionID)
+			s.interruptSession(endpoint, sessionID)
 			return empty, fmt.Errorf("opencode: turn stalled: no assistant progress for %v", ocStallTimeout)
 		}
 	}
 }
 
-// sendTurnSync is the fallback for hosts that do not support prompt_async. It
-// performs the synchronous POST /message, bounded by the activity deadline via
-// the provided context (never by a client-level transport cap).
-func (s *OpenCodeSessionAdapter) sendTurnSync(ctx context.Context, endpoint, sessionID string, payload []byte, modelID string) (ocMessageResponse, error) {
-	var empty ocMessageResponse
-	url := fmt.Sprintf("%s/session/%s/message", endpoint, sessionID)
-	// The sync call IS the long-running turn, so it is bounded by the remaining
-	// activity deadline (not a short transport budget). If no deadline is set,
-	// fall back to the default activity deadline.
-	transportBudget := ocDefaultActivityDeadline
-	if dl, ok := ctx.Deadline(); ok {
-		if rem := time.Until(dl); rem > 0 {
-			transportBudget = rem
-		} else {
-			return empty, fmt.Errorf("opencode: activity deadline exceeded before submit")
-		}
-	}
-	resp, err := s.doControl(ctx, http.MethodPost, url, payload, transportBudget)
-	if err != nil {
-		return empty, s.classifySendErr(modelID, fmt.Errorf("opencode: send request: %w", err))
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		var errData any
-		_ = json.NewDecoder(resp.Body).Decode(&errData)
-		rawErr := fmt.Sprintf("status %d: %v", resp.StatusCode, errData)
-		return empty, s.classifySendErr(modelID, fmt.Errorf("opencode: message request %s", rawErr))
-	}
-	var msgResp ocMessageResponse
-	if err := json.NewDecoder(resp.Body).Decode(&msgResp); err != nil {
-		return empty, fmt.Errorf("opencode: decode message response: %w", err)
-	}
-	return msgResp, nil
-}
-
 // fetchLastAssistant retrieves the most recent assistant message, if any.
 func (s *OpenCodeSessionAdapter) fetchLastAssistant(ctx context.Context, msgURL string) (ocMessageResponse, error) {
 	var empty ocMessageResponse
-	resp, err := s.doControl(ctx, http.MethodGet, msgURL, nil, ocTransportTimeout)
+	status, data, err := s.doControl(ctx, http.MethodGet, msgURL, nil, ocTransportTimeout)
 	if err != nil {
 		return empty, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return empty, fmt.Errorf("opencode: message list status %d", resp.StatusCode)
+	if status != http.StatusOK {
+		return empty, fmt.Errorf("opencode: message list status %d", status)
 	}
 	var list ocMessageList
-	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+	if err := json.Unmarshal(data, &list); err != nil {
 		return empty, err
 	}
-	for i := len(list) - 1; i >= 0; i-- {
-		if list[i].Info.Role == "assistant" {
-			return list[i], nil
+	for i := len(list.Data) - 1; i >= 0; i-- {
+		if list.Data[i].Type == "assistant" {
+			return list.Data[i], nil
 		}
 	}
 	return empty, nil
@@ -286,10 +281,10 @@ func (p *OpenCodeProvider) TransportCapSeconds() float64 {
 	return p.httpClient.Timeout.Seconds()
 }
 
-// extractContent concatenates text parts of a message.
+// extractContent concatenates text content items of an assistant message.
 func (m *ocMessageResponse) extractContent() string {
 	var sb strings.Builder
-	for _, part := range m.Parts {
+	for _, part := range m.Content {
 		if part.Type == "text" && part.Text != "" {
 			sb.WriteString(part.Text)
 		}

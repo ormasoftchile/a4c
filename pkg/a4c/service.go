@@ -3,6 +3,7 @@ package a4c
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -228,6 +229,8 @@ func (s *TeamServiceImpl) GetTask(ctx context.Context, taskID string) (*TaskDeta
 			}
 		}
 	}
+
+	details.KnowledgeCoverage = s.deriveKnowledgeCoverage(taskID)
 
 	return details, nil
 }
@@ -530,6 +533,9 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 		Comments:            req.Comments,
 		AuthorizationMethod: authMethod,
 	}
+	// Knowledge accountability surfaces as warnings only; acceptance of the
+	// engineering work is never blocked by a missing or pending assessment.
+	res.Warnings = knowledgeCoverageWarnings(s.deriveKnowledgeCoverage(req.TaskID))
 	return res, nil
 }
 
@@ -1561,6 +1567,8 @@ func (s *TeamServiceImpl) GetTeamContext(ctx context.Context) (*TeamContextResul
 		}
 	}
 
+	kbDir, _ := ResolveKnowledgeDir(s.workspaceDir)
+
 	return &TeamContextResult{
 		WorkspaceRoot:  s.workspaceDir,
 		CurrentBranch:  branch,
@@ -1568,6 +1576,7 @@ func (s *TeamServiceImpl) GetTeamContext(ctx context.Context) (*TeamContextResul
 		TeamMembers:    members,
 		ActiveTasks:    activeTasks,
 		RecentMemories: memories,
+		KnowledgeDir:   kbDir,
 	}, nil
 }
 
@@ -1782,13 +1791,24 @@ func (s *TeamServiceImpl) RecordCheckpoint(ctx context.Context, req CheckpointRe
 	}, nil
 }
 
-// CompleteActivity records completion of a specialist activity.
+// CompleteActivity records completion of a specialist activity. When a
+// knowledge claim is present it is verified against the per-repository
+// knowledge directory; a claim on an already-completed root activity amends
+// only the knowledge portion of the recorded result (post-review task-level
+// synthesis), never the completion evidence itself.
 func (s *TeamServiceImpl) CompleteActivity(ctx context.Context, req CompleteActivityRequest) (*HostActivityResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if strings.TrimSpace(req.ActivityID) == "" {
 		return nil, fmt.Errorf("service: activity_id is required")
+	}
+
+	// Amendment path: a knowledge claim against an already-completed activity.
+	if req.Knowledge != nil {
+		if rec, err := s.store.Get(req.ActivityID); err == nil && rec != nil && rec.Status == StatusCompleted {
+			return s.amendRootKnowledge(rec, req)
+		}
 	}
 
 	var evidenceIDs []string
@@ -1799,6 +1819,11 @@ func (s *TeamServiceImpl) CompleteActivity(ctx context.Context, req CompleteActi
 	status := StatusCompleted
 	if !req.Success {
 		status = StatusFailed
+	}
+
+	isRoot := false
+	if rec, err := s.store.Get(req.ActivityID); err == nil && rec != nil {
+		isRoot = rec.Request.ParentID == ""
 	}
 
 	result := ActivityResult{
@@ -1816,6 +1841,12 @@ func (s *TeamServiceImpl) CompleteActivity(ctx context.Context, req CompleteActi
 		if snap := s.resolveCurrentSnapshot(req.TaskID); snap != "" {
 			result.Outputs["snapshot_id"] = snap
 		}
+	}
+
+	var knowledgeOut *KnowledgeOutcome
+	if req.Knowledge != nil {
+		knowledgeOut = s.processKnowledgeClaim(req.Knowledge, req.Actor, req.TaskID, isRoot)
+		result.Outputs["knowledge"] = knowledgeOut
 	}
 
 	if s.store != nil {
@@ -1840,8 +1871,207 @@ func (s *TeamServiceImpl) CompleteActivity(ctx context.Context, req CompleteActi
 		Summary:       req.Summary,
 		FilesModified: req.FilesModified,
 		Evidence:      evidenceIDs,
+		Knowledge:     knowledgeOut,
 		CompletedAt:   time.Now(),
 	}, nil
+}
+
+// processKnowledgeClaim verifies a knowledge claim against the resolved
+// knowledge directory and returns the durable outcome. It never treats an
+// unverified claim as successful and never fails the engineering completion.
+func (s *TeamServiceImpl) processKnowledgeClaim(claim *KnowledgeClaim, actor, taskID string, taskLevel bool) *KnowledgeOutcome {
+	out := &KnowledgeOutcome{Significant: claim.Significant, Actor: actor, TaskLevel: taskLevel}
+	if !claim.Significant {
+		out.Status = "assessed"
+		out.Reason = claim.Reason
+		return out
+	}
+	kbDir, err := ResolveKnowledgeDir(s.workspaceDir)
+	if err != nil {
+		out.Status = "unavailable"
+		out.Reason = "knowledge directory unavailable: " + err.Error()
+		return out
+	}
+	if len(claim.Paths) > 0 {
+		statuses := VerifyKnowledgePaths(kbDir, claim.Paths)
+		out.Verified = statuses
+		allOK := true
+		var bad []string
+		for _, st := range statuses {
+			if st.OK {
+				out.Paths = append(out.Paths, st.Path)
+			} else {
+				allOK = false
+				bad = append(bad, fmt.Sprintf("%s (%s)", st.Path, st.Reason))
+			}
+		}
+		if allOK {
+			out.Status = "verified"
+		} else {
+			out.Status = "pending"
+			out.Reason = "claimed documents missing or invalid: " + strings.Join(bad, "; ")
+		}
+		return out
+	}
+	if claim.Content != "" {
+		target := claim.FileName
+		if target == "" {
+			target = filepath.Join("findings", taskID+".md")
+		}
+		if _, werr := WriteKnowledgeFile(kbDir, target, claim.Content); werr != nil {
+			out.Status = "pending"
+			if errors.Is(werr, ErrKnowledgeExists) {
+				out.Reason = "refusing to overwrite existing document: " + target
+			} else {
+				out.Reason = "knowledge write failed: " + werr.Error()
+			}
+			return out
+		}
+		out.Status = "verified"
+		out.Paths = []string{target}
+		return out
+	}
+	out.Status = "pending"
+	out.Reason = "significant knowledge claimed but no paths or content provided"
+	return out
+}
+
+// amendRootKnowledge updates ONLY the knowledge portion of an already-completed
+// root activity's result. All other recorded fields (summary, files, evidence,
+// metrics, snapshot) are preserved untouched. Only the root activity's own
+// agent or the lead may amend.
+func (s *TeamServiceImpl) amendRootKnowledge(rec *ActivityRecord, req CompleteActivityRequest) (*HostActivityResult, error) {
+	if rec.Request.ParentID != "" {
+		return nil, fmt.Errorf("service: knowledge amendment is only supported on the root task activity")
+	}
+	actor := strings.ToLower(strings.TrimSpace(req.Actor))
+	if actor != strings.ToLower(rec.Request.AgentID) && actor != "lead" && actor != "alice" {
+		return nil, fmt.Errorf("service: only the root activity agent or the lead may amend the task-level knowledge assessment")
+	}
+
+	outcome := s.processKnowledgeClaim(req.Knowledge, req.Actor, rec.Request.ID, true)
+	if err := s.store.AmendOutputs(req.ActivityID, map[string]any{"knowledge": outcome}); err != nil {
+		return nil, fmt.Errorf("service: amend knowledge assessment: %w", err)
+	}
+
+	if s.journal != nil {
+		_ = s.journal.RecordIntent(IntentRecord{
+			IntentID:   fmt.Sprintf("intent-%s-knowledge-amend-%d", req.ActivityID, time.Now().UnixNano()),
+			ActivityID: req.ActivityID,
+			Action:     "amend_knowledge",
+			Target:     outcome.Status,
+			Status:     IntentCommitted,
+		})
+	}
+
+	summary, _ := rec.Result.Outputs["summary"].(string)
+	return &HostActivityResult{
+		ActivityID:  req.ActivityID,
+		TaskID:      req.TaskID,
+		Actor:       req.Actor,
+		Status:      string(StatusCompleted),
+		Summary:     summary,
+		Knowledge:   outcome,
+		CompletedAt: time.Now(),
+	}, nil
+}
+
+// deriveKnowledgeCoverage computes derived task-level knowledge accountability
+// state from recorded activity results. No separate store is maintained.
+func (s *TeamServiceImpl) deriveKnowledgeCoverage(rootID string) *TaskKnowledgeCoverage {
+	cov := &TaskKnowledgeCoverage{AssessmentMissing: true}
+	if s.store == nil {
+		return cov
+	}
+	sawClaim := false
+	for _, rec := range s.store.GetTaskTree(rootID) {
+		if rec.Result == nil {
+			continue
+		}
+		out := knowledgeOutcomeFromOutputs(rec.Result.Outputs["knowledge"])
+		if out == nil {
+			continue
+		}
+		sawClaim = true
+		if rec.Request.ID == rootID {
+			cov.AssessmentMissing = false
+			cov.AssessmentRecorded = true
+			cov.AssessmentSignificant = out.Significant
+			cov.AssessmentStatus = out.Status
+			cov.AssessmentPaths = out.Paths
+		} else if out.Significant {
+			cov.ActivityCandidates++
+		}
+		if out.Status == "pending" || out.Status == "unavailable" {
+			if out.Reason != "" {
+				cov.Pending = append(cov.Pending, out.Reason)
+			}
+		}
+		for _, vs := range out.Verified {
+			if !vs.OK {
+				cov.Unverified = append(cov.Unverified, fmt.Sprintf("%s: %s", vs.Path, vs.Reason))
+			}
+		}
+	}
+	if !sawClaim {
+		cov.AssessmentMissing = true
+	}
+	return cov
+}
+
+// knowledgeOutcomeFromOutputs tolerates both in-process structs and
+// JSON-reloaded maps for the "knowledge" output key.
+func knowledgeOutcomeFromOutputs(v any) *KnowledgeOutcome {
+	switch t := v.(type) {
+	case *KnowledgeOutcome:
+		return t
+	case KnowledgeOutcome:
+		return &t
+	case map[string]any:
+		out := &KnowledgeOutcome{}
+		if err := mapToKnowledgeOutcome(t, out); err != nil {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func mapToKnowledgeOutcome(m map[string]any, out *KnowledgeOutcome) error {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, out)
+}
+
+// knowledgeCoverageWarnings renders human-readable accountability warnings for
+// the acceptance boundary. Missing or pending assessments warn; they never
+// block acceptance.
+func knowledgeCoverageWarnings(cov *TaskKnowledgeCoverage) []string {
+	if cov == nil {
+		return nil
+	}
+	var w []string
+	if cov.AssessmentMissing {
+		if cov.ActivityCandidates > 0 {
+			w = append(w, "knowledge: activity-level candidates were recorded, but no task-level assessment")
+		} else {
+			w = append(w, "knowledge: no knowledge assessment recorded for this task")
+		}
+	} else if cov.AssessmentStatus == "pending" || cov.AssessmentStatus == "unavailable" {
+		if cov.AssessmentSignificant {
+			w = append(w, "knowledge: significant learning identified but preservation pending")
+		}
+	}
+	for _, p := range cov.Pending {
+		w = append(w, "knowledge pending: "+p)
+	}
+	for _, u := range cov.Unverified {
+		w = append(w, "knowledge unverified: "+u)
+	}
+	return w
 }
 
 // RecordReview records an independent reviewer verdict and validates non-mutating reviewer boundaries.

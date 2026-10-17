@@ -55,16 +55,6 @@ type AgentConfig struct {
 	Limits                 *ActivityLimits                `json:"limits,omitempty"`
 	Runtime                string                         `json:"runtime,omitempty"`
 	Model                  string                         `json:"model,omitempty"`
-	// KnowledgeToken is the signed execution-context token for this activity,
-	// issued by the coordinator when A4C Knowledge is enabled. Hosts bind it to
-	// the session (Copilot via MCP server env; OpenCode/Antigravity via the
-	// session prompt) so knowledge calls are attributed to this activity.
-	KnowledgeToken string `json:"-"`
-	// KnowledgeDir is the MAIN workspace directory that owns the shared
-	// .a4c/knowledge.db. It is deliberately distinct from WorkspaceDir (which
-	// may be a disposable worktree), so knowledge state is shared across
-	// worktrees and hosts rather than forked per-worktree.
-	KnowledgeDir string `json:"-"`
 }
 
 // AgentSession manages conversational continuity for an active agent.

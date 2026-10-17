@@ -29,12 +29,11 @@ func ClassifyTool(name string) ToolClass {
 	switch name {
 	case "governed_propose_activity", "governed_submit_review", "governed_request_human_decision":
 		return ToolClassTerminal
-	case "governed_read_file", "knowledge_query":
+	case "governed_read_file":
 		return ToolClassExploration
 	default:
-		// governed_apply_patch, governed_propose_memory, knowledge_record, and
-		// anything unknown are counted as work so unknown tools cannot silently
-		// bypass the cap.
+		// governed_apply_patch, governed_propose_memory, and anything unknown
+		// are counted as work so unknown tools cannot silently bypass the cap.
 		return ToolClassWork
 	}
 }

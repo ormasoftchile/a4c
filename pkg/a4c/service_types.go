@@ -113,6 +113,7 @@ type TaskDetails struct {
 	EvidenceIDs       []string               `json:"evidence_ids,omitempty"`
 	ReviewVerdict     string                 `json:"review_verdict,omitempty"`
 	ReviewComments    string                 `json:"review_comments,omitempty"`
+	KnowledgeCoverage *TaskKnowledgeCoverage `json:"knowledge_coverage,omitempty"`
 	CreatedAt         time.Time              `json:"created_at"`
 	UpdatedAt         time.Time              `json:"updated_at"`
 }
@@ -169,6 +170,7 @@ type AcceptResult struct {
 	AcceptedAt          time.Time `json:"accepted_at"`
 	Comments            string    `json:"comments,omitempty"`
 	AuthorizationMethod string    `json:"authorization_method,omitempty"`
+	Warnings            []string  `json:"warnings,omitempty"`
 }
 
 // IntegrateTaskRequest applies an accepted task to the working tree.
@@ -216,6 +218,56 @@ type TeamContextResult struct {
 	TeamMembers    []TeamMemberInfo `json:"team_members"`
 	ActiveTasks    []TaskSummary    `json:"active_tasks"`
 	RecentMemories []string         `json:"recent_memories"`
+	KnowledgeDir   string           `json:"knowledge_dir,omitempty"`
+}
+
+// KnowledgeClaim is the knowledge disposition an agent reports with activity
+// completion. An absent claim is NOT equivalent to Significant=false: the
+// assessment is expected for A4C-managed tasks, while actual document creation
+// remains optional.
+type KnowledgeClaim struct {
+	// Significant reports whether reusable engineering knowledge emerged.
+	Significant bool `json:"significant"`
+	// Reason explains a non-significant disposition (e.g. "routine fix").
+	Reason string `json:"reason,omitempty"`
+	// Paths are knowledge-dir-relative documents the agent already wrote.
+	Paths []string `json:"paths,omitempty"`
+	// Content is an inline document used when the coding host cannot write
+	// outside its workspace. FileName (or Paths[0]) names the destination.
+	Content  string `json:"content,omitempty"`
+	FileName string `json:"file_name,omitempty"`
+}
+
+// KnowledgeOutcome is A4C's verified record of a knowledge claim. Status is
+// one of: "assessed" (declared not significant), "verified" (documents exist),
+// "pending" (significant but not preserved), or "unavailable" (KB could not
+// be resolved). TaskLevel marks the root (task-level) assessment.
+type KnowledgeOutcome struct {
+	Significant bool                 `json:"significant"`
+	Status      string               `json:"status"`
+	Reason      string               `json:"reason,omitempty"`
+	Paths       []string             `json:"paths,omitempty"`
+	Verified    []KnowledgePathStatus `json:"verified,omitempty"`
+	Actor       string               `json:"actor,omitempty"`
+	TaskLevel   bool                 `json:"task_level,omitempty"`
+}
+
+// TaskKnowledgeCoverage is derived knowledge-accountability state for a task.
+type TaskKnowledgeCoverage struct {
+	// AssessmentMissing: no completion on the task carried any knowledge claim.
+	AssessmentMissing bool `json:"assessment_missing"`
+	// AssessmentRecorded: the root (task-level) completion carries a claim.
+	AssessmentRecorded bool `json:"assessment_recorded"`
+	// AssessmentSignificant / AssessmentStatus / AssessmentPaths describe the
+	// task-level assessment when recorded.
+	AssessmentSignificant bool     `json:"assessment_significant"`
+	AssessmentStatus      string   `json:"assessment_status,omitempty"`
+	AssessmentPaths       []string `json:"assessment_paths,omitempty"`
+	// ActivityCandidates counts activity-level significant claims below the root.
+	ActivityCandidates int `json:"activity_candidates"`
+	// Pending / Unverified list human-readable obligation reasons.
+	Pending   []string `json:"pending,omitempty"`
+	Unverified []string `json:"unverified,omitempty"`
 }
 
 // BeginTaskRequest begins an engineering task without launching a standalone inference loop.
@@ -280,26 +332,28 @@ type CheckpointResult struct {
 
 // CompleteActivityRequest records completion of a specialist's assignment.
 type CompleteActivityRequest struct {
-	TaskID             string   `json:"task_id"`
-	ActivityID         string   `json:"activity_id"`
-	Actor              string   `json:"actor"`
-	Summary            string   `json:"summary"`
-	FilesModified      []string `json:"files_modified,omitempty"`
-	ValidationEvidence string   `json:"validation_evidence,omitempty"`
-	Success            bool     `json:"success"`
+	TaskID             string         `json:"task_id"`
+	ActivityID         string         `json:"activity_id"`
+	Actor              string         `json:"actor"`
+	Summary            string         `json:"summary"`
+	FilesModified      []string       `json:"files_modified,omitempty"`
+	ValidationEvidence string         `json:"validation_evidence,omitempty"`
+	Success            bool           `json:"success"`
+	Knowledge          *KnowledgeClaim `json:"knowledge,omitempty"`
 }
 
 // HostActivityResult represents the result of completing a specialist activity.
 type HostActivityResult struct {
-	ActivityID    string    `json:"activity_id"`
-	TaskID        string    `json:"task_id"`
-	Actor         string    `json:"actor"`
-	Role          string    `json:"role"`
-	Status        string    `json:"status"`
-	Summary       string    `json:"summary"`
-	FilesModified []string  `json:"files_modified,omitempty"`
-	Evidence      []string  `json:"evidence,omitempty"`
-	CompletedAt   time.Time `json:"completed_at"`
+	ActivityID    string             `json:"activity_id"`
+	TaskID        string             `json:"task_id"`
+	Actor         string             `json:"actor"`
+	Role          string             `json:"role"`
+	Status        string             `json:"status"`
+	Summary       string             `json:"summary"`
+	FilesModified []string           `json:"files_modified,omitempty"`
+	Evidence      []string           `json:"evidence,omitempty"`
+	Knowledge     *KnowledgeOutcome  `json:"knowledge,omitempty"`
+	CompletedAt   time.Time          `json:"completed_at"`
 }
 
 // RecordReviewRequest records an independent reviewer verdict.

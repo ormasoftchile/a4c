@@ -223,6 +223,30 @@ func (s *DurableActivityStore) Complete(id string, result ActivityResult) error 
 	return s.persist(rec)
 }
 
+// AmendOutputs merges keys into an already-completed activity's result
+// outputs without touching status, evidence, metrics, or any other recorded
+// field. It is the narrow post-review amendment path for task-level knowledge
+// assessments; it refuses activities with no recorded result.
+func (s *DurableActivityStore) AmendOutputs(id string, outputs map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, exists := s.records[id]
+	if !exists {
+		return ErrActivityNotFound
+	}
+	if rec.Result == nil {
+		return fmt.Errorf("store: activity %s has no recorded result to amend", id)
+	}
+	if rec.Result.Outputs == nil {
+		rec.Result.Outputs = make(map[string]any, len(outputs))
+	}
+	for k, v := range outputs {
+		rec.Result.Outputs[k] = v
+	}
+	return s.persist(rec)
+}
+
 // Requeue returns an activity to the pending pool with an updated request.
 // It is used for explicit, bounded budget-exhaustion recovery: the activity's
 // terminal error and result are cleared so it can be claimed again under a

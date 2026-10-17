@@ -28,17 +28,36 @@ const (
 	ansiGray  = "\x1b[0;37m"
 )
 
-// bannerWordmarkColored is a compact three-row half-block rendering of A4C. It
-// reads cleanly above short usage output and inside narrow terminals.
-const bannerWordmarkColored = ansiWhite + "▀▀█" + ansiGray + " " + ansiWhite + "█ █" + ansiGray + "  " + ansiWhite + "█▀" + ansiReset + "\n" +
-	ansiRed + "█▀█" + ansiGray + " " + ansiRed + "▀▀█▀" + ansiGray + " " + ansiRed + "█" + ansiGray + " " + ansiReset + "\n" +
-	ansiRed + "▀▀▀" + ansiGray + " " + ansiWhite + "  " + ansiRed + "▀" + ansiGray + "  " + ansiRed + "▀▀" + ansiReset
+// bannerLegend is the expanded name, split across the three wordmark rows so
+// the legend sits beside the logo instead of on its own line below. The
+// em-dash separator of the single-line form is implied by the row break.
+var bannerLegend = [3]string{
+	"Agents for Coding",
+	"Governed Local AI",
+	"Engineering Team",
+}
 
-const bannerWordmarkPlain = "▀▀█ █ █  █▀\n" +
-	"█▀█ ▀▀█▀ █ \n" +
-	"▀▀▀   ▀  ▀▀"
+// bannerLegendGap separates the wordmark canvas from the legend text.
+const bannerLegendGap = "  "
 
-const bannerTagline = "Agents for Coding — Governed Local AI Engineering Team"
+// bannerRows is the A4C wordmark: a compact three-row half-block rendering.
+// Every row is padded to the same 11-column canvas so the legend stays
+// aligned down the block; row two is one glyph narrower because the middle of
+// the C is a single stem, which is what leaves its gap a column wider.
+var bannerRows = [3]struct{ colored, plain string }{
+	{
+		colored: ansiWhite + "▀▀█" + ansiGray + " " + ansiWhite + "█ █" + ansiGray + "  " + ansiWhite + "█▀" + ansiReset,
+		plain:   "▀▀█ █ █  █▀",
+	},
+	{
+		colored: ansiRed + "█▀█" + ansiGray + " " + ansiRed + "▀▀█▀" + ansiGray + " " + ansiRed + "█" + ansiGray + " " + ansiReset,
+		plain:   "█▀█ ▀▀█▀ █ ",
+	},
+	{
+		colored: ansiRed + "▀▀▀" + ansiGray + " " + ansiWhite + "  " + ansiRed + "▀" + ansiGray + "  " + ansiRed + "▀▀" + ansiReset,
+		plain:   "▀▀▀   ▀  ▀▀",
+	},
+}
 
 // colorsEnabled reports whether ANSI color may be emitted: stdout must be an
 // interactive terminal and NO_COLOR must be unset. This matches the
@@ -52,13 +71,22 @@ func colorsEnabled() bool {
 	return err == nil && (stat.Mode()&os.ModeCharDevice) != 0
 }
 
-// banner renders the wordmark, tagline, and trailing newline.
+// banner renders the logo lockup: the wordmark with the expanded name set to
+// its right, one legend line per wordmark row.
 func banner() string {
-	wordmark := bannerWordmarkPlain
-	if colorsEnabled() {
-		wordmark = bannerWordmarkColored
+	colors := colorsEnabled()
+	var b strings.Builder
+	b.WriteString("\n")
+	for i, row := range bannerRows {
+		glyphs := row.plain
+		legend := bannerLegend[i]
+		if colors {
+			glyphs = row.colored
+			legend = ansiGray + legend + ansiReset
+		}
+		b.WriteString(glyphs + bannerLegendGap + legend + "\n")
 	}
-	return "\n" + wordmark + "\n" + bannerTagline + "\n"
+	return b.String()
 }
 
 func printUsage() {

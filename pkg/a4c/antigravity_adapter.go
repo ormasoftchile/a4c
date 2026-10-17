@@ -245,12 +245,6 @@ func (s *AntigravitySessionAdapter) Send(ctx context.Context, prompt string) (*A
 		fullPrompt += "\n\n[INSTRUCTION]: Propose delegated subtasks using a JSON block: ```json\n{\"proposals\": [{\"proposal_id\": \"...\", \"proposed_agent_id\": \"coder\", \"objective\": \"...\", \"budget_tokens\": 30000}]}\n```\nPropose budgets that cover full expected context overhead; the runtime raises proposals below the viable minimum and rejects proposals the parent cannot afford."
 	}
 
-	// A4C Knowledge: same model-mediated token injection as OpenCode (documented
-	// as weaker than Copilot's per-session MCP env binding).
-	if s.config.KnowledgeToken != "" {
-		fullPrompt += "\n\n[KNOWLEDGE]: The A4C Knowledge MCP server exposes knowledge_record and knowledge_query. Record significant engineering understanding (hypothesis, finding, decision, experiment result) via knowledge_record, passing this execution-context token as context_token: " + s.config.KnowledgeToken + "\nRetrieve prior knowledge via knowledge_query. Do not record routine implementation steps."
-	}
-
 	// Prepare agy command arguments
 	args := []string{
 		"-p", fullPrompt,

@@ -97,8 +97,11 @@ func TestGovernanceConformance_OpenCodeVsFake_IntentAndContainment(t *testing.T)
 
 	// 1. Success case for Coder: verifies durable intent logging
 	mock.customMessageResp = map[string]any{
-		"info": map[string]any{"tokens": map[string]any{"total": 50}},
-		"parts": []map[string]any{
+		"id":     "msg-custom",
+		"type":   "assistant",
+		"finish": "stop",
+		"tokens": map[string]any{"input": 25, "output": 25, "reasoning": 0, "cache": map[string]any{"read": 0, "write": 0}},
+		"content": []map[string]any{
 			{
 				"type": "text",
 				"text": "[PROPOSE_PATCH: path=\"service.go\"]\n```go\npackage service\n```\n[END_PATCH]",
@@ -133,8 +136,11 @@ func TestGovernanceConformance_OpenCodeVsFake_IntentAndContainment(t *testing.T)
 
 	// 2. Traversal containment: attempts outside workspace are denied
 	mock.customMessageResp = map[string]any{
-		"info": map[string]any{"tokens": map[string]any{"total": 50}},
-		"parts": []map[string]any{
+		"id":     "msg-custom",
+		"type":   "assistant",
+		"finish": "stop",
+		"tokens": map[string]any{"input": 25, "output": 25, "reasoning": 0, "cache": map[string]any{"read": 0, "write": 0}},
+		"content": []map[string]any{
 			{
 				"type": "text",
 				"text": "[PROPOSE_PATCH: path=\"../../escape.go\"]\n```go\npackage escape\n```\n[END_PATCH]",
@@ -166,8 +172,11 @@ func TestGovernanceConformance_ReviewerNonMutatingGuarantee(t *testing.T) {
 
 	// Reviewer emits patch proposal: Governor must refuse
 	mock.customMessageResp = map[string]any{
-		"info": map[string]any{"tokens": map[string]any{"total": 50}},
-		"parts": []map[string]any{
+		"id":     "msg-custom",
+		"type":   "assistant",
+		"finish": "stop",
+		"tokens": map[string]any{"input": 25, "output": 25, "reasoning": 0, "cache": map[string]any{"read": 0, "write": 0}},
+		"content": []map[string]any{
 			{
 				"type": "text",
 				"text": "[PROPOSE_PATCH: path=\"fix.go\"]\n```go\npackage fix\n```\n[END_PATCH]",

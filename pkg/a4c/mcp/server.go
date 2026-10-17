@@ -9,7 +9,6 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/ormasoftchile/a4c/pkg/a4c"
-	"github.com/ormasoftchile/a4c/pkg/a4c/knowledge"
 )
 
 // Server wraps the mark3labs MCP server with A4C team service handlers.
@@ -17,14 +16,6 @@ type Server struct {
 	mcpServer *server.MCPServer
 	service   a4c.TeamService
 	role      string
-
-	// knowledge is the optional A4C Knowledge service. Nil when the module is
-	// disabled, in which case no knowledge tools are registered.
-	knowledge *knowledge.Service
-	// knowledgeToken is the execution-context token bound to this server
-	// process at launch (Copilot per-session MCP env). When empty, callers must
-	// supply a per-activity context_token argument.
-	knowledgeToken string
 }
 
 // NewServer initializes an MCP server exposing canonical A4C team tools.
@@ -525,6 +516,15 @@ func (s *Server) handleCompleteActivity(ctx context.Context, req mcp.CallToolReq
 	evidence := req.GetString("validation_evidence", "")
 	success := req.GetBool("success", true)
 
+	var knowledge *a4c.KnowledgeClaim
+	if raw := strings.TrimSpace(req.GetString("knowledge", "")); raw != "" {
+		var claim a4c.KnowledgeClaim
+		if err := json.Unmarshal([]byte(raw), &claim); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid 'knowledge' parameter: %v", err)), nil
+		}
+		knowledge = &claim
+	}
+
 	res, err := s.service.CompleteActivity(ctx, a4c.CompleteActivityRequest{
 		TaskID:             taskID,
 		ActivityID:         activityID,
@@ -533,6 +533,7 @@ func (s *Server) handleCompleteActivity(ctx context.Context, req mcp.CallToolReq
 		FilesModified:      filesModified,
 		ValidationEvidence: evidence,
 		Success:            success,
+		Knowledge:          knowledge,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("complete activity failed: %v", err)), nil

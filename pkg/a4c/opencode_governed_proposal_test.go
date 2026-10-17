@@ -59,16 +59,17 @@ func TestGate2_GovernedPatch_SuccessForCoder(t *testing.T) {
 
 	// Mock server returns a Governed Proposal Mode response
 	mock.customMessageResp = map[string]any{
-		"info": map[string]any{
-			"id":   "msg-test-1",
-			"cost": 0.0001,
-			"tokens": map[string]any{
-				"total":  120,
-				"input":  80,
-				"output": 40,
-			},
+		"id":   "msg-test-1",
+		"type": "assistant",
+		"cost": 0.0001,
+		"tokens": map[string]any{
+			"input":     80,
+			"output":    40,
+			"reasoning": 0,
+			"cache":     map[string]any{"read": 0, "write": 0},
 		},
-		"parts": []map[string]any{
+		"finish": "stop",
+		"content": []map[string]any{
 			{
 				"type": "text",
 				"text": "I have implemented the addition logic:\n\n" +
@@ -149,13 +150,16 @@ func TestGate2_GovernedPatch_DeniedForReviewer(t *testing.T) {
 
 	// Mock server returns a patch proposed by a reviewer
 	mock.customMessageResp = map[string]any{
-		"info": map[string]any{
-			"id": "msg-test-2",
-			"tokens": map[string]any{
-				"total": 50,
-			},
+		"id":   "msg-test-2",
+		"type": "assistant",
+		"tokens": map[string]any{
+			"input":     25,
+			"output":    25,
+			"reasoning": 0,
+			"cache":     map[string]any{"read": 0, "write": 0},
 		},
-		"parts": []map[string]any{
+		"finish": "stop",
+		"content": []map[string]any{
 			{
 				"type": "text",
 				"text": "[PROPOSE_PATCH: path=\"pkg/calculator/calc.go\"]\n```go\npackage calculator\n```\n[END_PATCH]",
@@ -209,13 +213,16 @@ func TestGate2_GovernedPatch_PathTraversalRejected(t *testing.T) {
 
 	// Propose a patch targeting a path outside the workspace
 	mock.customMessageResp = map[string]any{
-		"info": map[string]any{
-			"id": "msg-test-3",
-			"tokens": map[string]any{
-				"total": 50,
-			},
+		"id":   "msg-test-3",
+		"type": "assistant",
+		"tokens": map[string]any{
+			"input":     25,
+			"output":    25,
+			"reasoning": 0,
+			"cache":     map[string]any{"read": 0, "write": 0},
 		},
-		"parts": []map[string]any{
+		"finish": "stop",
+		"content": []map[string]any{
 			{
 				"type": "text",
 				"text": "[PROPOSE_PATCH: path=\"../../escaped_secret.txt\"]\n```\nescaped payload\n```\n[END_PATCH]",
@@ -263,13 +270,16 @@ func TestGate2_GovernedPatch_ToolCallLimitEnforced(t *testing.T) {
 
 	// Propose two patches when limit is 1
 	mock.customMessageResp = map[string]any{
-		"info": map[string]any{
-			"id": "msg-test-4",
-			"tokens": map[string]any{
-				"total": 50,
-			},
+		"id":   "msg-test-4",
+		"type": "assistant",
+		"tokens": map[string]any{
+			"input":     25,
+			"output":    25,
+			"reasoning": 0,
+			"cache":     map[string]any{"read": 0, "write": 0},
 		},
-		"parts": []map[string]any{
+		"finish": "stop",
+		"content": []map[string]any{
 			{
 				"type": "text",
 				"text": "[PROPOSE_PATCH: path=\"file1.txt\"]\n```\n1\n```\n[END_PATCH]\n\n" +

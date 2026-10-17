@@ -23,6 +23,7 @@ type OpenCodeProvider struct {
 	defaultModel string
 	serverMgr    *OpenCodeServerManager
 	httpClient   *http.Client
+	password     string
 }
 
 // NewOpenCodeProvider creates an OpenCode provider pointing to an endpoint.
@@ -36,10 +37,18 @@ func NewOpenCodeProvider(endpoint, model string, mgr *OpenCodeServerManager) *Op
 		model = "opencode-go/mimo-v2.5"
 	}
 
+	// The v2 server requires HTTP Basic auth; the managed server sets a known
+	// password, and external attachments read OPENCODE_SERVER_PASSWORD.
+	password := os.Getenv("OPENCODE_SERVER_PASSWORD")
+	if mgr != nil && mgr.Password() != "" {
+		password = mgr.Password()
+	}
+
 	return &OpenCodeProvider{
 		endpoint:     endpoint,
 		defaultModel: model,
 		serverMgr:    mgr,
+		password:     password,
 		// No client-level Timeout: it would cap EVERY request, including a
 		// legitimate long-running /wait. Per-request transport budgets are
 		// applied via context in doControl instead, and the overall turn is
@@ -74,7 +83,12 @@ func (p *OpenCodeProvider) Capabilities() RuntimeCapabilities {
 // isServerReachable performs a lightweight probe against the OpenCode server endpoint.
 func (p *OpenCodeProvider) isServerReachable() bool {
 	probeClient := &http.Client{Timeout: 800 * time.Millisecond}
-	resp, err := probeClient.Get(p.endpoint + "/project")
+	req, err := http.NewRequest(http.MethodGet, p.endpoint+"/api/project", nil)
+	if err != nil {
+		return false
+	}
+	setBasicAuth(req, p.password)
+	resp, err := probeClient.Do(req)
 	if err != nil {
 		return false
 	}
@@ -82,13 +96,39 @@ func (p *OpenCodeProvider) isServerReachable() bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 500
 }
 
+// fetchServerVersion queries GET /api/info for the running server version.
+func (p *OpenCodeProvider) fetchServerVersion() string {
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, p.endpoint+"/api/info", nil)
+	if err != nil {
+		return "unknown"
+	}
+	setBasicAuth(req, p.password)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "unknown"
+	}
+	defer resp.Body.Close()
+	var info struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil || info.Version == "" {
+		return "unknown"
+	}
+	return info.Version
+}
+
 // HostCapabilities returns the explicit discoverable technical capabilities of OpenCode.
 func (p *OpenCodeProvider) HostCapabilities() HostCapabilities {
 	reachable := p.isServerReachable()
+	version := "unknown"
+	if reachable {
+		version = p.fetchServerVersion()
+	}
 	caps := HostCapabilities{
 		HostID:                "opencode",
-		DisplayName:           "OpenCode Headless Server",
-		Version:               "1.18.35",
+		DisplayName:           "OpenCode Server",
+		Version:               version,
 		Available:             reachable,
 		SessionInvocation:     reachable,
 		WorktreeBinding:       reachable,
@@ -107,8 +147,8 @@ func (p *OpenCodeProvider) HostCapabilities() HostCapabilities {
 			"opencode-go/mimo-v2",
 		},
 		Limitations: []string{
-			"Requires running headless server (opencode serve)",
-			"Native subagents are not exposed through public headless HTTP API",
+			"Requires a running OpenCode v2 server (opencode serve or the shared background service)",
+			"Host-native subagents are not driven by the headless worker",
 		},
 	}
 	if !reachable {
@@ -158,14 +198,19 @@ func (p *OpenCodeProvider) buildSession(ctx context.Context, existingID string, 
 
 	sessionID := existingID
 	if sessionID == "" {
-		// Create session on OpenCode server
+		// Create session on the OpenCode v2 server. The permission ruleset and
+		// the workspace location are session-scoped in v2 and travel in the
+		// create body; unknown keys are rejected by the v2 schema.
 		reqBody := map[string]any{
 			"title": fmt.Sprintf("A4C Activity %s (%s)", config.AgentID, time.Now().Format(time.RFC3339)),
 			"model": map[string]string{
 				"providerID": providerID,
 				"id":         modelID,
 			},
-			"permission": permRules,
+			"permissions": permRules,
+		}
+		if config.WorkspaceDir != "" {
+			reqBody["location"] = map[string]string{"directory": config.WorkspaceDir}
 		}
 
 		bodyBytes, err := json.Marshal(reqBody)
@@ -173,14 +218,9 @@ func (p *OpenCodeProvider) buildSession(ctx context.Context, existingID string, 
 			return nil, err
 		}
 
-		u, err := url.Parse(p.endpoint + "/session")
+		u, err := url.Parse(p.endpoint + "/api/session")
 		if err != nil {
 			return nil, err
-		}
-		if config.WorkspaceDir != "" {
-			q := u.Query()
-			q.Set("directory", config.WorkspaceDir)
-			u.RawQuery = q.Encode()
 		}
 
 		// Bound session creation with a transport timeout (the shared client
@@ -192,6 +232,7 @@ func (p *OpenCodeProvider) buildSession(ctx context.Context, existingID string, 
 			return nil, err
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
+		setBasicAuth(httpReq, p.password)
 
 		resp, err := p.httpClient.Do(httpReq)
 		cancelReq()
@@ -207,12 +248,17 @@ func (p *OpenCodeProvider) buildSession(ctx context.Context, existingID string, 
 		}
 
 		var created struct {
-			ID string `json:"id"`
+			Data struct {
+				ID string `json:"id"`
+			} `json:"data"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
 			return nil, fmt.Errorf("opencode: decode session response: %w", err)
 		}
-		sessionID = created.ID
+		if created.Data.ID == "" {
+			return nil, errors.New("opencode: session create returned no session id")
+		}
+		sessionID = created.Data.ID
 	}
 
 	adapter := &OpenCodeSessionAdapter{
@@ -234,39 +280,53 @@ func isMutatingSpecialist(agentID string) bool {
 	return true
 }
 
+// buildPermissionRules translates A4C's governance intent into an OpenCode v2
+// permission ruleset (action/resource/effect). Rules are last-match-wins, so
+// the catch-all comes first and specific rules follow. The session-scoped
+// ruleset is the v2 enforcement mechanism for review isolation — v2 rejects
+// unknown keys on session creation and has no per-message tools override.
+//
+// A headless session can never answer an "ask" approval (it would deadlock
+// the turn waiting for a human who is not attached), so every rule resolves
+// to allow or deny: the catch-all guarantees unlisted actions (MCP tools, new
+// host actions) never fall through to ask.
 func (p *OpenCodeProvider) buildPermissionRules(config AgentConfig) []map[string]string {
 	if !isMutatingSpecialist(config.AgentID) {
-		// Non-mutating roles (lead, reviewer): strictly read-only session
+		// Non-mutating roles (lead, reviewer): strictly read-only session.
 		return []map[string]string{
-			{"permission": "bash", "pattern": "*", "action": "deny"},
-			{"permission": "task", "pattern": "*", "action": "deny"},
-			{"permission": "write", "pattern": "*", "action": "deny"},
-			{"permission": "edit", "pattern": "*", "action": "deny"},
-			{"permission": "patch", "pattern": "*", "action": "deny"},
-			{"permission": "webfetch", "pattern": "*", "action": "deny"},
-			{"permission": "websearch", "pattern": "*", "action": "deny"},
-			{"permission": "question", "pattern": "*", "action": "deny"},
-			{"permission": "skill", "pattern": "*", "action": "deny"},
-			{"permission": "read", "pattern": "*", "action": "allow"},
-			{"permission": "glob", "pattern": "*", "action": "allow"},
-			{"permission": "grep", "pattern": "*", "action": "allow"},
+			{"action": "*", "resource": "*", "effect": "deny"},
+			{"action": "read", "resource": "*", "effect": "allow"},
+			{"action": "glob", "resource": "*", "effect": "allow"},
+			{"action": "grep", "resource": "*", "effect": "allow"},
+			{"action": "read", "resource": "*.env", "effect": "deny"},
+			{"action": "read", "resource": "*.env.*", "effect": "deny"},
+			{"action": "shell", "resource": "*", "effect": "deny"},
+			{"action": "subagent", "resource": "*", "effect": "deny"},
+			{"action": "edit", "resource": "*", "effect": "deny"},
+			{"action": "webfetch", "resource": "*", "effect": "deny"},
+			{"action": "websearch", "resource": "*", "effect": "deny"},
+			{"action": "question", "resource": "*", "effect": "deny"},
+			{"action": "skill", "resource": "*", "effect": "deny"},
 		}
 	}
 
-	// Specialists and implementers: allow native tools inside isolated worktree
+	// Specialists and implementers: allow native tools inside the isolated
+	// worktree. Sensitive env-file reads stay denied (last match wins, so the
+	// read catch-all precedes the env denies).
 	return []map[string]string{
-		{"permission": "bash", "pattern": "*", "action": "allow"},
-		{"permission": "task", "pattern": "*", "action": "deny"},
-		{"permission": "write", "pattern": "*", "action": "allow"},
-		{"permission": "edit", "pattern": "*", "action": "allow"},
-		{"permission": "patch", "pattern": "*", "action": "allow"},
-		{"permission": "webfetch", "pattern": "*", "action": "deny"},
-		{"permission": "websearch", "pattern": "*", "action": "deny"},
-		{"permission": "question", "pattern": "*", "action": "deny"},
-		{"permission": "skill", "pattern": "*", "action": "deny"},
-		{"permission": "read", "pattern": "*", "action": "allow"},
-		{"permission": "glob", "pattern": "*", "action": "allow"},
-		{"permission": "grep", "pattern": "*", "action": "allow"},
+		{"action": "*", "resource": "*", "effect": "allow"},
+		{"action": "subagent", "resource": "*", "effect": "deny"},
+		{"action": "webfetch", "resource": "*", "effect": "deny"},
+		{"action": "websearch", "resource": "*", "effect": "deny"},
+		{"action": "question", "resource": "*", "effect": "deny"},
+		{"action": "skill", "resource": "*", "effect": "deny"},
+		{"action": "edit", "resource": "*", "effect": "allow"},
+		{"action": "shell", "resource": "*", "effect": "allow"},
+		{"action": "read", "resource": "*", "effect": "allow"},
+		{"action": "glob", "resource": "*", "effect": "allow"},
+		{"action": "grep", "resource": "*", "effect": "allow"},
+		{"action": "read", "resource": "*.env", "effect": "deny"},
+		{"action": "read", "resource": "*.env.*", "effect": "deny"},
 	}
 }
 
@@ -328,10 +388,11 @@ func (s *OpenCodeSessionAdapter) Cancel() error {
 
 	reqCtx, cancelReq := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelReq()
-	req, err := http.NewRequestWithContext(reqCtx, "POST", fmt.Sprintf("%s/session/%s/abort", endpoint, sessionID), nil)
+	req, err := http.NewRequestWithContext(reqCtx, "POST", fmt.Sprintf("%s/api/session/%s/interrupt", endpoint, sessionID), nil)
 	if err != nil {
 		return err
 	}
+	setBasicAuth(req, s.provider.password)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -374,64 +435,28 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 
 	sessionID := s.sessionID
 	endpoint := s.provider.endpoint
-	providerID := s.providerID
 	modelID := s.modelID
 	s.mu.Unlock()
 
 	isReviewer := strings.EqualFold(s.config.AgentID, "reviewer") ||
 		strings.EqualFold(s.config.AgentID, "charlie") ||
 		strings.Contains(strings.ToLower(s.config.AgentID), "review")
-	mutating := isMutatingSpecialist(s.config.AgentID)
 
-	// Specialists & coders use native editing and bash tools directly inside the isolated worktree.
-	// Non-mutating roles (lead, reviewer) are strictly read-only.
-	toolsMap := map[string]bool{
-		"bash":      mutating,
-		"task":      false,
-		"write":     mutating,
-		"edit":      mutating,
-		"patch":     mutating,
-		"webfetch":  false,
-		"websearch": false,
-		"question":  false,
-		"skill":     false,
-		"read":      true,
-		"glob":      true,
-		"grep":      true,
-	}
-
+	// v2 sends a text-only prompt; tool access, model, and workspace are all
+	// session-scoped (set at session creation). The charter, if any, is folded
+	// into the prompt text because v2 prompts have no per-message system field.
 	promptText := prompt
+	if s.config.Charter != "" {
+		promptText = s.config.Charter + "\n\n" + promptText
+	}
 	if isReviewer {
 		promptText += "\n\n[INSTRUCTION]: Inspect the changes strictly read-only. If approving, include [REVIEW_APPROVED] in your response. If you find a concrete implementation defect, include [REVIEW_REJECTED: reason]. If the implementation looks correct but you cannot verify because evidence or capabilities are missing, include [REVIEW_BLOCKED: reason] -- this is NOT a rejection and will not trigger code changes."
 	} else if strings.EqualFold(s.config.AgentID, "lead") || strings.EqualFold(s.config.AgentID, "alice") {
 		promptText += "\n\n[INSTRUCTION]: Delegate tasks using a JSON block: ```json\n{\"proposals\": [{\"proposal_id\": \"...\", \"proposed_agent_id\": \"coder\", \"objective\": \"...\", \"budget_tokens\": 30000}]}\n```\nPropose budgets that cover full expected context overhead; the runtime raises proposals below the viable minimum and rejects proposals the parent cannot afford."
 	}
 
-	// A4C Knowledge: this host's MCP transport cannot bind a tool call to an
-	// activity by itself, so the coordinator-issued execution-context token is
-	// injected into the session and the model relays it as context_token. This
-	// is weaker than Copilot's per-session MCP env binding and is documented as
-	// such; the HMAC still authenticates the token and a completed activity's
-	// token fails its StatusClaimed check.
-	if s.config.KnowledgeToken != "" {
-		promptText += "\n\n[KNOWLEDGE]: The A4C Knowledge MCP server exposes knowledge_record and knowledge_query. Record significant engineering understanding (hypothesis, finding, decision, experiment result) via knowledge_record, passing this execution-context token as context_token: " + s.config.KnowledgeToken + "\nRetrieve prior knowledge via knowledge_query. Do not record routine implementation steps."
-	}
-
 	reqPayload := map[string]any{
-		"tools": toolsMap,
-		"model": map[string]string{
-			"providerID": providerID,
-			"modelID":    modelID,
-		},
-		"parts": []map[string]string{
-			{
-				"type": "text",
-				"text": promptText,
-			},
-		},
-	}
-	if s.config.Charter != "" {
-		reqPayload["system"] = s.config.Charter
+		"text": promptText,
 	}
 
 	payloadBytes, err := json.Marshal(reqPayload)
@@ -439,10 +464,10 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 		return nil, err
 	}
 
-	// Execute the turn via OpenCode's asynchronous lifecycle (prompt_async +
-	// /wait polling + message fetch). This separates the transport timeout
-	// from the overall activity deadline so a healthy long-running build is
-	// not killed by an HTTP timeout, while still bounding total duration.
+	// Execute the turn via OpenCode's v2 lifecycle (prompt submit + /wait
+	// polling + message fetch). This separates the transport timeout from the
+	// overall activity deadline so a healthy long-running build is not killed
+	// by an HTTP timeout, while still bounding total duration.
 	tStart := time.Now()
 	msgResp, turnErr := s.sendTurn(ctx, sessionID, endpoint, payloadBytes, modelID)
 	waitDur := time.Since(tStart)
@@ -455,41 +480,23 @@ func (s *OpenCodeSessionAdapter) Send(ctx context.Context, prompt string) (*Agen
 		return nil, turnErr
 	}
 
-	// Extract text content from parts
-	var sb strings.Builder
-	for _, part := range msgResp.Parts {
-		if part.Type == "text" && part.Text != "" {
-			sb.WriteString(part.Text)
-		}
-	}
-	content := sb.String()
+	// Extract text content from the assistant message's content items.
+	content := msgResp.extractContent()
 
 	s.mu.Lock()
-	in := msgResp.Info.Tokens.Input
-	out := msgResp.Info.Tokens.Output
-	reasoning := msgResp.Info.Tokens.Reasoning
-	cached := msgResp.Info.Tokens.Cache.Read
-	totalTok := msgResp.Info.Tokens.Total
-
-	// Fallback to parts-level tokens if info.tokens was empty
-	if totalTok == 0 && in == 0 && out == 0 {
-		for _, p := range msgResp.Parts {
-			in += p.Tokens.Input
-			out += p.Tokens.Output
-			reasoning += p.Tokens.Reasoning
-			totalTok += p.Tokens.Total
-		}
-	}
-	if totalTok == 0 && (in > 0 || out > 0) {
-		totalTok = in + out
-	}
+	in := msgResp.Tokens.Input
+	out := msgResp.Tokens.Output
+	reasoning := msgResp.Tokens.Reasoning
+	cached := msgResp.Tokens.Cache.Read
+	// v2 reports no aggregate token total; the turn total is input + output.
+	totalTok := in + out
 
 	s.usage.PromptTokens += in
 	s.usage.CompletionTokens += out
 	s.usage.TotalTokens += totalTok
 	s.usage.ReasoningTokens += reasoning
 	s.usage.CachedTokens += cached
-	s.usage.ReportedCostUSD += msgResp.Info.Cost
+	s.usage.ReportedCostUSD += msgResp.Cost
 
 	total := s.usage.TotalTokens
 	alloc := s.config.Budget.Allocated

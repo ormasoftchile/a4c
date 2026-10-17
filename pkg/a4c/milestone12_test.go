@@ -17,16 +17,16 @@ import (
 	spike "github.com/ormasoftchile/a4c/pkg/a4c"
 )
 
-// mockOpenCodeServer creates an httptest.Server simulating OpenCode REST API.
+// mockOpenCodeServer creates an httptest.Server simulating the OpenCode v2 REST API.
 type mockOpenCodeServer struct {
-	server             *httptest.Server
-	mu                 sync.Mutex
-	createdSessions    []map[string]any
-	receivedMessages   []map[string]any
-	abortedSessions    []string
-	customMessageResp  map[string]any
-	customStatus       int
-	healthStatus       int
+	server              *httptest.Server
+	mu                  sync.Mutex
+	createdSessions     []map[string]any
+	receivedMessages    []map[string]any
+	interruptedSessions []string
+	customMessageResp   map[string]any
+	customStatus        int
+	healthStatus        int
 }
 
 func newMockOpenCodeServer() *mockOpenCodeServer {
@@ -36,8 +36,8 @@ func newMockOpenCodeServer() *mockOpenCodeServer {
 
 	mux := http.NewServeMux()
 
-	// Health check
-	mux.HandleFunc("/global/health", func(w http.ResponseWriter, r *http.Request) {
+	// Server info & health probe (v2: GET /api/info)
+	mux.HandleFunc("/api/info", func(w http.ResponseWriter, r *http.Request) {
 		mock.mu.Lock()
 		defer mock.mu.Unlock()
 		if mock.healthStatus != http.StatusOK {
@@ -46,13 +46,25 @@ func newMockOpenCodeServer() *mockOpenCodeServer {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"healthy": true,
-			"version": "1.18.35",
+			"version": "2.0.29",
+			"pid":     1,
 		})
 	})
 
-	// Session create
-	mux.HandleFunc("/session", func(w http.ResponseWriter, r *http.Request) {
+	// Project probe (v2: GET /api/project)
+	mux.HandleFunc("/api/project", func(w http.ResponseWriter, r *http.Request) {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		if mock.healthStatus != http.StatusOK {
+			w.WriteHeader(mock.healthStatus)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "prj-mock"})
+	})
+
+	// Session create (v2: POST /api/session)
+	mux.HandleFunc("/api/session", func(w http.ResponseWriter, r *http.Request) {
 		mock.mu.Lock()
 		defer mock.mu.Unlock()
 		if mock.customStatus != 0 && mock.customStatus != http.StatusOK {
@@ -66,25 +78,26 @@ func newMockOpenCodeServer() *mockOpenCodeServer {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":    fmt.Sprintf("ses-mock-%d", len(mock.createdSessions)),
-			"title": body["title"],
+			"data": map[string]any{
+				"id":    fmt.Sprintf("ses-mock-%d", len(mock.createdSessions)),
+				"title": body["title"],
+			},
 		})
 	})
 
-	// Session message & abort
-	mux.HandleFunc("/session/", func(w http.ResponseWriter, r *http.Request) {
+	// Per-session endpoints (v2: prompt, message, interrupt)
+	mux.HandleFunc("/api/session/", func(w http.ResponseWriter, r *http.Request) {
 		mock.mu.Lock()
 		defer mock.mu.Unlock()
 
-		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/session/"), "/")
-		if len(parts) >= 2 && parts[1] == "abort" {
-			mock.abortedSessions = append(mock.abortedSessions, parts[0])
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success": true}`))
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/session/"), "/")
+		if len(parts) >= 2 && parts[1] == "interrupt" {
+			mock.interruptedSessions = append(mock.interruptedSessions, parts[0])
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 
-		if len(parts) >= 2 && parts[1] == "message" {
+		if len(parts) >= 2 && parts[1] == "prompt" {
 			if mock.customStatus != 0 && mock.customStatus != http.StatusOK {
 				w.WriteHeader(mock.customStatus)
 				_, _ = w.Write([]byte(fmt.Sprintf(`{"error": "status %d"}`, mock.customStatus)))
@@ -95,35 +108,36 @@ func newMockOpenCodeServer() *mockOpenCodeServer {
 			mock.receivedMessages = append(mock.receivedMessages, body)
 
 			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"id": fmt.Sprintf("msg-user-%d", len(mock.receivedMessages))},
+			})
+			return
+		}
+
+		if len(parts) >= 2 && parts[1] == "message" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
 			if mock.customMessageResp != nil {
-				_ = json.NewEncoder(w).Encode(mock.customMessageResp)
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{mock.customMessageResp}})
 				return
 			}
 
-			// Default response
+			// Default assistant response in v2 message shape.
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"info": map[string]any{
-					"id":        "msg-mock-1",
-					"sessionID": parts[0],
-					"role":      "assistant",
+				"data": []map[string]any{{
+					"id":   "msg-mock-1",
+					"type": "assistant",
+					"cost": 0.000125,
 					"tokens": map[string]any{
 						"input":     150,
 						"output":    75,
 						"reasoning": 25,
-						"cache": map[string]any{
-							"read":  50,
-							"write": 0,
-						},
-						"total": 300,
+						"cache":     map[string]any{"read": 50, "write": 0},
 					},
-					"cost": 0.000125,
-				},
-				"parts": []map[string]any{
-					{
-						"type": "text",
-						"text": "Implementation completed successfully.",
+					"finish": "stop",
+					"content": []map[string]any{
+						{"type": "text", "text": "Implementation completed successfully."},
 					},
-				},
+				}},
 			})
 			return
 		}
@@ -238,32 +252,32 @@ func TestMilestone12_04_SessionCreation_ToolContainmentRules(t *testing.T) {
 	}
 
 	created := mock.createdSessions[0]
-	perms, ok := created["permission"].([]any)
+	perms, ok := created["permissions"].([]any)
 	if !ok || len(perms) == 0 {
-		t.Fatalf("expected non-empty permission rules in session, got: %v", created["permission"])
+		t.Fatalf("expected non-empty permission ruleset in session, got: %v", created["permissions"])
 	}
 
-	// Verify that reviewer has bash and task explicitly denied
-	bashDenied := false
-	taskDenied := false
+	// Verify that reviewer has shell (bash) and subagent (task) explicitly denied
+	shellDenied := false
+	subagentDenied := false
 	for _, p := range perms {
 		rule, ok := p.(map[string]any)
 		if !ok {
 			continue
 		}
-		if rule["permission"] == "bash" && rule["action"] == "deny" {
-			bashDenied = true
+		if rule["action"] == "shell" && rule["effect"] == "deny" {
+			shellDenied = true
 		}
-		if rule["permission"] == "task" && rule["action"] == "deny" {
-			taskDenied = true
+		if rule["action"] == "subagent" && rule["effect"] == "deny" {
+			subagentDenied = true
 		}
 	}
 
-	if !bashDenied {
-		t.Errorf("security violation: 'bash' permission rule was NOT denied for reviewer")
+	if !shellDenied {
+		t.Errorf("security violation: 'shell' permission rule was NOT denied for reviewer")
 	}
-	if !taskDenied {
-		t.Errorf("security violation: 'task' permission rule was NOT denied")
+	if !subagentDenied {
+		t.Errorf("security violation: 'subagent' permission rule was NOT denied")
 	}
 }
 
@@ -296,21 +310,35 @@ func TestMilestone12_05_PromptExecution_And_UsageParsing(t *testing.T) {
 		t.Fatalf("unexpected content: %s", msg.Content)
 	}
 
-	// Verify message level tools containment
+	// Verify session-scoped tool containment: v2 enforces tool access via the
+	// session permission ruleset (there is no per-message tools override).
 	mock.mu.Lock()
 	if len(mock.receivedMessages) != 1 {
 		t.Fatalf("expected 1 received message, got %d", len(mock.receivedMessages))
 	}
-	received := mock.receivedMessages[0]
-	toolsMap, ok := received["tools"].(map[string]any)
+	if len(mock.createdSessions) != 1 {
+		t.Fatalf("expected 1 created session, got %d", len(mock.createdSessions))
+	}
+	perms, ok := mock.createdSessions[0]["permissions"].([]any)
 	if !ok {
-		t.Fatalf("expected tools toggle map in message, got %v", received["tools"])
+		t.Fatalf("expected permissions ruleset in session create body")
 	}
-	if toolsMap["task"] != false {
-		t.Errorf("message-level containment failed: 'task' not disabled in tools map")
+	subagentDenied := false
+	shellAllowed := false
+	for _, p := range perms {
+		rule, _ := p.(map[string]any)
+		if rule["action"] == "subagent" && rule["effect"] == "deny" {
+			subagentDenied = true
+		}
+		if rule["action"] == "shell" && rule["effect"] == "allow" {
+			shellAllowed = true
+		}
 	}
-	if toolsMap["bash"] != true {
-		t.Errorf("expected native bash to be enabled for coder")
+	if !subagentDenied {
+		t.Errorf("containment failed: 'subagent' not denied for coder")
+	}
+	if !shellAllowed {
+		t.Errorf("expected native shell to be enabled for coder")
 	}
 	mock.mu.Unlock()
 
@@ -328,8 +356,8 @@ func TestMilestone12_05_PromptExecution_And_UsageParsing(t *testing.T) {
 	if usage.CachedTokens != 50 {
 		t.Errorf("expected 50 cached tokens, got %d", usage.CachedTokens)
 	}
-	if usage.TotalTokens != 300 {
-		t.Errorf("expected 300 total tokens, got %d", usage.TotalTokens)
+	if usage.TotalTokens != 225 {
+		t.Errorf("expected 225 total tokens (v2: input+output), got %d", usage.TotalTokens)
 	}
 	if usage.ReportedCostUSD < 0.00012 {
 		t.Errorf("expected cost reported, got %f", usage.ReportedCostUSD)
@@ -363,18 +391,21 @@ func TestMilestone12_06_ReviewerRole_HasNoWritePermissions(t *testing.T) {
 
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
-	received := mock.receivedMessages[0]
-	toolsMap := received["tools"].(map[string]any)
+	perms, ok := mock.createdSessions[0]["permissions"].([]any)
+	if !ok {
+		t.Fatalf("expected permissions ruleset in session create body")
+	}
 
-	// Reviewer must have write, edit, patch disabled
-	if toolsMap["write"] != false {
-		t.Errorf("reviewer must have write=false")
+	// Reviewer must have the edit action (v2's write/edit/patch equivalent) denied
+	editDenied := false
+	for _, p := range perms {
+		rule, _ := p.(map[string]any)
+		if rule["action"] == "edit" && rule["effect"] == "deny" {
+			editDenied = true
+		}
 	}
-	if toolsMap["edit"] != false {
-		t.Errorf("reviewer must have edit=false")
-	}
-	if toolsMap["patch"] != false {
-		t.Errorf("reviewer must have patch=false")
+	if !editDenied {
+		t.Errorf("reviewer must have edit denied at session scope")
 	}
 }
 
@@ -459,11 +490,11 @@ func TestMilestone12_09_SessionAbortCancel(t *testing.T) {
 
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
-	if len(mock.abortedSessions) != 1 {
-		t.Fatalf("expected 1 aborted session call, got %d", len(mock.abortedSessions))
+	if len(mock.interruptedSessions) != 1 {
+		t.Fatalf("expected 1 interrupted session call, got %d", len(mock.interruptedSessions))
 	}
-	if mock.abortedSessions[0] != sessionID {
-		t.Fatalf("expected aborted session %s, got %s", sessionID, mock.abortedSessions[0])
+	if mock.interruptedSessions[0] != sessionID {
+		t.Fatalf("expected interrupted session %s, got %s", sessionID, mock.interruptedSessions[0])
 	}
 }
 
@@ -625,12 +656,12 @@ func TestMilestone12_14_UsageSettlementToActivityResult(t *testing.T) {
 		t.Fatalf("Step: %v", err)
 	}
 
-	// Total tokens from mock = 300
-	if res.Consumed.Consumed != 300 {
-		t.Fatalf("expected Consumed.Consumed = 300, got %.0f", res.Consumed.Consumed)
+	// Total tokens from mock = input 150 + output 75 (v2 reports no total)
+	if res.Consumed.Consumed != 225 {
+		t.Fatalf("expected Consumed.Consumed = 225, got %.0f", res.Consumed.Consumed)
 	}
-	if res.Metrics.TotalTokens != 300 {
-		t.Fatalf("expected Metrics.TotalTokens = 300, got %d", res.Metrics.TotalTokens)
+	if res.Metrics.TotalTokens != 225 {
+		t.Fatalf("expected Metrics.TotalTokens = 225, got %d", res.Metrics.TotalTokens)
 	}
 	if res.Metrics.ReasoningTokens != 25 {
 		t.Fatalf("expected ReasoningTokens = 25, got %d", res.Metrics.ReasoningTokens)
@@ -709,19 +740,36 @@ func TestMilestone12_16_ScopedTools_PermittedReadOnly(t *testing.T) {
 	if len(mock.receivedMessages) != 2 {
 		t.Fatalf("expected 2 received messages, got %d", len(mock.receivedMessages))
 	}
-	for i, msg := range mock.receivedMessages {
-		tools := msg["tools"].(map[string]any)
-		if tools["read"] != true {
-			t.Errorf("msg %d: expected read=true", i)
+	for i, created := range mock.createdSessions {
+		perms, ok := created["permissions"].([]any)
+		if !ok {
+			t.Fatalf("session %d: expected permissions ruleset in session create body", i)
 		}
-		if tools["glob"] != true {
-			t.Errorf("msg %d: expected glob=true", i)
+		readAllow, globAllow, grepAllow, editDenied := false, false, false, false
+		for _, p := range perms {
+			rule, _ := p.(map[string]any)
+			switch {
+			case rule["action"] == "read" && rule["effect"] == "allow":
+				readAllow = true
+			case rule["action"] == "glob" && rule["effect"] == "allow":
+				globAllow = true
+			case rule["action"] == "grep" && rule["effect"] == "allow":
+				grepAllow = true
+			case rule["action"] == "edit" && rule["effect"] == "deny":
+				editDenied = true
+			}
 		}
-		if tools["grep"] != true {
-			t.Errorf("msg %d: expected grep=true", i)
+		if !readAllow {
+			t.Errorf("session %d: expected read allowed", i)
 		}
-		if tools["write"] != false {
-			t.Errorf("msg %d: expected write=false", i)
+		if !globAllow {
+			t.Errorf("session %d: expected glob allowed", i)
+		}
+		if !grepAllow {
+			t.Errorf("session %d: expected grep allowed", i)
+		}
+		if !editDenied {
+			t.Errorf("session %d: expected edit denied", i)
 		}
 	}
 }
@@ -748,16 +796,25 @@ func TestMilestone12_17_ScopedTools_CoderGovernedProposalMode(t *testing.T) {
 
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
-	msg := mock.receivedMessages[0]
-	tools := msg["tools"].(map[string]any)
-	if tools["write"] != true {
-		t.Errorf("expected write=true for coder under native worktree execution")
+	perms, ok := mock.createdSessions[0]["permissions"].([]any)
+	if !ok {
+		t.Fatalf("expected permissions ruleset in session create body")
 	}
-	if tools["edit"] != true {
-		t.Errorf("expected edit=true for coder under native worktree execution")
+	editAllowed, shellAllowed := false, false
+	for _, p := range perms {
+		rule, _ := p.(map[string]any)
+		if rule["action"] == "edit" && rule["effect"] == "allow" {
+			editAllowed = true
+		}
+		if rule["action"] == "shell" && rule["effect"] == "allow" {
+			shellAllowed = true
+		}
 	}
-	if tools["bash"] != true {
-		t.Errorf("expected bash=true for coder under native worktree execution")
+	if !editAllowed {
+		t.Errorf("expected edit allowed for coder under native worktree execution")
+	}
+	if !shellAllowed {
+		t.Errorf("expected shell allowed for coder under native worktree execution")
 	}
 }
 
@@ -878,15 +935,17 @@ func TestMilestone12_20_EndToEndTeamDelegationWorkflow(t *testing.T) {
 
 	// Lead must propose a child; use a custom mock response for this test only.
 	mock.customMessageResp = map[string]any{
-		"info": map[string]any{
-			"model": "opencode-go/mimo-v2.5",
-			"usage": map[string]any{
-				"input":  1200, "output": 400, "reasoning": 0,
-				"cache":  map[string]any{"read": 0, "write": 0},
-				"cost":   0.000125,
-			},
+		"id":   "msg-lead-1",
+		"type": "assistant",
+		"cost": 0.000125,
+		"tokens": map[string]any{
+			"input":     1200,
+			"output":    400,
+			"reasoning": 0,
+			"cache":     map[string]any{"read": 0, "write": 0},
 		},
-		"parts": []map[string]any{
+		"finish": "stop",
+		"content": []map[string]any{
 			{
 				"type": "text",
 				"text": "Delegated implementation.\n```json\n{\"proposals\":[{\"proposed_agent_id\":\"coder\",\"objective\":\"Implement calculator\",\"requested_budget\":{\"allocated\":20000}}]}\n```",

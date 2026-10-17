@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/ormasoftchile/a4c/pkg/a4c/knowledge"
 )
 
 type LocalEffectReconciler struct {
@@ -86,7 +84,6 @@ type TeamCoordinator struct {
 	sessions                  map[string]AgentSession
 	Handoff                   *HandoffBuilder
 	Capabilities              *CapabilityRegistry
-	knowledge                 *knowledge.Service
 }
 
 func NewTeamCoordinator(
@@ -243,14 +240,6 @@ func (c *TeamCoordinator) SetWorktreeManager(mgr *WorktreeManager) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.WorktreeMgr = mgr
-}
-
-// SetKnowledge wires the optional A4C Knowledge service so the coordinator can
-// issue per-activity execution-context tokens for host sessions.
-func (c *TeamCoordinator) SetKnowledge(ks *knowledge.Service) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.knowledge = ks
 }
 
 // AcquireWorkspaceLock explicitly acquires the exclusive OS kernel lock on .a4c/workspace.lock.
@@ -715,30 +704,10 @@ func (c *TeamCoordinator) Step(ctx context.Context) (*ActivityResult, error) {
 		defer cleanupReviewWorkspace()
 	}
 
-	// Issue a per-activity execution-context token when A4C Knowledge is
-	// enabled, so host knowledge calls are attributed to THIS activity. A
-	// delayed call from a completed activity fails its StatusClaimed check.
-	knowledgeToken := ""
-	knowledgeDir := ""
-	if c.knowledge != nil {
-		knowledgeDir = c.WorkspaceDir // main repo owns the shared knowledge DB
-		if tok, terr := c.knowledge.IssueToken(knowledge.ExecContext{
-			ProjectID:  c.knowledge.Project(),
-			TaskID:     rootID,
-			ActivityID: req.ID,
-			Role:       ident.ID,
-			Host:       req.Runtime,
-		}); terr == nil {
-			knowledgeToken = tok
-		}
-	}
-
 	config := AgentConfig{
 		AgentID:          ident.ID,
 		Charter:          ident.Charter,
 		WorkspaceDir:     sessionWorkspace,
-		KnowledgeToken:   knowledgeToken,
-		KnowledgeDir:     knowledgeDir,
 		Budget:           req.Budget,
 		Governor:         c.Governor,
 		IntentJournal:    c.Journal,
@@ -2283,7 +2252,7 @@ func (c *TeamCoordinator) isolatedWorktree(activeWorkspace string) bool {
 
 // persistEvidenceLog writes a verification/test log to the MAIN workspace's
 // durable evidence store (not the disposable worktree), so the artifact survives
-// worktree removal and can be referenced by a knowledge EvidenceRef.locator.
+// worktree removal and can be referenced by durable task records.
 // It returns an absolute path, or "" on failure.
 func (c *TeamCoordinator) persistEvidenceLog(evidenceID, output string) string {
 	root := c.WorkspaceDir

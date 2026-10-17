@@ -239,7 +239,6 @@ func (m *WorktreeManager) AcquireWorktree(ctx context.Context, taskID, ownerAgen
 func (m *WorktreeManager) copyTrustedConfig(worktreeDir string) {
 	trusted := []string{
 		filepath.Join(".a4c", "verify.json"),
-		filepath.Join(".a4c", "knowledge.json"),
 	}
 	for _, rel := range trusted {
 		src := filepath.Join(m.rootDir, rel)

@@ -47,10 +47,16 @@ Copilot loads `.github/agents/a4c.agent.md`. The installer registers the `a4c mc
 From the same project directory:
 
 ```bash
-opencode --agent a4c
+opencode
 ```
 
-OpenCode loads `.opencode/agents/a4c.md` as a **primary agent**, with the local A4C MCP server configured in `opencode.json`. Chat with A4C normally; you do not need to start an OpenCode headless server for this interactive workflow.
+The installer sets `default_agent` to `a4c` in `opencode.json`, so OpenCode loads `.opencode/agents/a4c.md` as a **primary agent** and starts new sessions as A4C, with the local A4C MCP server configured in the same file. Chat with A4C normally; you do not need to start an OpenCode headless server for this interactive workflow.
+
+To pick the agent manually instead — or to switch back in an existing session — press `Shift+Tab` to cycle agents, press `Ctrl+X` then `A`, or run `/agents` and select `a4c`. For one-shot scripted runs, pass the agent to the `run` subcommand:
+
+```bash
+opencode run --agent a4c "your task description"
+```
 
 ### Antigravity CLI or IDE
 
@@ -102,7 +108,54 @@ The `.a4c/` directory contains local task state and evidence; it is not committe
 
 ---
 
-## 2. Fundamental Architecture
+## 2. Engineering Knowledge
+
+A4C keeps a per-repository engineering knowledge base (KB) of plain Markdown files under your home directory:
+
+```text
+~/.a4c/<repo-name>/knowledge/
+├── INDEX.md          # curated map (optional, hand-maintained)
+├── findings/         # confirmed discoveries
+├── experiments/      # trials, including negative results
+├── decisions/        # architectural decisions and rationale
+├── reviews/          # accumulated-knowledge assessments
+├── iterations/       # iteration transitions within the repo
+└── evidence/         # small copied artifacts (test logs, measurements)
+```
+
+No setup is required — the path is derived from the repository name (resolved correctly from linked worktrees). `a4c doctor` reports the resolved location. The KB lives entirely outside the source repository, so worktree cleanup, task rollback, and integration never touch it.
+
+### When agents record knowledge
+
+During a task, the agent consults the KB when prior learning helps, and records only meaningful discoveries — failed approaches, limitations, consequential findings — as new documents. Routine work records no documents. At `team_complete_activity`, the agent reports a knowledge disposition that A4C verifies against the filesystem:
+
+- `{"significant": false, "reason": "No significant reusable knowledge"}` — normal for small changes; nothing is written.
+- `{"significant": true, "paths": ["findings/…​.md"]}` — A4C confirms the files exist inside the KB.
+- `{"significant": true, "file_name": "…", "content": "…"}` — inline fallback when the host cannot write outside its workspace; A4C writes the document atomically and refuses to overwrite existing files.
+
+Published documents are never overwritten by A4C-managed writes; corrections create new documents that reference the earlier ones. The task-level assessment is recorded after review (the lead's synthesis may amend only the knowledge field of an already-completed root activity). Missing or pending assessments surface as warnings at `a4c task inspect` and `a4c task accept` — they never block acceptance of the engineering work.
+
+### Reviewing and reusing knowledge
+
+Inside any host, ask the A4C agent:
+
+> Review what we've learned about this implementation. What has been established, what failed, what remains uncertain, and which architectural assumptions deserve reconsideration?
+
+The agent writes a reviewable assessment under `knowledge/reviews/`. To weigh continuing vs. restarting:
+
+> Evaluate whether we should continue, repair, or start a new implementation based on what we've learned.
+
+To carry selected learning into a new repository's independent KB (the new repo gets its own `~/.a4c/<new-repo>/knowledge/`):
+
+> Review what we learned in `<old-repo>` and propose what should be carried into this new implementation.
+
+The agent proposes a transfer; after your approval it copies selected documents with origin notes. Nothing is shared or linked afterwards. OneDrive or another custom root can be considered later; today everything is local.
+
+Users of earlier A4C releases with an existing `.a4c/knowledge.db` can migrate with `a4c knowledge export` (the legacy database is read-only and left untouched).
+
+---
+
+## 3. Fundamental Architecture
 
 A4C establishes strict ownership boundaries between the coding host and the engineering organization:
 
@@ -130,7 +183,7 @@ partial completion and retains the in-memory record for recovery.
 
 ---
 
-## 3. Execution Strategies
+## 4. Execution Strategies
 
 A4C supports three distinct execution strategies tailored to task complexity:
 
@@ -142,23 +195,25 @@ A4C supports three distinct execution strategies tailored to task complexity:
 
 ---
 
-## 4. Optional Headless Host Adapters
+## 5. Optional Headless Host Adapters
 
 A4C also supports CLI-driven automation across the same hosts. The matrix below describes those **headless adapters**, not the interactive agent entry points above:
 
 | Capability | GitHub Copilot CLI (`copilot`) | OpenCode (`opencode`) | Antigravity CLI (`antigravity` / `agy`) |
 | :--- | :--- | :--- | :--- |
-| **Execution Mode** | CLI automation SDK / stdio | Headless HTTP Server (`4096`) | Print non-interactive (`agy -p`) |
-| **Worktree Binding** | ✅ Native worktree binding | ✅ Directory scoping | ✅ Working directory flag |
-| **Context Injection** | ✅ Charter & Handoff prompt | ✅ Session prompt & system rules | ✅ Handoff prompt injection |
+| **Execution Mode** | CLI automation SDK / stdio | API server (`opencode serve`) | Print non-interactive (`agy -p`) |
+| **Worktree Binding** | ✅ Native worktree binding | ✅ Session `location` scoping | ✅ Working directory flag |
+| **Context Injection** | ✅ Charter & Handoff prompt | ✅ Charter folded into session prompt | ✅ Handoff prompt injection |
 | **Telemetry & Tokens**| ✅ Prompt, completion, total | ✅ Input, output, reasoning | ✅ Input, output, thinking, cache |
-| **Review Isolation** | ✅ SDK tool definition filters | ✅ Server permission table (`deny`) | ✅ Snapshot mutation check & rollback |
+| **Review Isolation** | ✅ SDK tool definition filters | ✅ Session permission ruleset (`deny`) | ✅ Snapshot mutation check & rollback |
 | **Model Selection** | ✅ Custom model per activity | ✅ Custom provider/model per activity | ✅ Custom model per activity |
 | **Continuation** | ✅ Authoritative checkpoints | ✅ Authoritative checkpoints | ✅ Authoritative checkpoints |
 
+The OpenCode adapter speaks the v2 HTTP API and manages its HTTP Basic authentication automatically: managed servers pin a random password through `OPENCODE_SERVER_PASSWORD`, and external servers are attached with the same environment variable.
+
 ---
 
-## 5. CLI Automation & Administration
+## 6. CLI Automation & Administration
 
 The commands below are optional automation and administrative interfaces, not a prerequisite for chatting with the A4C agent. `a4c doctor` reports environment readiness, including optional host adapters that may be unavailable when you are not using them.
 
@@ -224,7 +279,7 @@ a4c task integrate task-1791671400473010000
 
 ---
 
-## 6. Verification & Regression Protection
+## 7. Verification & Regression Protection
 
 Run the hardened test suite:
 ```bash

@@ -2,6 +2,8 @@ package a4c
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +22,25 @@ var (
 	ErrOpenCodeServerFailed = errors.New("opencode: failed to start or connect to server")
 )
 
+// generateServerPassword returns a cryptographically random server password.
+func generateServerPassword() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// setBasicAuth attaches the OpenCode v2 HTTP Basic credentials (username
+// "opencode") when a password is configured. It is a no-op without one, so
+// mocks and passwordless servers keep working.
+func setBasicAuth(req *http.Request, password string) {
+	if password == "" {
+		return
+	}
+	req.SetBasicAuth("opencode", password)
+}
+
 // OpenCodeServerManager manages either an external or child-process OpenCode server.
 type OpenCodeServerManager struct {
 	mu         sync.Mutex
@@ -27,6 +48,15 @@ type OpenCodeServerManager struct {
 	isManaged  bool
 	cmd        *exec.Cmd
 	binaryPath string
+	password   string
+}
+
+// Password returns the server password used for HTTP Basic authentication
+// (username "opencode"). It is empty when the server requires no auth.
+func (m *OpenCodeServerManager) Password() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.password
 }
 
 // FindOpenCodeBinary locates the opencode CLI binary on the system.
@@ -71,7 +101,16 @@ func NewManagedOpenCodeServer(ctx context.Context, customPort int) (*OpenCodeSer
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 
+	// The v2 server always requires HTTP Basic auth (username "opencode").
+	// OPENCODE_SERVER_PASSWORD pins a known password instead of consuming the
+	// random one the server would print, so the adapter can authenticate.
+	password, err := generateServerPassword()
+	if err != nil {
+		return nil, fmt.Errorf("opencode: generate server password: %w", err)
+	}
+
 	cmd := exec.Command(binPath, "serve", "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
+	cmd.Env = append(os.Environ(), "OPENCODE_SERVER_PASSWORD="+password)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -84,6 +123,7 @@ func NewManagedOpenCodeServer(ctx context.Context, customPort int) (*OpenCodeSer
 		isManaged:  true,
 		cmd:        cmd,
 		binaryPath: binPath,
+		password:   password,
 	}
 
 	// Poll health check with timeout
@@ -108,6 +148,7 @@ func NewExternalOpenCodeServer(ctx context.Context, endpoint string) (*OpenCodeS
 	mgr := &OpenCodeServerManager{
 		endpoint:  endpoint,
 		isManaged: false,
+		password:  os.Getenv("OPENCODE_SERVER_PASSWORD"),
 	}
 
 	if err := mgr.CheckHealth(ctx); err != nil {
@@ -131,12 +172,13 @@ func (m *OpenCodeServerManager) IsManaged() bool {
 	return m.isManaged
 }
 
-// CheckHealth queries the /global/health endpoint once.
+// CheckHealth queries the /api/info endpoint once (v2 server info).
 func (m *OpenCodeServerManager) CheckHealth(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", m.endpoint+"/global/health", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", m.endpoint+"/api/info", nil)
 	if err != nil {
 		return err
 	}
+	setBasicAuth(req, m.Password())
 
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
@@ -150,19 +192,18 @@ func (m *OpenCodeServerManager) CheckHealth(ctx context.Context) error {
 	}
 
 	var res struct {
-		Healthy bool   `json:"healthy"`
 		Version string `json:"version"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return fmt.Errorf("decode health response: %w", err)
+		return fmt.Errorf("decode server info response: %w", err)
 	}
-	if !res.Healthy {
-		return errors.New("server reported unhealthy")
+	if res.Version == "" {
+		return errors.New("server info reported no version")
 	}
 	return nil
 }
 
-// WaitUntilHealthy polls /global/health until success or context cancellation.
+// WaitUntilHealthy polls /api/info until success or context cancellation.
 func (m *OpenCodeServerManager) WaitUntilHealthy(ctx context.Context) error {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()

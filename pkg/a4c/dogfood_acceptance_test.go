@@ -66,9 +66,14 @@ func ValidateTaskInspectOutput(t *testing.T, output string) error {
 // TestIndependentAcceptance_TaskInspectVerification provides an automated harness
 // to verify the dogfooding artifact created by A4C.
 func TestIndependentAcceptance_TaskInspectVerification(t *testing.T) {
-	// 1. Build latest binary
+	// 1. Build latest binary. Tests run from the package directory (pkg/a4c),
+	// so the repository root is two levels up.
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
 	cmd := exec.Command("go", "build", "-o", "bin/a4c", "./cmd/a4c")
-	cmd.Dir = "/Users/cristianormazabal/Projects/a4c"
+	cmd.Dir = repoRoot
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("failed to build a4c binary: %v\nOutput: %s", err, string(out))
@@ -76,7 +81,7 @@ func TestIndependentAcceptance_TaskInspectVerification(t *testing.T) {
 
 	// 2. Test running inspect on a seeded task
 	dir := t.TempDir()
-	initCmd := exec.Command(filepath.Join("/Users/cristianormazabal/Projects/a4c", "bin", "a4c"), "init", dir)
+	initCmd := exec.Command(filepath.Join(repoRoot, "bin", "a4c"), "init", dir)
 	if out, err := initCmd.CombinedOutput(); err != nil {
 		t.Fatalf("init failed: %v\nOutput: %s", err, string(out))
 	}
@@ -158,7 +163,7 @@ func TestIndependentAcceptance_TaskInspectVerification(t *testing.T) {
 	_, _ = mem.Promote("arch.diagnostics", "lead")
 
 	// Execute inspect command
-	inspectCmd := exec.Command(filepath.Join("/Users/cristianormazabal/Projects/a4c", "bin", "a4c"), "task", "inspect", "test-inspect-root")
+	inspectCmd := exec.Command(filepath.Join(repoRoot, "bin", "a4c"), "task", "inspect", "test-inspect-root")
 	inspectCmd.Dir = dir
 	inspectOut, inspectErr := inspectCmd.CombinedOutput()
 

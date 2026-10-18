@@ -1,6 +1,7 @@
 package a4c
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,49 @@ import (
 	"strings"
 	"time"
 )
+
+// mergeJSONFile loads a JSON object file into a map, preserving every key the
+// file already contains. An unreadable-but-existing file is an error rather
+// than something to silently overwrite: clobbering a user's configuration is
+// worse than failing loudly.
+func mergeJSONFile(path string) (map[string]any, error) {
+	cfg := map[string]any{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return nil, err
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return cfg, nil
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("%s exists but is not valid JSON, refusing to overwrite it: %w", path, err)
+	}
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+	return cfg, nil
+}
+
+// writeJSONFile writes a config map back indented with a trailing newline.
+func writeJSONFile(path string, cfg map[string]any) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0644)
+}
+
+// subMap returns the nested object at key as a map, creating an empty one when
+// absent or null, so callers can add entries without losing siblings.
+func subMap(cfg map[string]any, key string) map[string]any {
+	if nested, ok := cfg[key].(map[string]any); ok && nested != nil {
+		return nested
+	}
+	return map[string]any{}
+}
 
 // ExportCopilotAgents writes GitHub Copilot custom agent definitions and MCP configuration.
 func ExportCopilotAgents(rootDir string) error {
@@ -111,20 +155,20 @@ Your responsibility is independent, objective peer review of code changes and va
 		return err
 	}
 
-	// Write .mcp.json for Copilot CLI in repo
-	mcpConfig := map[string]any{
-		"mcpServers": map[string]any{
-			"a4c": map[string]any{
-				"command": "a4c",
-				"args":    []string{"mcp"},
-			},
-		},
-	}
-	mcpData, err := json.MarshalIndent(mcpConfig, "", "  ")
+	// Merge the a4c MCP server into the repo's .mcp.json, preserving any other
+	// servers and keys the project already declares.
+	mcpPath := filepath.Join(rootDir, ".mcp.json")
+	mcpConfig, err := mergeJSONFile(mcpPath)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(rootDir, ".mcp.json"), mcpData, 0644); err != nil {
+	servers := subMap(mcpConfig, "mcpServers")
+	servers["a4c"] = map[string]any{
+		"command": "a4c",
+		"args":    []string{"mcp"},
+	}
+	mcpConfig["mcpServers"] = servers
+	if err := writeJSONFile(mcpPath, mcpConfig); err != nil {
 		return err
 	}
 
@@ -156,7 +200,6 @@ Your responsibility is independent, objective peer review of code changes and va
 
 	return nil
 }
-
 
 // strictGovernancePreamble is prepended to strict-variant charters. It
 // redirects every mutation to the governed team_apply_patch tool, which
@@ -367,29 +410,34 @@ You are strictly non-mutating: edit, write, patch, and subagent delegation are e
 
 	cmdArgs := []string{"a4c", "mcp"}
 
-	// Write opencode.json configuring MCP and the default agent using OpenCode schema
-	opencodeConfig := map[string]any{
-		"$schema":       "https://opencode.ai/config.json",
-		"default_agent": "a4c",
-		"mcp": map[string]any{
-			"a4c": map[string]any{
-				"type":    "local",
-				"command": cmdArgs,
-				"enabled": true,
-			},
-		},
-	}
-	cfgData, err := json.MarshalIndent(opencodeConfig, "", "  ")
+	// Merge a4c into the project's opencode.json. Existing keys — other MCP
+	// servers, model, permissions, plugins, formatter — are preserved; only
+	// our own entries are set. default_agent is a user preference, so it is
+	// only claimed when the project has not chosen one.
+	cfgPath := filepath.Join(rootDir, "opencode.json")
+	opencodeConfig, err := mergeJSONFile(cfgPath)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(rootDir, "opencode.json"), cfgData, 0644); err != nil {
+	if _, ok := opencodeConfig["$schema"]; !ok {
+		opencodeConfig["$schema"] = "https://opencode.ai/config.json"
+	}
+	if _, ok := opencodeConfig["default_agent"]; !ok {
+		opencodeConfig["default_agent"] = "a4c"
+	}
+	ocServers := subMap(opencodeConfig, "mcp")
+	ocServers["a4c"] = map[string]any{
+		"type":    "local",
+		"command": cmdArgs,
+		"enabled": true,
+	}
+	opencodeConfig["mcp"] = ocServers
+	if err := writeJSONFile(cfgPath, opencodeConfig); err != nil {
 		return err
 	}
 
 	return nil
 }
-
 
 // ExportAntigravityCustomization writes Antigravity customization and skill files.
 func ExportAntigravityCustomization(rootDir string) error {

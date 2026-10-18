@@ -1182,8 +1182,8 @@ func runTask(args []string) {
 		}
 		fmt.Printf("Tasks (%d matches):\n", len(tasks))
 		for _, t := range tasks {
-			fmt.Printf("[%s] State: %-22s Agent: %-8s Tokens: %-6d Objective: %s\n",
-				t.TaskID, t.State, t.ActiveAgent, t.TotalTokens, t.Objective)
+			fmt.Printf("[%s] State: %-22s Mode: %-9s Agent: %-8s Tokens: %-6d Objective: %s\n",
+				t.TaskID, t.State, t.Strategy, t.ActiveAgent, t.TotalTokens, t.Objective)
 		}
 
 	case "history":

@@ -28,8 +28,16 @@ type OpenCodeProvider struct {
 
 // NewOpenCodeProvider creates an OpenCode provider pointing to an endpoint.
 func NewOpenCodeProvider(endpoint, model string, mgr *OpenCodeServerManager) *OpenCodeProvider {
+	// An explicit endpoint wins; otherwise discover the running shared service
+	// rather than assuming a fixed port, which on a real machine is often some
+	// other process entirely.
+	discoveredPassword := ""
 	if endpoint == "" {
-		endpoint = "http://127.0.0.1:4096"
+		if url, password, ok := DiscoverOpenCodeService(); ok {
+			endpoint, discoveredPassword = url, password
+		} else {
+			endpoint = "http://127.0.0.1:4096"
+		}
 	}
 	endpoint = strings.TrimRight(endpoint, "/")
 
@@ -37,9 +45,12 @@ func NewOpenCodeProvider(endpoint, model string, mgr *OpenCodeServerManager) *Op
 		model = "opencode-go/mimo-v2.5"
 	}
 
-	// The v2 server requires HTTP Basic auth; the managed server sets a known
-	// password, and external attachments read OPENCODE_SERVER_PASSWORD.
+	// The v2 server requires HTTP Basic auth. Precedence: a managed server pins
+	// its own password; otherwise the registration's, then the environment.
 	password := os.Getenv("OPENCODE_SERVER_PASSWORD")
+	if discoveredPassword != "" && password == "" {
+		password = discoveredPassword
+	}
 	if mgr != nil && mgr.Password() != "" {
 		password = mgr.Password()
 	}

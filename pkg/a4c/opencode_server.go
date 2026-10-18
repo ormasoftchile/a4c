@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -138,10 +139,66 @@ func NewManagedOpenCodeServer(ctx context.Context, customPort int) (*OpenCodeSer
 	return mgr, nil
 }
 
+// opencodeServiceRegistration is the record the opencode CLI writes when it
+// starts its shared background service.
+type opencodeServiceRegistration struct {
+	URL      string `json:"url"`
+	Password string `json:"password"`
+	Version  string `json:"version"`
+}
+
+// opencodeStateDirs lists the directories where the opencode CLI keeps its
+// state, most specific first.
+func opencodeStateDirs() []string {
+	var dirs []string
+	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
+		dirs = append(dirs, filepath.Join(xdg, "opencode"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".local", "state", "opencode"))
+	}
+	return dirs
+}
+
+// DiscoverOpenCodeService locates the running shared OpenCode service by
+// reading the registration the opencode CLI writes to its state directory,
+// returning its endpoint and password.
+//
+// This matters because the service binds a DYNAMIC port. Assuming a fixed one
+// does not merely fail when nothing is listening — on a real machine something
+// else often is, and you end up talking to a different server whose API
+// differs, which is far harder to diagnose than a connection error.
+func DiscoverOpenCodeService() (endpoint, password string, ok bool) {
+	for _, dir := range opencodeStateDirs() {
+		data, err := os.ReadFile(filepath.Join(dir, "service.json"))
+		if err != nil {
+			continue
+		}
+		var reg opencodeServiceRegistration
+		if err := json.Unmarshal(data, &reg); err != nil {
+			continue
+		}
+		if reg.URL == "" {
+			continue
+		}
+		return strings.TrimRight(reg.URL, "/"), reg.Password, true
+	}
+	return "", "", false
+}
+
 // NewExternalOpenCodeServer attaches to an existing OpenCode HTTP endpoint.
 func NewExternalOpenCodeServer(ctx context.Context, endpoint string) (*OpenCodeServerManager, error) {
 	if endpoint == "" {
-		endpoint = "http://127.0.0.1:4096"
+		// Prefer the registered shared service over a fixed port, which on a
+		// real machine is often a different process.
+		if url, password, ok := DiscoverOpenCodeService(); ok {
+			endpoint = url
+			if os.Getenv("OPENCODE_SERVER_PASSWORD") == "" {
+				_ = os.Setenv("OPENCODE_SERVER_PASSWORD", password)
+			}
+		} else {
+			endpoint = "http://127.0.0.1:4096"
+		}
 	}
 	endpoint = strings.TrimRight(endpoint, "/")
 

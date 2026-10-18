@@ -407,7 +407,7 @@ func hostStartCommands() []hostStartCommand {
 	return []hostStartCommand{
 		{host: "Copilot", command: "copilot --agent a4c"},
 		{host: "OpenCode", command: "opencode", hint: "(then /agents to select a4c)"},
-		{host: "Antigravity", command: "agy"},
+		{host: "Antigravity", command: "agy", hint: "(then type /a4c — a skill, not an agent)"},
 	}
 }
 

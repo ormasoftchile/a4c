@@ -97,7 +97,7 @@ func TestHostStartCommands(t *testing.T) {
 	want := map[string]hostStartCommand{
 		"Copilot":     {host: "Copilot", command: "copilot --agent a4c"},
 		"OpenCode":    {host: "OpenCode", command: "opencode", hint: "(then /agents to select a4c)"},
-		"Antigravity": {host: "Antigravity", command: "agy"},
+		"Antigravity": {host: "Antigravity", command: "agy", hint: "(then type /a4c — a skill, not an agent)"},
 	}
 	if len(cmds) != len(want) {
 		t.Fatalf("expected %d host start commands, got %d", len(want), len(cmds))

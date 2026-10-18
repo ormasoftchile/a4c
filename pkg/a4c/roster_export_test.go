@@ -163,3 +163,27 @@ func TestExport_Idempotent(t *testing.T) {
 		t.Errorf("expected exactly one .mcp.json server after 3 runs, got %v", mcp["mcpServers"])
 	}
 }
+
+// TestExportAntigravity_WritesToDiscoveredPath: agy discovers project skills at
+// .agents/skills/<name>/SKILL.md. Writing anywhere else leaves a file that
+// exists but that the host never sees, which is indistinguishable from the
+// install having failed.
+func TestExportAntigravity_WritesToDiscoveredPath(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := a4c.ExportAntigravityCustomization(dir); err != nil {
+		t.Fatalf("ExportAntigravityCustomization: %v", err)
+	}
+
+	want := filepath.Join(dir, ".agents", "skills", "a4c", "SKILL.md")
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("skill not written to the path agy scans: %v", err)
+	}
+
+	// The legacy location must not be written: agy does not scan it, and a
+	// second copy risks confusing an operator about which one is live.
+	legacy := filepath.Join(dir, ".gemini", "antigravity-cli", "skills", "a4c", "SKILL.md")
+	if _, err := os.Stat(legacy); err == nil {
+		t.Errorf("skill written to the legacy path agy does not scan: %s", legacy)
+	}
+}

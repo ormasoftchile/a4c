@@ -67,7 +67,13 @@ opencode run --agent a4c "your task description"
 
 ### Antigravity CLI or IDE
 
-Antigravity uses the **`a4c` skill**. The installer writes `SKILL.md` under `.gemini/antigravity-cli/skills/a4c/`, with `.agents/skills/a4c/` as a fallback. If your host discovers project skills through `.agents/skills/`, place the installed skill at `.agents/skills/a4c/SKILL.md`.
+Antigravity reaches a4c as a **skill**, not as a selectable agent — so a4c will not appear in `agy`'s agent list. The installer writes `SKILL.md` to `.agents/skills/a4c/SKILL.md`, which is the project-workspace path the `agy` binary scans for skills. Start `agy` from the project directory and invoke it by typing:
+
+```text
+/a4c
+```
+
+If your installed copy is still under the older `.gemini/antigravity-cli/skills/a4c/` location, current `agy` versions do not scan it — re-run `a4c install antigravity` to place it where the host looks. `a4c status doctor` reports whether the skill is at the discoverable path.
 
 The skill also needs the A4C MCP server connected. For the Antigravity CLI, register it from your project directory, then start an interactive session:
 

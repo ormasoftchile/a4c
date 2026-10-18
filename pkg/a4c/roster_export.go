@@ -440,11 +440,17 @@ You are strictly non-mutating: edit, write, patch, and subagent delegation are e
 }
 
 // ExportAntigravityCustomization writes Antigravity customization and skill files.
+// ExportAntigravityCustomization writes the Antigravity skill file.
+//
+// The skill is written to `.agents/skills/<name>/SKILL.md`, which is the
+// project-workspace path the agy binary documents for skill discovery
+// ("{workspace}/.agents/skills/{skill_name}/SKILL.md"). Antigravity reaches
+// a4c as a SKILL invoked with `/a4c`, not as a selectable agent — that is why
+// it does not appear in agy's agent list.
 func ExportAntigravityCustomization(rootDir string) error {
-	skillsDir := filepath.Join(rootDir, ".gemini", "antigravity-cli", "skills", "a4c")
+	skillsDir := filepath.Join(rootDir, ".agents", "skills", "a4c")
 	if err := os.MkdirAll(skillsDir, 0755); err != nil {
-		skillsDir = filepath.Join(rootDir, ".agents", "skills", "a4c")
-		_ = os.MkdirAll(skillsDir, 0755)
+		return fmt.Errorf("create antigravity skill directory: %w", err)
 	}
 
 	skillContent := `---
@@ -627,6 +633,22 @@ func RunDoctor(rootDir string) DoctorReport {
 		addCheck("Antigravity", "CLI Binary (agy)", true, "agy binary detected in PATH")
 	} else {
 		addCheck("Antigravity", "CLI Binary (agy)", false, "agy binary not in PATH (Antigravity IDE / Desktop session active)")
+	}
+	// agy discovers project skills at .agents/skills/<name>/SKILL.md. Check the
+	// discoverable path specifically: a skill written anywhere else is invisible
+	// to the host even though the file exists.
+	antigravitySkill := filepath.Join(absRoot, ".agents", "skills", "a4c", "SKILL.md")
+	staleSkill := filepath.Join(absRoot, ".gemini", "antigravity-cli", "skills", "a4c", "SKILL.md")
+	_, skillErr := os.Stat(antigravitySkill)
+	_, staleErr := os.Stat(staleSkill)
+	switch {
+	case skillErr == nil && staleErr == nil:
+		addCheck("Antigravity", "A4C Skill", true,
+			".agents/skills/a4c/SKILL.md present (invoke with /a4c); a stale copy at .gemini/antigravity-cli/skills is not scanned by agy and can be removed")
+	case skillErr == nil:
+		addCheck("Antigravity", "A4C Skill", true, ".agents/skills/a4c/SKILL.md present (invoke with /a4c)")
+	default:
+		addCheck("Antigravity", "A4C Skill", false, ".agents/skills/a4c/SKILL.md not found. Run 'a4c install antigravity'.")
 	}
 
 	// 6. Universal Host Capabilities Discovery

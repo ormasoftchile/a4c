@@ -195,6 +195,22 @@ func (s *Server) registerTools() {
 		s.handleCompleteActivity,
 	)
 
+	// 13. team_apply_patch (Coder only) — governed, journaled file write.
+	// Strict-governance profiles deny native edit/write/patch and route every
+	// mutation through this tool so writes are policy-checked, worktree-
+	// contained, and intent-journaled. Non-mutating roles are excluded both
+	// here (role-filtered registration) and again in the service.
+	addAgentTool(false, true, false,
+		mcp.NewTool("team_apply_patch",
+			mcp.WithDescription("Apply a governed, journaled file write inside the task worktree. Enforces worktree containment, mutating-role boundary, and policy authorization; journals the intent before and after the write."),
+			mcp.WithString("task_id", mcp.Required(), mcp.Description("The unique task identifier whose worktree receives the write")),
+			mcp.WithString("path", mcp.Required(), mcp.Description("Worktree-relative file path to write. Absolute paths and traversal are rejected.")),
+			mcp.WithString("content", mcp.Required(), mcp.Description("Full file content to write (whole-file, atomic)")),
+			mcp.WithString("agent", mcp.Description("Writing agent identity (default: coder)")),
+		),
+		s.handleApplyPatch,
+	)
+
 	// 12. team_review_result (Reviewer only)
 	addAgentTool(false, false, true,
 		mcp.NewTool("team_review_result",
@@ -537,6 +553,36 @@ func (s *Server) handleCompleteActivity(ctx context.Context, req mcp.CallToolReq
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("complete activity failed: %v", err)), nil
+	}
+	return jsonResult(res)
+}
+
+// handleApplyPatch performs a governed, journaled file write inside a task
+// worktree on behalf of a mutating specialist. It is the interactive
+// counterpart of the headless governed_apply_patch tool.
+func (s *Server) handleApplyPatch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'task_id': %v", err)), nil
+	}
+	path, err := req.RequireString("path")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'path': %v", err)), nil
+	}
+	content, err := req.RequireString("content")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("missing required parameter 'content': %v", err)), nil
+	}
+	agent := req.GetString("agent", "coder")
+
+	res, err := s.service.ApplyWorkspaceFile(ctx, a4c.ApplyWorkspaceFileRequest{
+		TaskID:  taskID,
+		AgentID: agent,
+		Path:    path,
+		Content: content,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return jsonResult(res)
 }

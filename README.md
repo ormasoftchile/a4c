@@ -193,6 +193,32 @@ A4C supports three distinct execution strategies tailored to task complexity:
 | **Reviewed Mode** | `--strategy reviewed` | Specialist implementer turn, followed by an independent read-only reviewer turn gating approval on passing test evidence. | Specialist + Reviewer | Security-sensitive changes, public API modifications, production code. |
 | **Team Mode** | `--strategy team` | Lead engineer breaks down objective into delegated subtasks for specialists, followed by quality review. | Multi-turn | Complex multi-step architectural features requiring decomposition. |
 
+### Strict Governance (opt-in)
+
+By default, interactive agents mutate files with the host's **native** `edit`/`write`/`patch` tools. That is fast, diff-aware, and supports the host's undo and snapshots — but each write happens outside A4C, so it is not intent-journaled.
+
+For unattended or regulated runs, the installer also ships **strict** agent variants that deny native mutation and route every write through the governed `team_apply_patch` MCP tool:
+
+```bash
+a4c install opencode   # writes a4c-strict.md and bob-strict.md
+a4c install copilot    # writes a4c-strict.agent.md and bob-strict.agent.md
+```
+
+Select `a4c-strict` (or `bob-strict`) the same way you select `a4c` — `/agents` in OpenCode, `copilot --agent a4c-strict` in Copilot. Opting in is a choice of agent, not a flag.
+
+| | Default (`a4c`) | Strict (`a4c-strict`) |
+| :--- | :--- | :--- |
+| **Write path** | Host-native `edit`/`write`/`patch` | `team_apply_patch` MCP tool |
+| **Granularity** | Per-activity snapshot | Per-write intent journal (persist → commit) |
+| **Whole-file?** | No — surgical diffs | Yes — `content` is the complete new file |
+| **Path containment** | Host's | A4C's (rejects absolute, `..`, symlink escapes) |
+| **Role boundary** | Host permission rules | Host rules **and** A4C, checked twice |
+| **Cost** | Low tokens | Whole-file rewrites inflate tokens on large files |
+
+`team_apply_patch` is registered for mutating specialists only — it is never exposed to reviewer or lead roles, and the service re-checks the mutating-role boundary regardless. Every write is journaled with a content hash before and after the file lands, so a crash mid-write is detectable and reconcilable.
+
+**Honest limitation:** `shell` stays enabled in strict mode so tests can run. A model determined to bypass governance can still create files with a shell redirect — strict mode makes the *primary* write path audited and journaled; it is not a security boundary against a hostile model. The default (native-tools) mode is the right choice for interactive work, where a human and the host's diff/undo are the recovery loop.
+
 ---
 
 ## 5. Optional Headless Host Adapters

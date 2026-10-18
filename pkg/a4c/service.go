@@ -41,6 +41,11 @@ type TeamService interface {
 	RecordReview(ctx context.Context, req RecordReviewRequest) (*HostReviewResult, error)
 	GetWorktreePath(taskID string) (string, error)
 	WorkspaceDir() string
+
+	// ApplyWorkspaceFile performs a governed, journaled file write inside a
+	// task worktree. It backs the team_apply_patch MCP tool used by
+	// strict-governance profiles that deny native edit/write/patch.
+	ApplyWorkspaceFile(ctx context.Context, req ApplyWorkspaceFileRequest) (*ApplyFileResult, error)
 }
 
 

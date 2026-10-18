@@ -199,18 +199,19 @@ func TestMCPServer_ToolDiscovery(t *testing.T) {
 		"team_checkpoint":        false,
 		"team_complete_activity": false,
 		"team_review_result":     false,
+		"team_apply_patch":       false,
 	}
 
 	prohibitedTools := map[string]bool{
-		"team_accept":                         true,
-		"team_integrate":                      true,
-		"governed_read_file":                  true,
-		"governed_apply_patch":                true,
-		"governed_git_inspect":                true,
-		"governed_run_tests":                  true,
-		"governed_structural_search_symbols":  true,
+		"team_accept":                        true,
+		"team_integrate":                     true,
+		"governed_read_file":                 true,
+		"governed_apply_patch":               true,
+		"governed_git_inspect":               true,
+		"governed_run_tests":                 true,
+		"governed_structural_search_symbols": true,
 		"governed_structural_context_for":    true,
-		"governed_structural_callers":         true,
+		"governed_structural_callers":        true,
 	}
 
 	for _, tool := range toolsRes.Tools {
@@ -259,6 +260,7 @@ func TestMCPServer_RoleDiscovery_Coder(t *testing.T) {
 		"team_diff":              true,
 		"team_checkpoint":        true,
 		"team_complete_activity": true,
+		"team_apply_patch":       true,
 	}
 
 	prohibited := []string{
@@ -311,7 +313,7 @@ func TestMCPServer_RoleDiscovery_Reviewer(t *testing.T) {
 	prohibited := []string{
 		"team_delegate", "team_complete_activity", "team_list", "team_feedback",
 		"team_context", "team_begin_task", "team_assign_activity",
-		"team_accept", "team_integrate",
+		"team_accept", "team_integrate", "team_apply_patch",
 		"governed_read_file", "governed_apply_patch", "governed_git_inspect", "governed_run_tests",
 		"governed_structural_search_symbols", "governed_structural_context_for", "governed_structural_callers",
 	}
@@ -362,7 +364,7 @@ func TestMCPServer_RoleDiscovery_Lead(t *testing.T) {
 	}
 
 	prohibited := []string{
-		"team_review_result", "team_accept", "team_integrate",
+		"team_review_result", "team_accept", "team_integrate", "team_apply_patch",
 		"governed_read_file", "governed_apply_patch", "governed_git_inspect", "governed_run_tests",
 		"governed_structural_search_symbols", "governed_structural_context_for", "governed_structural_callers",
 	}
@@ -691,11 +693,11 @@ func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
 		Params: mcp.CallToolParams{
 			Name: "team_review_result",
 			Arguments: map[string]any{
-				"task_id":   beginResult.TaskID,
-				"reviewer":  "charlie",
-				"verdict":   "approved",
-				"comments":  "Clean implementation and non-breaking",
-				"findings":  "Zero regressions; clean style",
+				"task_id":  beginResult.TaskID,
+				"reviewer": "charlie",
+				"verdict":  "approved",
+				"comments": "Clean implementation and non-breaking",
+				"findings": "Zero regressions; clean style",
 			},
 		},
 	})
@@ -762,5 +764,95 @@ func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
 	}
 }
 
+// TestMCPServer_ApplyPatch_EndToEnd drives the governed write through the MCP
+// tool itself: begin a task to provision its worktree, apply a file, and
+// confirm the bytes land inside that worktree. Traversal must fail closed.
+func TestMCPServer_ApplyPatch_EndToEnd(t *testing.T) {
+	h := setupMCPHarness(t)
+	defer h.client.Close()
 
+	ctx := context.Background()
 
+	// 1. Provision a task and its isolated worktree.
+	beginRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_begin_task",
+			Arguments: map[string]any{
+				"objective":     "Governed write end-to-end",
+				"budget_tokens": float64(50000),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool team_begin_task failed: %v", err)
+	}
+	if beginRes.IsError {
+		t.Fatalf("team_begin_task returned error: %+v", beginRes)
+	}
+	var begun a4c.BeginTaskResult
+	if err := json.Unmarshal([]byte(beginRes.Content[0].(mcp.TextContent).Text), &begun); err != nil {
+		t.Fatalf("unmarshal begin result: %v", err)
+	}
+	if begun.TaskID == "" || begun.WorktreePath == "" {
+		t.Fatalf("expected task and worktree, got %+v", begun)
+	}
+
+	// 2. Apply a governed write into that worktree.
+	const content = "package governed\n\nvar E2E = true\n"
+	applyRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_apply_patch",
+			Arguments: map[string]any{
+				"task_id": begun.TaskID,
+				"path":    "governed/e2e.go",
+				"content": content,
+				"agent":   "coder",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool team_apply_patch failed: %v", err)
+	}
+	if applyRes.IsError {
+		t.Fatalf("team_apply_patch returned error: %+v", applyRes)
+	}
+	var applied a4c.ApplyFileResult
+	if err := json.Unmarshal([]byte(applyRes.Content[0].(mcp.TextContent).Text), &applied); err != nil {
+		t.Fatalf("unmarshal apply result: %v\noutput: %s", err, applyRes.Content[0].(mcp.TextContent).Text)
+	}
+	if applied.TaskID != begun.TaskID {
+		t.Errorf("expected task %s, got %s", begun.TaskID, applied.TaskID)
+	}
+
+	// 3. The file must exist inside the worktree, not the main checkout.
+	target := filepath.Join(begun.WorktreePath, "governed", "e2e.go")
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("governed write did not land in the worktree: %v", err)
+	}
+	if string(got) != content {
+		t.Errorf("content mismatch: %q", string(got))
+	}
+	if _, err := os.Stat(filepath.Join(h.repoDir, "governed", "e2e.go")); err == nil {
+		t.Errorf("SECURITY: governed write landed in the main checkout instead of the worktree")
+	}
+
+	// 4. Traversal must fail closed through the tool boundary.
+	escRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_apply_patch",
+			Arguments: map[string]any{
+				"task_id": begun.TaskID,
+				"path":    "../escaped.go",
+				"content": "evil",
+				"agent":   "coder",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool team_apply_patch (traversal) failed: %v", err)
+	}
+	if !escRes.IsError {
+		t.Errorf("expected traversal to fail closed through MCP")
+	}
+}

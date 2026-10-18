@@ -121,7 +121,7 @@ type rootCommand struct {
 // (init, install, mcp) plus the two nouns an operator lives in (task, status).
 // Everything else is a subcommand of one of these.
 var rootCommands = []rootCommand{
-	{name: "init", summary: "Initialize an a4c workspace (.a4c directory)", run: runInit},
+	{name: "init", summary: "Initialize an a4c workspace and wire host integrations", run: runInit},
 	{name: "install", summary: "Install host-native agent definitions (copilot|opencode|antigravity|all)", run: runInstall},
 	{name: "task", summary: "Submit, execute, review, and integrate work", run: runTask},
 	{name: "mcp", summary: "Run the Model Context Protocol (MCP) server over stdio", run: runMCP},
@@ -313,8 +313,14 @@ func getPaths(workDir string) (string, string, string, string, string) {
 
 func runInit(args []string) {
 	target := "."
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		target = args[0]
+	installHosts := true
+	for _, a := range args {
+		switch {
+		case a == "--no-install":
+			installHosts = false
+		case !strings.HasPrefix(a, "-"):
+			target = a
+		}
 	}
 
 	dotDir, storeDir, rosterDir, memDir, journalDir := getPaths(target)
@@ -344,6 +350,37 @@ func runInit(args []string) {
 	fmt.Printf("Persistent team active with %d members:\n", len(roster.ListMembers()))
 	for _, m := range roster.ListMembers() {
 		fmt.Printf("  - %s (%s)\n", m.Name, m.Role)
+	}
+
+	if !installHosts {
+		fmt.Println("Host installation skipped (--no-install). Run 'a4c install all' to wire hosts.")
+		return
+	}
+
+	// Host wiring is part of setup, not a second step to remember. Installation
+	// merges into existing configuration and is idempotent, so re-running init
+	// is safe in an already-configured project.
+	fmt.Println("Wiring host integrations (existing configuration is merged, never overwritten)...")
+	installs := []struct {
+		host string
+		fn   func(string) error
+	}{
+		{"Copilot", a4c.ExportCopilotAgents},
+		{"OpenCode", a4c.ExportOpenCodeAgents},
+		{"Antigravity", a4c.ExportAntigravityCustomization},
+	}
+	installed := 0
+	for _, in := range installs {
+		if err := in.fn(target); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: %s install failed: %v\n", in.host, err)
+			continue
+		}
+		fmt.Printf("  %s: ok\n", in.host)
+		installed++
+	}
+
+	if installed > 0 {
+		fmt.Println("Restart any open host session and allow the local A4C MCP server to start when prompted.")
 	}
 }
 

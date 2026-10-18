@@ -24,11 +24,12 @@ Keep that directory on your shell's `PATH`. Then initialize the repository you w
 
 ```bash
 cd /path/to/your-project
-a4c init .
-a4c install all
+a4c init
 ```
 
-The installer writes host agent definitions and MCP configuration. Review existing `.mcp.json` and `opencode.json` settings before installing into an already configured project. To install only one host, use `a4c install copilot`, `a4c install opencode`, or `a4c install antigravity`.
+`init` does both halves of setup in one step: it creates the `.a4c` state directory **and** wires the repo into Copilot, OpenCode, and Antigravity. Installation merges into whatever configuration the project already has — existing `opencode.json` and `.mcp.json` keys, other MCP servers, and a `default_agent` you have already chosen are all preserved, never overwritten — so re-running `init` is safe and idempotent.
+
+To create the state directory without touching host configuration, use `a4c init --no-install`. To re-wire a single host later, use `a4c install copilot`, `a4c install opencode`, or `a4c install antigravity`.
 
 Restart an existing host session after installation and allow the local A4C MCP server to start when prompted.
 
@@ -249,7 +250,7 @@ The root CLI is deliberately minimal — five commands. Everything else is a sub
 
 | Root | Owns |
 | :--- | :--- |
-| `init` | Create the `.a4c` workspace |
+| `init` | Create the `.a4c` workspace and wire host integrations |
 | `install` | Wire the repo into Copilot / OpenCode / Antigravity |
 | `task` | Submit, execute, review, accept, and integrate work |
 | `mcp` | Serve the MCP protocol over stdio |

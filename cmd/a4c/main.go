@@ -93,45 +93,108 @@ func banner() string {
 
 func printUsage() {
 	fmt.Print(banner())
-	fmt.Print(`Usage: a4c <command> [options]
+	fmt.Print("Usage: a4c <command> [options]\n\nCommands:\n")
+	for _, c := range rootCommands {
+		fmt.Printf("  %-9s %s\n", c.name, c.summary)
+	}
+	fmt.Print(`
+Subcommands:
+  init, install, mcp, and demo are self-contained.
+  task    submit start run resume adopt escalate checkpoint list history
+          inspect diff feedback accept integrate reject decide worker loop
+  status  doctor team decisions memory knowledge
 
-Commands:
-  init [path]                           Initialize an a4c workspace (.a4c directory)
-  install <copilot|opencode|antigravity|all>   Install host-native agent definitions (.github/agents, .opencode/agents)
-  doctor [--dir path] [--json]          Diagnose environment, host agents, and durable stores
-  team list                             List persistent team members and permissions
-  task submit <obj> [budget] [--strategy s] [--specialist s] [--runtime r] [--model m] Submit a task (default: direct)
-  task start <obj> [budget] [--strategy s] [--specialist s] [--runtime r] [--model m] [--steps N] Submit and immediately execute task
-  task run [task-id] [--steps N] [--runtime r] [--model m] Execute pending task activities
-  task resume <task-id> [--runtime r] [--model m] [--specialist s] [--run] Resume interrupted task on another host
-  task adopt <obj> [--notes text] [--runtime r] [--model m] [--strategy s] [--in-place] [--run] Adopt external work
-  task escalate <task-id> <reviewed|team> [--reviewer r] Escalate task to reviewed or team collaboration
-  task checkpoint <task-id> [--json]    Capture authoritative task checkpoint
-  task list [--state s] [--status s] [--agent a] [--runtime r] Query tasks or activities
-  task history <task-id>                Display full audit history and DAG for a task
-  task inspect <task-id> [--json]       Inspect a task; output machine-readable JSON with --json
-  task diff <task-id> [--json]          Display worktree review diffs against base branch
-  task feedback <task-id> <feedback>    Provide review guidance and request revisions
-  task accept <task-id> [comments]      Record explicit human approval of reviewed snapshot
-  task integrate <task-id>              Integrate approved task into base checkout
-  task reject <task-id> <reason>        Reject task
-  host [--steps N] [--poll-ms MS]       Run durable background worker host
-  mcp                                   Run Model Context Protocol (MCP) server over stdio
-  status                                Display active activities and evidence
-  run [--runtime r] [--model m] [--real-copilot] [--steps N] Run governed collaboration loop
-  decisions list                        List questions awaiting human engineer guidance
-  decisions resolve <id> <resolution>   Resolve decision and resume paused task
-  memory list                           List verified architectural conventions
-  knowledge export                      Export legacy SQLite knowledge records to Markdown
-  demo [--real-copilot]                 Run full self-contained demonstration
-
-Flags:
-  --real-copilot                        Connect to official GitHub Copilot CLI via Go SDK
-  --strategy direct|reviewed|team       Execution strategy (default: direct)
-  --steps N                             Maximum sequential steps to execute (default: 10)
-  --dir path                            Workspace root directory (default: current directory)
+Run 'a4c <command>' with no arguments for that command's own usage.
 `)
+}
 
+// rootCommand is one entry in the root dispatch table. printUsage renders every
+// entry here, so the documented surface and the dispatched surface cannot drift
+// apart the way a hand-maintained switch allowed them to.
+type rootCommand struct {
+	name    string
+	summary string
+	run     func(args []string)
+}
+
+// rootCommands is the complete root surface: the lifecycle of the whole system
+// (init, install, mcp, demo) plus the two nouns an operator lives in (task,
+// status). Everything else is a subcommand of one of these.
+var rootCommands = []rootCommand{
+	{name: "init", summary: "Initialize an a4c workspace (.a4c directory)", run: runInit},
+	{name: "install", summary: "Install host-native agent definitions (copilot|opencode|antigravity|all)", run: runInstall},
+	{name: "task", summary: "Submit, execute, review, and integrate work", run: runTask},
+	{name: "mcp", summary: "Run the Model Context Protocol (MCP) server over stdio", run: runMCP},
+	{name: "status", summary: "Inspect environment, team, and workspace state", run: runStatus},
+	{name: "demo", summary: "Run the full self-contained demonstration", run: runDemo},
+}
+
+// removedCommands maps displaced root commands to their new invocation so an
+// old name fails with an actionable redirect instead of a dead end.
+var removedCommands = map[string]string{
+	"doctor":    "a4c status doctor",
+	"team":      "a4c status team",
+	"host":      "a4c task worker",
+	"run":       "a4c task loop",
+	"decisions": "a4c status decisions",
+	"memory":    "a4c status memory",
+	"knowledge": "a4c status knowledge",
+	"adopt":     "a4c task adopt",
+}
+
+func lookupRoot(name string) (rootCommand, bool) {
+	for _, c := range rootCommands {
+		if c.name == name {
+			return c, true
+		}
+	}
+	return rootCommand{}, false
+}
+
+// suggestCommand returns the closest root command name within a small edit
+// distance, or "" when nothing is close enough to be worth suggesting.
+func suggestCommand(name string) string {
+	best, bestDist := "", 3
+	for _, c := range rootCommands {
+		if d := editDistance(name, c.name); d < bestDist {
+			best, bestDist = c.name, d
+		}
+	}
+	return best
+}
+
+// editDistance is the Levenshtein distance between two strings.
+func editDistance(a, b string) int {
+	if a == b {
+		return 0
+	}
+	prev := make([]int, len(b)+1)
+	curr := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		curr[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			curr[j] = min3(curr[j-1]+1, prev[j]+1, prev[j-1]+cost)
+		}
+		copy(prev, curr)
+	}
+	return prev[len(b)]
+}
+
+func min3(a, b, c int) int {
+	if b < a {
+		a = b
+	}
+	if c < a {
+		a = c
+	}
+	return a
 }
 
 func main() {
@@ -143,56 +206,26 @@ func main() {
 	cmd := os.Args[1]
 	args := os.Args[2:]
 
-	switch cmd {
-	case "help", "-h", "--help":
+	if cmd == "help" || cmd == "-h" || cmd == "--help" {
 		printUsage()
-
-	case "init":
-		runInit(args)
-
-	case "install":
-		runInstall(args)
-
-	case "doctor":
-		runDoctor(args)
-
-	case "team":
-		runTeam(args)
-
-	case "task":
-		runTask(args)
-
-	case "adopt":
-		runTask(append([]string{"adopt"}, args...))
-
-	case "host":
-		runHost(args)
-
-	case "mcp":
-		runMCP(args)
-
-	case "status":
-		runStatus(args)
-
-	case "run":
-		runLoop(args)
-
-	case "decisions":
-		runDecisions(args)
-
-	case "memory":
-		runMemory(args)
-
-	case "knowledge":
-		runKnowledge(args)
-
-	case "demo":
-		runDemo(args)
-
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown command %q. Run 'a4c help' for usage.\n", cmd)
-		os.Exit(1)
+		return
 	}
+
+	if c, ok := lookupRoot(cmd); ok {
+		c.run(args)
+		return
+	}
+
+	// Hard break for displaced commands: name the new location rather than
+	// silently failing, and suggest a close match for plain typos.
+	fmt.Fprintf(os.Stderr, "Unknown command %q.\n", cmd)
+	if moved, ok := removedCommands[cmd]; ok {
+		fmt.Fprintf(os.Stderr, "It moved: use %s\n", moved)
+	} else if suggestion := suggestCommand(cmd); suggestion != "" {
+		fmt.Fprintf(os.Stderr, "Did you mean %q?\n", suggestion)
+	}
+	fmt.Fprintln(os.Stderr, "Run 'a4c help' for usage.")
+	os.Exit(1)
 }
 
 func runInstall(args []string) {
@@ -317,7 +350,7 @@ func runInit(args []string) {
 
 func runTeam(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: a4c team [list | add <id> <name> <role> <charter>]")
+		fmt.Println("Usage: a4c status team [list | add <id> <name> <role> <charter>]")
 		return
 	}
 
@@ -342,7 +375,7 @@ func runTeam(args []string) {
 
 	case "add":
 		if len(args) < 5 {
-			fmt.Println("Usage: a4c team add <id> <name> <role> <charter>")
+			fmt.Println("Usage: a4c status team add <id> <name> <role> <charter>")
 			return
 		}
 		ident := a4c.AgentIdentity{
@@ -483,7 +516,7 @@ func configureProviderForCoordinator(coord *a4c.TeamCoordinator, runtime string,
 
 func runTask(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: a4c task <submit|start|run|resume|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject> [options]")
+		fmt.Println("Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject|decide|worker|loop> [options]")
 		return
 	}
 
@@ -499,7 +532,7 @@ func runTask(args []string) {
 	}
 	args = cleanArgs
 	if len(args) == 0 {
-		fmt.Println("Usage: a4c task <submit|list|history|inspect|diff|feedback|accept|integrate|reject> [options]")
+		fmt.Println("Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject|decide|worker|loop> [options]")
 		return
 	}
 
@@ -1266,8 +1299,19 @@ func runTask(args []string) {
 		}
 		fmt.Printf("Task %s rejected at %s. Reason: %s\n", res.TaskID, res.RejectedAt.Format(time.RFC3339), res.Reason)
 
+	case "decide":
+		runDecide(args[1:])
+
+	case "worker":
+		runHost(args[1:])
+
+	case "loop":
+		runLoop(args[1:])
+
 	default:
-		fmt.Printf("Unknown task command %q. Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject>\n", subCmd)
+		fmt.Printf("Unknown task command %q.\n", subCmd)
+		fmt.Fprintln(os.Stderr, "Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject|decide|worker|loop>")
+		os.Exit(1)
 	}
 }
 
@@ -1370,7 +1414,33 @@ func runMCP(args []string) {
 	}
 }
 
+// runStatus routes the read-only introspection commands. The bare form prints
+// a one-screen overview; every subcommand reports on exactly one area and
+// mutates nothing.
 func runStatus(args []string) {
+	if len(args) == 0 {
+		printStatusOverview()
+		return
+	}
+	switch args[0] {
+	case "doctor":
+		runDoctor(args[1:])
+	case "team":
+		runTeam(args[1:])
+	case "decisions":
+		runDecisions(args[1:])
+	case "memory":
+		runMemory(args[1:])
+	case "knowledge":
+		runKnowledge(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown status subcommand %q.\n", args[0])
+		fmt.Fprintln(os.Stderr, "Usage: a4c status [doctor|team|decisions|memory|knowledge]")
+		os.Exit(1)
+	}
+}
+
+func printStatusOverview() {
 	_, storeDir, rosterDir, memDir, _ := getPaths(".")
 	store, err := a4c.NewDurableActivityStore(storeDir)
 	if err != nil {
@@ -1389,8 +1459,13 @@ func runStatus(args []string) {
 	fmt.Printf("Claimable Pending Activities: %t\n", store.HasClaimable())
 	fmt.Printf("Awaiting Human Decisions: %d\n", len(store.ListPendingDecisions()))
 	fmt.Printf("Verified Architectural Conventions: %d\n", len(memory.ListVerified()))
+	if kbDir, kbErr := a4c.ResolveKnowledgeDir("."); kbErr == nil {
+		fmt.Printf("Knowledge Base: %s\n", kbDir)
+	}
 }
 
+// runDecisions lists open questions awaiting the human engineer. Resolving one
+// is a task mutation, so it lives at 'a4c task decide'.
 func runDecisions(args []string) {
 	_, storeDir, _, _, _ := getPaths(".")
 	store, err := a4c.NewDurableActivityStore(storeDir)
@@ -1399,46 +1474,52 @@ func runDecisions(args []string) {
 		return
 	}
 
-	if len(args) == 0 || args[0] == "list" {
-		pending := store.ListPendingDecisions()
-		if len(pending) == 0 {
-			fmt.Println("No decisions currently awaiting human guidance.")
-			return
-		}
-		fmt.Printf("Pending Human Decisions (%d):\n", len(pending))
-		for _, dec := range pending {
-			fmt.Printf("\n[ID: %s] Escalate by: %s\n", dec.DecisionID, dec.ProposedBy)
-			fmt.Printf("Question: %s\n", dec.Question)
-			fmt.Printf("Context:  %v\n", dec.Context)
-		}
+	pending := store.ListPendingDecisions()
+	if len(pending) == 0 {
+		fmt.Println("No decisions currently awaiting human guidance.")
+		return
+	}
+	fmt.Printf("Pending Human Decisions (%d):\n", len(pending))
+	for _, dec := range pending {
+		fmt.Printf("\n[ID: %s] Escalate by: %s\n", dec.DecisionID, dec.ProposedBy)
+		fmt.Printf("Question: %s\n", dec.Question)
+		fmt.Printf("Context:  %v\n", dec.Context)
+	}
+}
+
+// runDecide resolves an open decision and resumes the paused task, so it is
+// routed from 'a4c task decide' rather than from status.
+func runDecide(args []string) {
+	_, storeDir, _, _, _ := getPaths(".")
+	store, err := a4c.NewDurableActivityStore(storeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Workspace not initialized. Run 'a4c init'.\n")
 		return
 	}
 
-	if args[0] == "resolve" {
-		if len(args) < 3 {
-			fmt.Println("Usage: a4c decisions resolve <decision_id> <resolution_text> [--approve | --reject | --reassign <agent>]")
-			return
-		}
-		id := args[1]
-		resolution := args[2]
-		approve := true
-		reassignTo := ""
-
-		for i := 3; i < len(args); i++ {
-			if args[i] == "--reject" {
-				approve = false
-			} else if args[i] == "--reassign" && i+1 < len(args) {
-				reassignTo = args[i+1]
-				i++
-			}
-		}
-
-		if err := store.ResolveHumanDecision(id, resolution, approve, reassignTo); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to resolve decision: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Decision %s resolved (Approve=%t, Reassign=%s)\n", id, approve, reassignTo)
+	if len(args) < 2 {
+		fmt.Println("Usage: a4c task decide <decision_id> <resolution_text> [--reject] [--reassign <agent>]")
+		os.Exit(1)
 	}
+	id := args[0]
+	resolution := args[1]
+	approve := true
+	reassignTo := ""
+
+	for i := 2; i < len(args); i++ {
+		if args[i] == "--reject" {
+			approve = false
+		} else if args[i] == "--reassign" && i+1 < len(args) {
+			reassignTo = args[i+1]
+			i++
+		}
+	}
+
+	if err := store.ResolveHumanDecision(id, resolution, approve, reassignTo); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to resolve decision: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Decision %s resolved (Approve=%t, Reassign=%s)\n", id, approve, reassignTo)
 }
 
 func runMemory(args []string) {
@@ -1461,7 +1542,7 @@ func runMemory(args []string) {
 	}
 }
 
-// runKnowledge implements `a4c knowledge export`, the one-way migration of
+// runKnowledge implements `a4c status knowledge`, the one-way migration of
 // legacy SQLite knowledge records into the per-repository home-directory
 // Markdown knowledge base. The legacy database is opened read-only and is
 // never modified or deleted.
@@ -1474,7 +1555,7 @@ func runKnowledge(args []string) {
 		}
 	}
 	if len(args) == 0 || args[0] != "export" {
-		fmt.Println("Usage: a4c knowledge export [--dir path]")
+		fmt.Println("Usage: a4c status knowledge export [--dir path]")
 		fmt.Println("Exports legacy .a4c/knowledge.db records to the home-directory knowledge base.")
 		return
 	}
@@ -1624,7 +1705,7 @@ func runLoop(args []string) {
 
 	pendingDecs := coord.ListPendingDecisions()
 	if len(pendingDecs) > 0 {
-		fmt.Printf("\n[PAUSED]: %d decision(s) awaiting human review. Run 'a4c decisions list' to inspect.\n", len(pendingDecs))
+		fmt.Printf("\n[PAUSED]: %d decision(s) awaiting human review. Run 'a4c status decisions' to inspect.\n", len(pendingDecs))
 	}
 }
 

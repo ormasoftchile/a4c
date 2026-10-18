@@ -4,7 +4,7 @@
 
 The host owns the conversation, model, and editing tools. A4C adds isolated worktrees, durable task identity, verification evidence, independent review, and checkpoints that survive switching hosts.
 
-The `a4c` executable provides setup, MCP coordination, human approval, and optional headless automation. **You do not need to launch every interactive task with `a4c task start` or run a separate `a4c host` worker.**
+The `a4c` executable provides setup, MCP coordination, human approval, and optional headless automation. **You do not need to launch every interactive task with `a4c task start` or run a separate `a4c task worker`.**
 
 ---
 
@@ -123,7 +123,7 @@ A4C keeps a per-repository engineering knowledge base (KB) of plain Markdown fil
 └── evidence/         # small copied artifacts (test logs, measurements)
 ```
 
-No setup is required — the path is derived from the repository name (resolved correctly from linked worktrees). `a4c doctor` reports the resolved location. The KB lives entirely outside the source repository, so worktree cleanup, task rollback, and integration never touch it.
+No setup is required — the path is derived from the repository name (resolved correctly from linked worktrees). `a4c status doctor` reports the resolved location. The KB lives entirely outside the source repository, so worktree cleanup, task rollback, and integration never touch it.
 
 ### When agents record knowledge
 
@@ -151,7 +151,7 @@ To carry selected learning into a new repository's independent KB (the new repo 
 
 The agent proposes a transfer; after your approval it copies selected documents with origin notes. Nothing is shared or linked afterwards. OneDrive or another custom root can be considered later; today everything is local.
 
-Users of earlier A4C releases with an existing `.a4c/knowledge.db` can migrate with `a4c knowledge export` (the legacy database is read-only and left untouched).
+Users of earlier A4C releases with an existing `.a4c/knowledge.db` can migrate with `a4c status knowledge` (the legacy database is read-only and left untouched).
 
 ---
 
@@ -241,7 +241,30 @@ The OpenCode adapter speaks the v2 HTTP API and manages its HTTP Basic authentic
 
 ## 6. CLI Automation & Administration
 
-The commands below are optional automation and administrative interfaces, not a prerequisite for chatting with the A4C agent. `a4c doctor` reports environment readiness, including optional host adapters that may be unavailable when you are not using them.
+The commands below are optional automation and administrative interfaces, not a prerequisite for chatting with the A4C agent. `a4c status doctor` reports environment readiness, including optional host adapters that may be unavailable when you are not using them.
+
+### Command Surface
+
+The root CLI is deliberately minimal — six commands. Everything else is a subcommand of `task` (work and its lifecycle) or `status` (read-only introspection):
+
+| Root | Owns |
+| :--- | :--- |
+| `init` | Create the `.a4c` workspace |
+| `install` | Wire the repo into Copilot / OpenCode / Antigravity |
+| `task` | Submit, execute, review, accept, and integrate work |
+| `mcp` | Serve the MCP protocol over stdio |
+| `status` | Read-only introspection of environment and state |
+| `demo` | Self-contained demonstration |
+
+So `a4c status doctor|team|decisions|memory|knowledge` reports, while `a4c task … decide|worker|loop` acts. The former root commands (`doctor`, `team`, `host`, `run`, `decisions`, `memory`, `knowledge`, `adopt`) were removed rather than aliased, so a displaced name fails loudly with the new invocation printed:
+
+```console
+$ a4c doctor
+Unknown command "doctor".
+It moved: use a4c status doctor
+```
+
+Plain typos get a suggestion instead: `a4c stauts` reports `Did you mean "status"?`
 
 ### Direct Mode (Headless Automation)
 Execute a focused task through a host's automation adapter:

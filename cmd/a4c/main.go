@@ -515,12 +515,9 @@ func configureProviderForCoordinator(coord *a4c.TeamCoordinator, runtime string,
 	}
 
 	// 1. Auto-discover and register all available hosts into coord.Providers for seamless cross-host routing
-	// OpenCode
-	endpoint := opencodeEndpoint
-	if endpoint == "" {
-		endpoint = "http://127.0.0.1:4096"
-	}
-	op := a4c.NewOpenCodeProvider(endpoint, model, nil)
+	// OpenCode. An empty endpoint makes the provider discover the running shared
+	// service rather than assume a fixed port.
+	op := a4c.NewOpenCodeProvider(opencodeEndpoint, model, nil)
 	cleanupFuncs = append(cleanupFuncs, func() { op.Close() })
 	coord.RegisterProvider("opencode", op)
 
@@ -1808,7 +1805,9 @@ func runLoop(args []string) {
 			var err error
 			mgr, err = a4c.NewManagedOpenCodeServer(context.Background(), 0)
 			if err != nil {
-				endpoint = "http://127.0.0.1:4096"
+				// No managed server available: leave the endpoint empty so the
+				// provider discovers a running shared service.
+				endpoint = ""
 			} else {
 				endpoint = mgr.Endpoint()
 				defer mgr.Stop()

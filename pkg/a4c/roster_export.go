@@ -687,7 +687,7 @@ func RunDoctor(rootDir string) DoctorReport {
 	}
 
 	// OpenCode
-	op := NewOpenCodeProvider("http://127.0.0.1:4096", "", nil)
+	op := NewOpenCodeProvider("", "", nil)
 	hosts = append(hosts, op.HostCapabilities())
 
 	// Antigravity

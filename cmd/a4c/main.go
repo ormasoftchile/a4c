@@ -99,7 +99,7 @@ func printUsage() {
 	}
 	fmt.Print(`
 Subcommands:
-  init, install, mcp, and demo are self-contained.
+  init, install, and mcp are self-contained.
   task    submit start run resume adopt escalate checkpoint list history
           inspect diff feedback accept integrate reject decide worker loop
   status  doctor team decisions memory knowledge
@@ -118,15 +118,14 @@ type rootCommand struct {
 }
 
 // rootCommands is the complete root surface: the lifecycle of the whole system
-// (init, install, mcp, demo) plus the two nouns an operator lives in (task,
-// status). Everything else is a subcommand of one of these.
+// (init, install, mcp) plus the two nouns an operator lives in (task, status).
+// Everything else is a subcommand of one of these.
 var rootCommands = []rootCommand{
 	{name: "init", summary: "Initialize an a4c workspace (.a4c directory)", run: runInit},
 	{name: "install", summary: "Install host-native agent definitions (copilot|opencode|antigravity|all)", run: runInstall},
 	{name: "task", summary: "Submit, execute, review, and integrate work", run: runTask},
 	{name: "mcp", summary: "Run the Model Context Protocol (MCP) server over stdio", run: runMCP},
 	{name: "status", summary: "Inspect environment, team, and workspace state", run: runStatus},
-	{name: "demo", summary: "Run the full self-contained demonstration", run: runDemo},
 }
 
 // removedCommands maps displaced root commands to their new invocation so an
@@ -1707,105 +1706,4 @@ func runLoop(args []string) {
 	if len(pendingDecs) > 0 {
 		fmt.Printf("\n[PAUSED]: %d decision(s) awaiting human review. Run 'a4c status decisions' to inspect.\n", len(pendingDecs))
 	}
-}
-
-func runDemo(args []string) {
-	useReal := len(args) > 0 && args[0] == "--real-copilot"
-
-	baseDir, err := os.MkdirTemp("", "a4c-demo-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create temp directory: %v\n", err)
-		os.Exit(1)
-	}
-	defer os.RemoveAll(baseDir)
-
-	repoDir := filepath.Join(baseDir, "workspace")
-	dotDir, storeDir, rosterDir, memDir, journalDir := getPaths(repoDir)
-	_ = os.MkdirAll(repoDir, 0755)
-	_ = os.MkdirAll(dotDir, 0755)
-
-	// Scaffold broken calc.go
-	_ = os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module example.com/calc\n\ngo 1.22\n"), 0644)
-	_ = os.WriteFile(filepath.Join(repoDir, "calc.go"), []byte("package calc\n\nfunc Add(a, b int) int {\n\treturn 0 // Bug\n}\n"), 0644)
-	_ = os.WriteFile(filepath.Join(repoDir, "calc_test.go"), []byte("package calc\n\nimport \"testing\"\nfunc TestAdd(t *testing.T) { if Add(2,3) != 5 { t.Fatal(\"err\") } }\n"), 0644)
-
-	roster, _ := a4c.DefaultTeamRoster(rosterDir)
-	store, _ := a4c.NewDurableActivityStore(storeDir)
-	memory, _ := a4c.NewDurableMemoryStore(memDir)
-	journal, _ := a4c.NewDurableIntentJournal(journalDir)
-	gov := a4c.NewPolicyGovernor([]string{
-		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
-		"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
-	})
-	for _, m := range roster.ListMembers() {
-		gov.SetAgentTools(m.ID, m.AllowedTools)
-	}
-	runner := a4c.NewProjectTestRunner()
-
-	var provider a4c.AgentProvider
-	if useReal {
-		cp, err := a4c.NewCopilotProvider("")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to initialize Copilot: %v\n", err)
-			os.Exit(1)
-		}
-		defer cp.Close()
-		provider = cp
-	} else {
-		fake := a4c.NewFakeProvider()
-		fake.SessionResponseFunc = func(ctx context.Context, session *a4c.FakeSession, prompt string) (*a4c.AgentMessage, error) {
-			switch session.Config().AgentID {
-			case "lead":
-				if session.Config().OnProposeActivity != nil {
-					session.Config().OnProposeActivity(a4c.ActivityProposal{
-						ProposalID:      "subtask-fix-add",
-						ProposedAgentID: "coder",
-						Objective:       "Fix Add(a, b int) int in calc.go to return a + b",
-						RequestedBudget: a4c.Budget{Allocated: 20000},
-					})
-					session.Config().OnProposeActivity(a4c.ActivityProposal{
-						ProposalID:      "subtask-review",
-						ProposedAgentID: "reviewer",
-						Objective:       "Verify Add(a, b) fix and test evidence",
-						RequestedBudget: a4c.Budget{Allocated: 10000},
-						DependsOn:       []string{"subtask-fix-add"},
-					})
-				}
-				return &a4c.AgentMessage{Content: "Delegated implementation and review"}, nil
-			case "coder":
-				_ = os.WriteFile(filepath.Join(repoDir, "calc.go"), []byte("package calc\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n"), 0644)
-				if session.Config().OnProposeMemory != nil {
-					session.Config().OnProposeMemory("pure_functions", "Calculator functions must be pure and free of side effects")
-				}
-				return &a4c.AgentMessage{Content: "Applied patch to calc.go"}, nil
-			case "reviewer":
-				if session.Config().OnSubmitReview != nil {
-					session.Config().OnSubmitReview(a4c.ReviewResult{
-						Approved: true,
-						Comments: "Approved. All tests pass with exit code 0.",
-					})
-				}
-				return &a4c.AgentMessage{Content: "Review approved"}, nil
-			}
-			return &a4c.AgentMessage{Content: "Done"}, nil
-		}
-		provider = fake
-	}
-
-	coord := a4c.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, runner, provider)
-
-	fmt.Println("Submitting demo task: Fix failing tests in calc.go...")
-	_, _ = coord.SubmitTask("Fix failing tests in calc.go", a4c.Budget{Allocated: 50000}, nil)
-
-	ctx := context.Background()
-	results, err := coord.RunLoop(ctx, 10)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Demo failed: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Completed %d collaboration activities.\n", len(results))
-	exitCode, out, _ := runner.RunTests(ctx, repoDir)
-	fmt.Printf("Native tests status: ExitCode=%d (Output: %s)\n", exitCode, strings.TrimSpace(out))
-	fmt.Printf("Demo completed successfully!\n")
 }

@@ -30,10 +30,12 @@ const (
 
 // bannerLegend is the expanded name, split across the three wordmark rows so
 // the legend sits beside the logo instead of on its own line below. The
-// em-dash separator of the single-line form is implied by the row break.
+// em-dash separator of the single-line form is implied by the row break; the
+// three lines read as one phrase: Agents for Coding — Knowledge Building
+// Engineering Team.
 var bannerLegend = [3]string{
 	"Agents for Coding",
-	"Governed Local AI",
+	"Knowledge Building",
 	"Engineering Team",
 }
 

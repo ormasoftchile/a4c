@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ormasoftchile/a4c/pkg/a4c"
@@ -185,5 +186,47 @@ func TestExportAntigravity_WritesToDiscoveredPath(t *testing.T) {
 	legacy := filepath.Join(dir, ".gemini", "antigravity-cli", "skills", "a4c", "SKILL.md")
 	if _, err := os.Stat(legacy); err == nil {
 		t.Errorf("skill written to the legacy path agy does not scan: %s", legacy)
+	}
+}
+
+// TestPrimaryPromptsDocumentExecutionModes: every host's primary a4c prompt
+// must describe the three execution strategies, or an operator has no way to
+// select one. This regressed once for Antigravity, whose skill documented
+// roles, durable state, and knowledge but never mentioned the modes — so the
+// host had no idea they existed.
+func TestPrimaryPromptsDocumentExecutionModes(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(dir, "home")) // ExportCopilotAgents also merges global config
+
+	if err := a4c.ExportOpenCodeAgents(dir); err != nil {
+		t.Fatalf("ExportOpenCodeAgents: %v", err)
+	}
+	if err := a4c.ExportCopilotAgents(dir); err != nil {
+		t.Fatalf("ExportCopilotAgents: %v", err)
+	}
+	if err := a4c.ExportAntigravityCustomization(dir); err != nil {
+		t.Fatalf("ExportAntigravityCustomization: %v", err)
+	}
+
+	surfaces := []string{
+		filepath.Join(dir, ".opencode", "agents", "a4c.md"),
+		filepath.Join(dir, ".github", "agents", "a4c.agent.md"),
+		filepath.Join(dir, ".agents", "skills", "a4c", "SKILL.md"),
+	}
+	for _, path := range surfaces {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := strings.ToLower(string(data))
+		for _, mode := range []string{"direct", "reviewed", "team"} {
+			if !strings.Contains(body, mode) {
+				t.Errorf("%s does not document execution mode %q", path, mode)
+			}
+		}
+		// The operator must also learn the human acceptance boundary.
+		if !strings.Contains(body, "task accept") {
+			t.Errorf("%s does not mention the human acceptance command", path)
+		}
 	}
 }

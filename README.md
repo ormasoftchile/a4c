@@ -210,6 +210,18 @@ A4C supports three distinct execution strategies tailored to task complexity:
 | **Reviewed Mode** | `--strategy reviewed` | Specialist implementer turn, followed by an independent read-only reviewer turn gating approval on passing test evidence. | Specialist + Reviewer | Security-sensitive changes, public API modifications, production code. |
 | **Team Mode** | `--strategy team` | Lead engineer breaks down objective into delegated subtasks for specialists, followed by quality review. | Multi-turn | Complex multi-step architectural features requiring decomposition. |
 
+### Setting a workspace default mode
+
+A mode is normally named per request ("fix this in reviewed mode"), and an explicitly named mode always wins. If you mostly work one way, set a workspace default instead — it is durable state in `.a4c/config.json`, and applies to any task that names no mode:
+
+```bash
+a4c task mode                 # show the current default
+a4c task mode reviewed        # set it
+a4c task list                 # shows Mode per task
+```
+
+Resolution happens **server-side** in `team_begin_task`, not in the host's prompt, so a task gets the intended mode even when a host never mentions one. The result carries the *effective* strategy, which the agent reports back — you are never left guessing which mode ran.
+
 ### Strict Governance (opt-in)
 
 By default, interactive agents mutate files with the host's **native** `edit`/`write`/`patch` tools. That is fast, diff-aware, and supports the host's undo and snapshots — but each write happens outside A4C, so it is not intent-journaled.
@@ -272,7 +284,7 @@ The root CLI is deliberately minimal — five commands. Everything else is a sub
 | `mcp` | Serve the MCP protocol over stdio |
 | `status` | Read-only introspection of environment and state |
 
-So `a4c status doctor|team|decisions|memory|knowledge` reports, while `a4c task … decide|worker|loop` acts. The former root commands (`doctor`, `team`, `host`, `run`, `decisions`, `memory`, `knowledge`, `adopt`) were removed rather than aliased, so a displaced name fails loudly with the new invocation printed:
+So `a4c status doctor|team|decisions|memory|knowledge` reports, while `a4c task … decide|worker|loop|mode` acts. The former root commands (`doctor`, `team`, `host`, `run`, `decisions`, `memory`, `knowledge`, `adopt`) were removed rather than aliased, so a displaced name fails loudly with the new invocation printed:
 
 ```console
 $ a4c doctor

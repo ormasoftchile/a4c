@@ -136,10 +136,9 @@ func (s *TeamServiceImpl) SubmitTask(ctx context.Context, req SubmitTaskRequest)
 		return nil, fmt.Errorf("service: objective cannot be empty")
 	}
 
-	strategy := req.Strategy
-	if strategy == "" {
-		strategy = StrategyDirect
-	}
+	// An explicit strategy wins; otherwise the workspace default applies; the
+	// final fallback is direct.
+	strategy := EffectiveStrategy(req.Strategy, s.workspaceDir)
 
 	budgetTokens := req.BudgetTokens
 	if budgetTokens <= 0 {
@@ -1173,10 +1172,8 @@ func (s *TeamServiceImpl) AdoptExistingWork(ctx context.Context, req AdoptWorkRe
 		}
 	}
 
-	strategy := req.Strategy
-	if strategy == "" {
-		strategy = StrategyDirect
-	}
+	// An explicit strategy wins; otherwise the workspace default applies.
+	strategy := EffectiveStrategy(req.Strategy, s.workspaceDir)
 
 	budget := req.BudgetTokens
 	if budget <= 0 {
@@ -1599,9 +1596,10 @@ func (s *TeamServiceImpl) BeginTask(ctx context.Context, req BeginTaskRequest) (
 	if req.BudgetTokens <= 0 {
 		req.BudgetTokens = 50000.0
 	}
-	if req.Strategy == "" {
-		req.Strategy = StrategyDirect
-	}
+	// An explicit strategy wins; otherwise the workspace default applies; the
+	// final fallback is direct. Resolving here rather than in each host's prompt
+	// means a task gets the intended mode even when the host never names one.
+	req.Strategy = EffectiveStrategy(req.Strategy, s.workspaceDir)
 	if req.Coordinator == "" {
 		if req.Strategy == StrategyDirect {
 			req.Coordinator = "coder"
@@ -1661,6 +1659,7 @@ func (s *TeamServiceImpl) BeginTask(ctx context.Context, req BeginTaskRequest) (
 	return &BeginTaskResult{
 		TaskID:         taskID,
 		State:          TaskStateRunning,
+		Strategy:       req.Strategy,
 		Coordinator:    req.Coordinator,
 		WorktreePath:   wtPath,
 		WorktreeBranch: branchName,

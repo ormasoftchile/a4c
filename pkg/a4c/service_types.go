@@ -283,6 +283,9 @@ type BeginTaskRequest struct {
 type BeginTaskResult struct {
 	TaskID         string             `json:"task_id"`
 	State          TaskLifecycleState `json:"state"`
+	// Strategy is the EFFECTIVE mode after resolving any request value against
+	// the workspace default, so a caller can report what actually ran.
+	Strategy       ExecutionStrategy  `json:"strategy"`
 	Coordinator    string             `json:"coordinator"`
 	WorktreePath   string             `json:"worktree_path"`
 	WorktreeBranch string             `json:"worktree_branch"`

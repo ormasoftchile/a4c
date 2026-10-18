@@ -31,7 +31,13 @@ a4c init
 
 To create the state directory without touching host configuration, use `a4c init --no-install`. To re-wire a single host later, use `a4c install copilot`, `a4c install opencode`, or `a4c install antigravity`.
 
-Restart an existing host session after installation and allow the local A4C MCP server to start when prompted.
+Then start a host session from the project directory, and allow the local A4C MCP server to start when your host prompts for it:
+
+```bash
+copilot --agent a4c      # GitHub Copilot CLI
+opencode                 # then /agents to select a4c
+agy                      # Antigravity CLI
+```
 
 ### GitHub Copilot CLI
 

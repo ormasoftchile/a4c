@@ -90,6 +90,33 @@ func TestSuggestCommand(t *testing.T) {
 	}
 }
 
+// TestHostStartCommands pins the launch lines printed by init. They must stay
+// in sync with the README's per-host sections.
+func TestHostStartCommands(t *testing.T) {
+	cmds := hostStartCommands()
+	want := map[string]hostStartCommand{
+		"Copilot":     {host: "Copilot", command: "copilot --agent a4c"},
+		"OpenCode":    {host: "OpenCode", command: "opencode", hint: "(then /agents to select a4c)"},
+		"Antigravity": {host: "Antigravity", command: "agy"},
+	}
+	if len(cmds) != len(want) {
+		t.Fatalf("expected %d host start commands, got %d", len(want), len(cmds))
+	}
+	for _, c := range cmds {
+		if c.host == "" || c.command == "" {
+			t.Errorf("empty host start entry: %+v", c)
+		}
+		w, ok := want[c.host]
+		if !ok {
+			t.Errorf("unexpected host %q", c.host)
+			continue
+		}
+		if c.command != w.command || c.hint != w.hint {
+			t.Errorf("%s = {%q %q}, want {%q %q}", c.host, c.command, c.hint, w.command, w.hint)
+		}
+	}
+}
+
 func TestEditDistance(t *testing.T) {
 	cases := []struct {
 		a, b string

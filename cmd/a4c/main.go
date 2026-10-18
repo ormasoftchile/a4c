@@ -380,7 +380,34 @@ func runInit(args []string) {
 	}
 
 	if installed > 0 {
-		fmt.Println("Restart any open host session and allow the local A4C MCP server to start when prompted.")
+		fmt.Println("Start a host session from this directory:")
+		for _, h := range hostStartCommands() {
+			if h.hint != "" {
+				fmt.Printf("  %-11s %-20s %s\n", h.host, h.command, h.hint)
+				continue
+			}
+			fmt.Printf("  %-11s %s\n", h.host, h.command)
+		}
+		fmt.Println("Allow the local A4C MCP server to start when your host prompts for it.")
+	}
+}
+
+// hostStartCommand describes how to launch one host from the initialized
+// directory.
+type hostStartCommand struct {
+	host    string
+	command string
+	hint    string
+}
+
+// hostStartCommands lists the launch line for each host, so setup output ends
+// with something the operator can paste rather than a vague instruction. These
+// mirror the per-host sections of the README.
+func hostStartCommands() []hostStartCommand {
+	return []hostStartCommand{
+		{host: "Copilot", command: "copilot --agent a4c"},
+		{host: "OpenCode", command: "opencode", hint: "(then /agents to select a4c)"},
+		{host: "Antigravity", command: "agy"},
 	}
 }
 

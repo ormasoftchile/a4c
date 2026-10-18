@@ -294,6 +294,23 @@ It moved: use a4c status doctor
 
 Plain typos get a suggestion instead: `a4c stauts` reports `Did you mean "status"?`
 
+### Task IDs are optional
+
+`task-id` is optional on every task subcommand that takes one. Omit it and a4c targets the task that most needs attention in the relevant state — so recovering from an interruption is three commands with no copy-paste:
+
+```bash
+a4c task list                 # what's outstanding
+a4c task inspect              # what happened to the most recent task
+a4c task resume --run         # continue it
+```
+
+The chosen task is announced on stderr (`Using task task-… (interrupted): …`), so machine-readable stdout stays clean. Each subcommand prefers the states it acts on — `resume` prefers interrupted/running, `accept` prefers awaiting review — and an explicit ID always wins. When nothing is eligible you get the reason, not a usage message:
+
+```console
+$ a4c task accept
+a4c task accept: no task currently in state awaiting_human_review or awaiting_decision
+```
+
 ### Direct Mode (Headless Automation)
 Execute a focused task through a host's automation adapter:
 ```bash

@@ -75,14 +75,18 @@ Antigravity reaches a4c as a **skill**, not as a selectable agent — so a4c wil
 
 If your installed copy is still under the older `.gemini/antigravity-cli/skills/a4c/` location, current `agy` versions do not scan it — re-run `a4c install antigravity` to place it where the host looks. `a4c status doctor` reports whether the skill is at the discoverable path.
 
-The skill also needs the A4C MCP server connected. For the Antigravity CLI, register it from your project directory, then start an interactive session:
+The skill also needs the A4C MCP server connected. Register it once, then start a session from your project directory:
 
 ```bash
-agy mcp add --type stdio a4c -- "$HOME/.local/bin/a4c" mcp --dir "$PWD"
+agy mcp add --type stdio a4c -- "$HOME/.local/bin/a4c" mcp
 agy
 ```
 
-For the IDE, open the project and add the equivalent stdio server through its MCP server settings, replacing the absolute paths:
+Register **without** `--dir`. `agy mcp add` writes to one global registry (`~/.gemini/config/mcp_config.json`) shared by every project, so baking in `--dir "$PWD"` pins every project to whichever directory you happened to register from — a fresh repository then shows another repository's tasks. With no `--dir`, `a4c mcp` resolves the workspace from its working directory, which the host sets to the project it was launched from.
+
+To confirm the server bound to the repository you expect, ask it in the session which repository it is operating on, or run `agy mcp list` and check the command carries no stale `--dir`.
+
+For the IDE, open the project and add the equivalent stdio server through its MCP server settings. That configuration is per-project, so an explicit `--dir` is appropriate there:
 
 ```json
 {

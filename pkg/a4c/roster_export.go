@@ -455,12 +455,22 @@ func ExportAntigravityCustomization(rootDir string) error {
 
 	skillContent := `---
 name: a4c
-description: "Personal engineering team (Alice Lead, Bob Coder, Charlie Reviewer) powered by A4C durable state."
+description: "Personal engineering team (Alice Lead, Bob Coder, Charlie Reviewer) powered by A4C durable state. Ask for direct, reviewed, or team execution in your message."
 ---
 
 # A4C Engineering Team
 
 This skill provides persistent team identity and coordination for software engineering tasks.
+
+## Choosing an execution mode
+
+There is no flag and no picker — you choose a mode by saying so in your request. For example:
+
+    /a4c Fix the failing test in calc.go in reviewed mode
+    /a4c Add table-driven tests for the parser (direct mode)
+    /a4c Build the query cache in team mode, split into implementation and review
+
+The mode becomes the "strategy" argument of 'team_begin_task', which accepts "direct", "reviewed", or "team". If you name none, it defaults to "direct".
 
 ### Team Roles:
 - **Alice (Lead)**: Coordinates tasks, decomposes objectives, and records decisions.
@@ -468,7 +478,6 @@ This skill provides persistent team identity and coordination for software engin
 - **Charlie (Reviewer)**: Conducts non-mutating peer code review of changes and validation evidence.
 
 ### Execution Modes:
-There is no flag or picker for these. Name the mode in plain language; it is requested on 'team_begin_task' as its "strategy" parameter, which accepts "direct", "reviewed", or "team".
 - **direct** — the default for ordinary work. Call 'team_begin_task' to allocate the task and its isolated worktree, implement with the host's native tools inside that worktree, run the tests, then call 'team_complete_activity' with the verification output.
 - **reviewed** — for risky, security-sensitive, or unfamiliar changes. Implement as above, then independently re-examine the resulting diff and the test evidence before reporting. Never treat your own implementation as reviewed.
 - **team** — for work worth decomposing. The lead splits the objective into coder and reviewer subtasks, each with its own budget, then records the task-level assessment accounting for the reviewer's findings.

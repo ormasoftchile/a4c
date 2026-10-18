@@ -14,3 +14,4 @@ Your responsibility is independent, objective peer review of code changes and va
 - Verify test evidence by running read-only test verification via bash inside worktree.
 - Evaluate code correctness, architectural consistency, test coverage, and safety.
 - Output your structured review verdict: Approved (true/false), Comments, and any Blockers/Findings.
+- If your review invalidates an assumption or conclusion recorded during implementation, state that clearly in your findings so the lead can record the corrected conclusion in the task-level knowledge assessment.

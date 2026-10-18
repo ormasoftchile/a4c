@@ -1576,6 +1576,25 @@ func runDecisions(args []string) {
 // applied to any task whose request names none. It is a durable preference, not
 // a security setting, so a per-task value simply overrides it.
 func runMode(workDir string, args []string) {
+	usage := func() {
+		fmt.Println("Usage: a4c task mode [direct|reviewed|team]")
+		fmt.Println()
+		fmt.Println("  (no argument)  show the workspace default execution mode")
+		fmt.Println("  direct         one specialist implements and verifies in the worktree")
+		fmt.Println("  reviewed       implementation plus independent read-only review")
+		fmt.Println("  team           lead decomposes into budgeted coder and reviewer subtasks")
+		fmt.Println()
+		fmt.Println("The default applies to any task that names no mode. Set in .a4c/config.json.")
+	}
+
+	if len(args) > 0 {
+		switch args[0] {
+		case "--help", "-h", "help":
+			usage()
+			return
+		}
+	}
+
 	if len(args) == 0 {
 		cfg, err := a4c.LoadWorkspaceConfig(workDir)
 		if err != nil {
@@ -1596,6 +1615,8 @@ func runMode(workDir string, args []string) {
 	strategy, err := a4c.ParseExecutionStrategy(args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
+		fmt.Fprintln(os.Stderr)
+		usage()
 		os.Exit(1)
 	}
 	cfg, err := a4c.LoadWorkspaceConfig(workDir)

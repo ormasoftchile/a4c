@@ -245,7 +245,7 @@ The commands below are optional automation and administrative interfaces, not a 
 
 ### Command Surface
 
-The root CLI is deliberately minimal — six commands. Everything else is a subcommand of `task` (work and its lifecycle) or `status` (read-only introspection):
+The root CLI is deliberately minimal — five commands. Everything else is a subcommand of `task` (work and its lifecycle) or `status` (read-only introspection):
 
 | Root | Owns |
 | :--- | :--- |
@@ -254,7 +254,6 @@ The root CLI is deliberately minimal — six commands. Everything else is a subc
 | `task` | Submit, execute, review, accept, and integrate work |
 | `mcp` | Serve the MCP protocol over stdio |
 | `status` | Read-only introspection of environment and state |
-| `demo` | Self-contained demonstration |
 
 So `a4c status doctor|team|decisions|memory|knowledge` reports, while `a4c task … decide|worker|loop` acts. The former root commands (`doctor`, `team`, `host`, `run`, `decisions`, `memory`, `knowledge`, `adopt`) were removed rather than aliased, so a displaced name fails loudly with the new invocation printed:
 

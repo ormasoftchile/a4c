@@ -144,7 +144,7 @@ func (s *OpenCodeSessionAdapter) sendTurn(ctx context.Context, sessionID, endpoi
 	// 1. Submit the prompt (short transport budget; the turn itself runs
 	// asynchronously on the server and is observed via /wait + /message).
 	submitURL := fmt.Sprintf("%s/api/session/%s/prompt", endpoint, sessionID)
-	subStatus, _, err := s.doControl(actCtx, http.MethodPost, submitURL, payload, ocTransportTimeout)
+	subStatus, subBody, err := s.doControl(actCtx, http.MethodPost, submitURL, payload, ocTransportTimeout)
 	if err != nil {
 		return empty, s.classifySendErr(modelID, fmt.Errorf("opencode: prompt submit: %w", err))
 	}
@@ -155,7 +155,16 @@ func (s *OpenCodeSessionAdapter) sendTurn(ctx context.Context, sessionID, endpoi
 		return empty, s.classifySendErr(modelID, errors.New("opencode: session busy (a turn is already running)"))
 	}
 	if subStatus != http.StatusOK && subStatus != http.StatusNoContent {
-		return empty, s.classifySendErr(modelID, fmt.Errorf("opencode: prompt submit status %d", subStatus))
+		// Surface the host's own reason. A bare status code is undiagnosable —
+		// it tells you the request failed but never why.
+		reason := strings.TrimSpace(string(subBody))
+		if len(reason) > 300 {
+			reason = reason[:300] + "…"
+		}
+		if reason == "" {
+			reason = "no response body"
+		}
+		return empty, s.classifySendErr(modelID, fmt.Errorf("opencode: prompt submit status %d: %s", subStatus, reason))
 	}
 
 	// 2. Poll for completion. The message list is requested in ascending

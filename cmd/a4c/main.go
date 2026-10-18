@@ -579,7 +579,7 @@ func configureProviderForCoordinator(coord *a4c.TeamCoordinator, runtime string,
 
 func runTask(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject|decide|worker|loop> [options]")
+		fmt.Println("Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject|decide|worker|loop|mode> [options]")
 		return
 	}
 
@@ -595,7 +595,7 @@ func runTask(args []string) {
 	}
 	args = cleanArgs
 	if len(args) == 0 {
-		fmt.Println("Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject|decide|worker|loop> [options]")
+		fmt.Println("Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject|decide|worker|loop|mode> [options]")
 		return
 	}
 
@@ -615,7 +615,9 @@ func runTask(args []string) {
 		}
 		objective := args[1]
 		budgetTokens := 50000.0
-		strategy := a4c.StrategyDirect
+		// Unset unless --strategy is given, so the workspace default applies. The
+		// effective value is resolved for display below.
+		var strategy a4c.ExecutionStrategy
 		runtime := ""
 		model := ""
 		specialist := ""
@@ -681,7 +683,7 @@ func runTask(args []string) {
 			os.Exit(1)
 		}
 		fmt.Printf("Task enqueued: %s\nStrategy: %s\nState: %s\nObjective: %s\nBudget: %.0f tokens\n",
-			ref.TaskID, strategy, ref.State, objective, budgetTokens)
+			ref.TaskID, a4c.EffectiveStrategy(strategy, workDir), ref.State, objective, budgetTokens)
 
 	case "start":
 		if len(args) < 2 {
@@ -690,7 +692,9 @@ func runTask(args []string) {
 		}
 		objective := args[1]
 		budgetTokens := 50000.0
-		strategy := a4c.StrategyDirect
+		// Unset unless --strategy is given, so the workspace default applies. The
+		// effective value is resolved for display below.
+		var strategy a4c.ExecutionStrategy
 		runtime := ""
 		model := ""
 		reviewerRuntime := ""
@@ -768,7 +772,7 @@ func runTask(args []string) {
 			os.Exit(1)
 		}
 		fmt.Printf("Task started: %s\nStrategy: %s\nObjective: %s\nExecuting with %s (max %d steps)...\n",
-			ref.TaskID, strategy, objective, specialistOrFallback(specialist, "coder"), steps)
+			ref.TaskID, a4c.EffectiveStrategy(strategy, workDir), objective, specialistOrFallback(specialist, "coder"), steps)
 
 		cleanup, err := configureProviderForCoordinator(svc.Coordinator(), runtime, model, realCopilot, opencodeEndpoint)
 		if err != nil {
@@ -1019,7 +1023,9 @@ func runTask(args []string) {
 		notes := ""
 		runtime := ""
 		model := ""
-		strategy := a4c.StrategyDirect
+		// Unset unless --strategy is given, so the workspace default applies. The
+		// effective value is resolved for display below.
+		var strategy a4c.ExecutionStrategy
 		inPlace := false
 		runImmediately := false
 		steps := 10
@@ -1365,6 +1371,9 @@ func runTask(args []string) {
 	case "decide":
 		runDecide(args[1:])
 
+	case "mode":
+		runMode(workDir, args[1:])
+
 	case "worker":
 		runHost(args[1:])
 
@@ -1373,7 +1382,7 @@ func runTask(args []string) {
 
 	default:
 		fmt.Printf("Unknown task command %q.\n", subCmd)
-		fmt.Fprintln(os.Stderr, "Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject|decide|worker|loop>")
+		fmt.Fprintln(os.Stderr, "Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject|decide|worker|loop|mode>")
 		os.Exit(1)
 	}
 }
@@ -1531,6 +1540,13 @@ func printStatusOverview() {
 	if kbDir, kbErr := a4c.ResolveKnowledgeDir("."); kbErr == nil {
 		fmt.Printf("Knowledge Base: %s\n", kbDir)
 	}
+	if cfg, cfgErr := a4c.LoadWorkspaceConfig("."); cfgErr == nil {
+		if cfg.DefaultStrategy == "" {
+			fmt.Println("Default Mode:   direct (not set)")
+		} else {
+			fmt.Printf("Default Mode:   %s\n", cfg.DefaultStrategy)
+		}
+	}
 }
 
 // runDecisions lists open questions awaiting the human engineer. Resolving one
@@ -1554,6 +1570,45 @@ func runDecisions(args []string) {
 		fmt.Printf("Question: %s\n", dec.Question)
 		fmt.Printf("Context:  %v\n", dec.Context)
 	}
+}
+
+// runMode reads or sets the workspace's default execution strategy — the mode
+// applied to any task whose request names none. It is a durable preference, not
+// a security setting, so a per-task value simply overrides it.
+func runMode(workDir string, args []string) {
+	if len(args) == 0 {
+		cfg, err := a4c.LoadWorkspaceConfig(workDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		if cfg.DefaultStrategy == "" {
+			fmt.Println("Default execution mode: direct (not set)")
+		} else {
+			fmt.Printf("Default execution mode: %s\n", cfg.DefaultStrategy)
+		}
+		fmt.Println("Change it:      a4c task mode <direct|reviewed|team>")
+		fmt.Println("Per task:       name the mode in the request to override it")
+		fmt.Println("Check a task:   a4c task list   (shows Mode per task)")
+		return
+	}
+
+	strategy, err := a4c.ParseExecutionStrategy(args[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	cfg, err := a4c.LoadWorkspaceConfig(workDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	cfg.DefaultStrategy = strategy
+	if err := a4c.SaveWorkspaceConfig(workDir, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to save workspace config: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Default execution mode set to %s. New tasks that name no mode will use it.\n", strategy)
 }
 
 // runDecide resolves an open decision and resumes the paused task, so it is

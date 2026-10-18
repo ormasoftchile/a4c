@@ -77,6 +77,7 @@ You operate natively within GitHub Copilot.
 4. **Human Acceptance**: AI agents NEVER self-approve or integrate changes ('team_accept' and 'team_integrate' are strictly denied). Human approval must be performed via the CLI: 'a4c task accept <task-id>' and 'a4c task integrate <task-id>'.
 
 ### Execution Modes
+Name the mode the user asks for as the "strategy" argument of 'team_begin_task' ("direct", "reviewed", or "team"). If the user names none, omit it and the workspace default applies — set with 'a4c task mode <direct|reviewed|team>'. 'team_begin_task' returns the EFFECTIVE strategy; report it back (for example: "Started task task-… in reviewed mode") so the operator never has to guess which mode ran.
 - **Direct Mode (Default for Ordinary Tasks)**:
   1. Call 'team_begin_task(objective: "...", strategy: "direct")' to allocate the worktree and durable task identity.
   2. Implement code changes directly using native edit and write tools.
@@ -318,6 +319,7 @@ You operate natively within OpenCode.
 4. **Human Acceptance**: AI agents NEVER self-approve or integrate changes ('team_accept' and 'team_integrate' are strictly denied). Human approval must be performed via the CLI: 'a4c task accept <task-id>' and 'a4c task integrate <task-id>'.
 
 ### Execution Modes
+Name the mode the user asks for as the "strategy" argument of 'team_begin_task' ("direct", "reviewed", or "team"). If the user names none, omit it and the workspace default applies — set with 'a4c task mode <direct|reviewed|team>'. 'team_begin_task' returns the EFFECTIVE strategy; report it back (for example: "Started task task-… in reviewed mode") so the operator never has to guess which mode ran.
 - **Direct Mode (Default for Ordinary Tasks)**:
   1. Call 'team_begin_task(objective: "...", strategy: "direct")' to allocate the worktree and durable task identity.
   2. Implement code changes directly using native edit/write tools.
@@ -464,13 +466,15 @@ This skill provides persistent team identity and coordination for software engin
 
 ## Choosing an execution mode
 
-There is no flag and no picker — you choose a mode by saying so in your request. For example:
+There is no picker — you choose a mode by saying so in your request:
 
     /a4c Fix the failing test in calc.go in reviewed mode
     /a4c Add table-driven tests for the parser (direct mode)
     /a4c Build the query cache in team mode, split into implementation and review
 
-The mode becomes the "strategy" argument of 'team_begin_task', which accepts "direct", "reviewed", or "team". If you name none, it defaults to "direct".
+The mode becomes the "strategy" argument of 'team_begin_task', which accepts "direct", "reviewed", or "team". If the user names none, omit it and the WORKSPACE DEFAULT applies — set with 'a4c task mode <direct|reviewed|team>', read with 'a4c task mode'.
+
+'team_begin_task' returns the EFFECTIVE strategy in its result. Always report it back (for example: "Started task task-… in reviewed mode") so the operator is never guessing which mode ran. To check any existing task's mode, run 'a4c task list'.
 
 ### Team Roles:
 - **Alice (Lead)**: Coordinates tasks, decomposes objectives, and records decisions.

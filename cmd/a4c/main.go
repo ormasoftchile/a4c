@@ -574,6 +574,63 @@ func configureProviderForCoordinator(coord *a4c.TeamCoordinator, runtime string,
 	return cleanup, nil
 }
 
+// taskIDTakingSubcommands lists the task subcommands whose first positional
+// argument is a task ID, with the states to prefer when the ID is omitted. A
+// nil preference means "most recently updated task, whatever its state".
+var taskIDTakingSubcommands = map[string][]a4c.TaskLifecycleState{
+	"resume":     {a4c.TaskStateInterrupted, a4c.TaskStateRunning, a4c.TaskStateFailed, a4c.TaskStateQueued},
+	"checkpoint": {a4c.TaskStateRunning, a4c.TaskStateInterrupted, a4c.TaskStateQueued, a4c.TaskStateFailed},
+	"inspect":    nil,
+	"history":    nil,
+	"diff":       {a4c.TaskStateAwaitingHumanReview, a4c.TaskStateAwaitingDecision, a4c.TaskStateAccepted, a4c.TaskStateRunning, a4c.TaskStateInterrupted},
+	"feedback":   {a4c.TaskStateAwaitingHumanReview, a4c.TaskStateAwaitingDecision, a4c.TaskStateRevisionRequested},
+	"accept":     {a4c.TaskStateAwaitingHumanReview, a4c.TaskStateAwaitingDecision},
+	"escalate":   {a4c.TaskStateAwaitingHumanReview, a4c.TaskStateAwaitingDecision, a4c.TaskStateFailed},
+	"integrate":  {a4c.TaskStateAccepted},
+	"reject":     {a4c.TaskStateAwaitingHumanReview, a4c.TaskStateAwaitingDecision},
+}
+
+// withImplicitTaskID inserts a resolved task ID when the operator omitted one.
+// The notice goes to stderr so any machine-readable stdout stays parseable.
+func withImplicitTaskID(svc *a4c.TeamServiceImpl, args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	prefer, takesID := taskIDTakingSubcommands[args[0]]
+	if !takesID {
+		return args
+	}
+	// A positional ID was supplied.
+	if len(args) > 1 {
+		switch args[0] {
+		case "feedback", "reject":
+			// Free text follows the ID here, so anything not shaped like a task
+			// ID is the text, not the ID.
+			if strings.HasPrefix(args[1], "task-") {
+				return args
+			}
+		default:
+			if !strings.HasPrefix(args[1], "-") {
+				return args
+			}
+		}
+	}
+
+	resolved, err := svc.ResolveTask("", prefer)
+	if err != nil {
+		// The command was well-formed; there is simply no task to apply it to.
+		// Reporting the resolver's own reason beats falling through to usage.
+		fmt.Fprintf(os.Stderr, "a4c task %s: %v\n", args[0], err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "Using task %s (%s): %s\n", resolved.TaskID, resolved.State, resolved.Objective)
+
+	out := make([]string, 0, len(args)+1)
+	out = append(out, args[0], resolved.TaskID)
+	out = append(out, args[1:]...)
+	return out
+}
+
 func runTask(args []string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject|decide|worker|loop|mode> [options]")
@@ -602,6 +659,11 @@ func runTask(args []string) {
 		fmt.Fprintf(os.Stderr, "Workspace not initialized. Run 'a4c init': %v\n", err)
 		os.Exit(1)
 	}
+
+	// A task ID may be omitted: a4c resolves the task that most needs attention
+	// in the relevant state, so the common case never means copy-pasting an
+	// opaque identifier.
+	args = withImplicitTaskID(svc, args)
 
 	subCmd := args[0]
 	switch subCmd {
@@ -877,7 +939,7 @@ func runTask(args []string) {
 
 	case "resume":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task resume <task-id> [--runtime <r>] [--model <m>] [--specialist <s>] [--instructions <text>] [--run] [--steps N]")
+			fmt.Println("Usage: a4c task resume [task-id] [--runtime <r>] [--model <m>] [--specialist <s>] [--instructions <text>] [--run] [--steps N]")
 			return
 		}
 		taskID := args[1]
@@ -1104,7 +1166,7 @@ func runTask(args []string) {
 
 	case "escalate":
 		if len(args) < 3 {
-			fmt.Println("Usage: a4c task escalate <task-id> <reviewed|team> [--reviewer <agent>]")
+			fmt.Println("Usage: a4c task escalate [task-id] <reviewed|team> [--reviewer <agent>]")
 			return
 		}
 		taskID := args[1]
@@ -1131,7 +1193,7 @@ func runTask(args []string) {
 
 	case "checkpoint":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task checkpoint <task-id> [--json]")
+			fmt.Println("Usage: a4c task checkpoint [task-id] [--json]")
 			return
 		}
 		taskID := args[1]
@@ -1191,7 +1253,7 @@ func runTask(args []string) {
 
 	case "history":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task history <task-id>")
+			fmt.Println("Usage: a4c task history [task-id]")
 			return
 		}
 		taskID := args[1]
@@ -1219,7 +1281,7 @@ func runTask(args []string) {
 			}
 		}
 		if taskID == "" {
-			fmt.Println("Usage: a4c task inspect <task-id> [--json]")
+			fmt.Println("Usage: a4c task inspect [task-id] [--json]")
 			return
 		}
 
@@ -1249,7 +1311,7 @@ func runTask(args []string) {
 
 	case "diff":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task diff <task-id> [--json]")
+			fmt.Println("Usage: a4c task diff [task-id] [--json]")
 			return
 		}
 		taskID := args[1]
@@ -1275,7 +1337,7 @@ func runTask(args []string) {
 
 	case "feedback":
 		if len(args) < 3 {
-			fmt.Println("Usage: a4c task feedback <task-id> <feedback text> [--agent <agent>]")
+			fmt.Println("Usage: a4c task feedback [task-id] <feedback text> [--agent <agent>]")
 			return
 		}
 		taskID := args[1]
@@ -1300,7 +1362,7 @@ func runTask(args []string) {
 
 	case "accept":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task accept <task-id> [comments] [--token <auth-token>]")
+			fmt.Println("Usage: a4c task accept [task-id] [comments] [--token <auth-token>]")
 			return
 		}
 		taskID := args[1]
@@ -1336,7 +1398,7 @@ func runTask(args []string) {
 
 	case "integrate":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task integrate <task-id>")
+			fmt.Println("Usage: a4c task integrate [task-id]")
 			return
 		}
 		taskID := args[1]
@@ -1350,7 +1412,7 @@ func runTask(args []string) {
 
 	case "reject":
 		if len(args) < 3 {
-			fmt.Println("Usage: a4c task reject <task-id> <reason>")
+			fmt.Println("Usage: a4c task reject [task-id] <reason>")
 			return
 		}
 		taskID := args[1]

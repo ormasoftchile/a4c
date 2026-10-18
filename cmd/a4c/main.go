@@ -1469,6 +1469,12 @@ func runMCP(args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to initialize A4C service: %v\n", err)
 		os.Exit(1)
 	}
+	// Announce the bound workspace on stderr (never stdout, which carries
+	// JSON-RPC). Without this, a server pinned to the wrong directory looks
+	// exactly like a healthy one — it just serves another project's tasks.
+	if abs, absErr := filepath.Abs(workDir); absErr == nil {
+		fmt.Fprintf(os.Stderr, "a4c mcp: serving %s\n", abs)
+	}
 	srv := a4cmcp.NewServerWithRole(svc, role)
 
 	if err := srv.ServeStdio(); err != nil {

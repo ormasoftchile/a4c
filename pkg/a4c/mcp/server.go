@@ -211,6 +211,16 @@ func (s *Server) registerTools() {
 		s.handleApplyPatch,
 	)
 
+	// 14. team_resume (Lead & Coder) — continue an existing task in its worktree.
+	addAgentTool(true, true, false,
+		mcp.NewTool("team_resume",
+			mcp.WithDescription("Resume an existing task inside its existing worktree, reporting the work already done and what remains. Use this INSTEAD of team_begin_task whenever prior work exists: work lives in the task worktree, not the main checkout, so a partially-completed task looks like an empty repository if you only inspect the checkout."),
+			mcp.WithString("task_id", mcp.Description("Task to resume. Omitted: the most recent task that still needs attention.")),
+			mcp.WithString("instructions", mcp.Description("Optional guidance for the resumed work")),
+		),
+		s.handleResume,
+	)
+
 	// 12. team_review_result (Reviewer only)
 	addAgentTool(false, false, true,
 		mcp.NewTool("team_review_result",
@@ -585,6 +595,38 @@ func (s *Server) handleApplyPatch(ctx context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return jsonResult(res)
+}
+
+// handleResume continues an existing task inside its existing worktree. It is
+// the interactive counterpart of 'a4c task resume', which until now was the
+// ONLY resumption path — so a host-native agent asked to resume could only ever
+// call team_begin_task and therefore reported existing work as a fresh start.
+func (s *Server) handleResume(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	taskID := req.GetString("task_id", "")
+	if strings.TrimSpace(taskID) == "" {
+		// Same resolution the CLI uses: whatever most needs attention.
+		resolved, err := s.service.ResolveTask("", []a4c.TaskLifecycleState{
+			a4c.TaskStateInterrupted, a4c.TaskStateRunning,
+			a4c.TaskStateFailed, a4c.TaskStateQueued,
+			a4c.TaskStateAwaitingHumanReview, a4c.TaskStateAwaitingDecision,
+			a4c.TaskStateRevisionRequested,
+		})
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("no task to resume: %v", err)), nil
+		}
+		taskID = resolved.TaskID
+	}
+
+	chk, err := s.service.ResumeTaskOnHost(ctx, a4c.ResumeTaskRequest{
+		TaskID:       taskID,
+		Instructions: req.GetString("instructions", ""),
+	})
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	// The checkpoint is the whole point: it names the worktree the work lives
+	// in and what is already done, so the caller continues rather than restarts.
+	return jsonResult(chk)
 }
 
 func (s *Server) handleReviewResult(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

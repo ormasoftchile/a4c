@@ -2294,7 +2294,7 @@ func (c *TeamCoordinator) getWorkspaceDiff(ctx context.Context, dir string) (str
 	}
 
 	// Fallback status
-	cmdStat := exec.CommandContext(ctx, "git", "status", "--short")
+	cmdStat := exec.CommandContext(ctx, "git", "status", "--short", "-uall")
 	cmdStat.Dir = dir
 	outStat, _ := cmdStat.CombinedOutput()
 	if len(strings.TrimSpace(string(outStat))) > 0 {

@@ -32,6 +32,7 @@ You operate natively within OpenCode.
 4. **Human Acceptance**: AI agents NEVER self-approve or integrate changes ('team_accept' and 'team_integrate' are strictly denied). Human approval must be performed via the CLI: 'a4c task accept <task-id>' and 'a4c task integrate <task-id>'.
 
 ### Execution Modes
+Name the mode the user asks for as the "strategy" argument of 'team_begin_task' ("direct", "reviewed", or "team"). If the user names none, omit it and the workspace default applies. Handle that default with the a4c CLI — do not ask the user to pick from a menu and do not guess: read it with 'a4c task mode', set it with 'a4c task mode <direct|reviewed|team>'. 'team_begin_task' returns the EFFECTIVE strategy; report it back (for example: "Started task task-… in reviewed mode") so the operator never has to guess which mode ran.
 - **Direct Mode (Default for Ordinary Tasks)**:
   1. Call 'team_begin_task(objective: "...", strategy: "direct")' to allocate the worktree and durable task identity.
   2. Implement code changes directly using native edit/write tools.
@@ -43,6 +44,9 @@ You operate natively within OpenCode.
   2. After the review returns, call 'team_complete_activity' on the root task with the final knowledge disposition, accounting for the reviewer's findings (amend the knowledge field if the root was already completed).
 - **Team Collaboration (When requested)**:
   - Decompose into distinct specialist subagents (e.g. '@bob', '@charlie') only when multi-agent collaboration is explicitly desired.
+
+### Resuming Existing Work
+Before calling 'team_begin_task', call 'team_list' and look for an unfinished task with the same or a similar objective. Work lives in the task's WORKTREE (.a4c/worktrees/<task-id>/tree), NOT the main checkout — a partially-completed task looks like an empty repository if you only inspect the checkout. If an unfinished task exists, call 'team_resume' (task_id optional) instead of beginning a new one: it returns the worktree path, the work already completed, and the remaining obligations. Never report existing work as a fresh start.
 
 ### Engineering Knowledge
 - Call 'team_context'; its 'knowledge_dir' is THIS repository's knowledge base at ~/.a4c/<repo-name>/knowledge/. Nothing is stored inside the source repository.

@@ -42,6 +42,10 @@ type TeamService interface {
 	GetWorktreePath(taskID string) (string, error)
 	WorkspaceDir() string
 
+	// ResolveTask turns an optional task identifier into the task the operator
+	// most likely means, so callers need not demand opaque IDs.
+	ResolveTask(explicit string, prefer []TaskLifecycleState) (*TaskSummary, error)
+
 	// ApplyWorkspaceFile performs a governed, journaled file write inside a
 	// task worktree. It backs the team_apply_patch MCP tool used by
 	// strict-governance profiles that deny native edit/write/patch.
@@ -720,7 +724,10 @@ func (s *TeamServiceImpl) CaptureCheckpoint(ctx context.Context, taskID string) 
 
 	// 1. Get git status summary & diff
 	gitStatusSummary := ""
-	cmdStat := exec.CommandContext(ctx, "git", "status", "--short")
+	// -uall enumerates untracked FILES individually; without it git collapses a
+	// new directory to "src/", which tells a resuming agent that something
+	// exists but not what — exactly the information it needs to continue.
+	cmdStat := exec.CommandContext(ctx, "git", "status", "--short", "-uall")
 	cmdStat.Dir = s.absPath(wtPath)
 	if out, err := cmdStat.CombinedOutput(); err == nil {
 		gitStatusSummary = strings.TrimSpace(string(out))

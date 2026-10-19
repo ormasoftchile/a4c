@@ -90,6 +90,9 @@ Name the mode the user asks for as the "strategy" argument of 'team_begin_task' 
 - **Team Collaboration (When requested)**:
   - Decompose into distinct specialist assignments (e.g. Bob for coding, Charlie for review) only when multi-agent collaboration is explicitly desired.
 
+### Resuming Existing Work
+Before calling 'team_begin_task', call 'team_list' and look for an unfinished task with the same or a similar objective. Work lives in the task's WORKTREE (.a4c/worktrees/<task-id>/tree), NOT the main checkout — a partially-completed task looks like an empty repository if you only inspect the checkout. If an unfinished task exists, call 'team_resume' (task_id optional) instead of beginning a new one: it returns the worktree path, the work already completed, and the remaining obligations. Never report existing work as a fresh start.
+
 ### Engineering Knowledge
 - Call 'team_context'; its 'knowledge_dir' is THIS repository's knowledge base at ~/.a4c/<repo-name>/knowledge/. Nothing is stored inside the source repository.
 - When prior knowledge would help, read knowledge/INDEX.md and relevant documents before designing.
@@ -332,6 +335,9 @@ Name the mode the user asks for as the "strategy" argument of 'team_begin_task' 
 - **Team Collaboration (When requested)**:
   - Decompose into distinct specialist subagents (e.g. '@bob', '@charlie') only when multi-agent collaboration is explicitly desired.
 
+### Resuming Existing Work
+Before calling 'team_begin_task', call 'team_list' and look for an unfinished task with the same or a similar objective. Work lives in the task's WORKTREE (.a4c/worktrees/<task-id>/tree), NOT the main checkout — a partially-completed task looks like an empty repository if you only inspect the checkout. If an unfinished task exists, call 'team_resume' (task_id optional) instead of beginning a new one: it returns the worktree path, the work already completed, and the remaining obligations. Never report existing work as a fresh start.
+
 ### Engineering Knowledge
 - Call 'team_context'; its 'knowledge_dir' is THIS repository's knowledge base at ~/.a4c/<repo-name>/knowledge/. Nothing is stored inside the source repository.
 - When prior knowledge would help, read knowledge/INDEX.md and relevant documents before designing.
@@ -497,6 +503,9 @@ Whatever the mode, acceptance and integration remain the human's: report the com
 - Connects to 'a4c mcp' server for durable task lifecycles, checkpoints, and review verification.
 - Enforces non-mutating reviewer boundaries.
 - Preserves progress across coding agent sessions and host environments.
+
+### Resuming Existing Work:
+Before calling 'team_begin_task', run 'a4c task list' (or call 'team_list') and look for an unfinished task with the same or a similar objective. Work lives in the task's WORKTREE (.a4c/worktrees/<task-id>/tree), NOT the main checkout — a partially-completed task looks like an empty repository if you only inspect the checkout. If an unfinished task exists, call 'team_resume' (task_id optional) instead of beginning a new one: it returns the worktree path, the work already completed, and the remaining obligations. Never report existing work as a fresh start.
 
 ### Engineering Knowledge:
 - 'team_context' returns 'knowledge_dir': this repository's knowledge base at ~/.a4c/<repo-name>/knowledge/.

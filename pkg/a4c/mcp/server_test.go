@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/client"
@@ -200,6 +201,7 @@ func TestMCPServer_ToolDiscovery(t *testing.T) {
 		"team_complete_activity": false,
 		"team_review_result":     false,
 		"team_apply_patch":       false,
+		"team_resume":            false,
 	}
 
 	prohibitedTools := map[string]bool{
@@ -261,6 +263,7 @@ func TestMCPServer_RoleDiscovery_Coder(t *testing.T) {
 		"team_checkpoint":        true,
 		"team_complete_activity": true,
 		"team_apply_patch":       true,
+		"team_resume":            true,
 	}
 
 	prohibited := []string{
@@ -313,7 +316,7 @@ func TestMCPServer_RoleDiscovery_Reviewer(t *testing.T) {
 	prohibited := []string{
 		"team_delegate", "team_complete_activity", "team_list", "team_feedback",
 		"team_context", "team_begin_task", "team_assign_activity",
-		"team_accept", "team_integrate", "team_apply_patch",
+		"team_accept", "team_integrate", "team_apply_patch", "team_resume",
 		"governed_read_file", "governed_apply_patch", "governed_git_inspect", "governed_run_tests",
 		"governed_structural_search_symbols", "governed_structural_context_for", "governed_structural_callers",
 	}
@@ -361,6 +364,7 @@ func TestMCPServer_RoleDiscovery_Lead(t *testing.T) {
 		"team_assign_activity":   true,
 		"team_checkpoint":        true,
 		"team_complete_activity": true,
+		"team_resume":            true,
 	}
 
 	prohibited := []string{
@@ -854,5 +858,88 @@ func TestMCPServer_ApplyPatch_EndToEnd(t *testing.T) {
 	}
 	if !escRes.IsError {
 		t.Errorf("expected traversal to fail closed through MCP")
+	}
+}
+
+// TestMCPServer_Resume_DetectsPriorWork reproduces the reported failure: a task
+// makes progress, the session dies, and a NEW host asks to resume. Work lives in
+// the task worktree, not the main checkout, so an agent that only inspects the
+// checkout sees an empty repository. team_resume must return the same worktree
+// and report the work already there.
+func TestMCPServer_Resume_DetectsPriorWork(t *testing.T) {
+	h := setupMCPHarness(t)
+	defer h.client.Close()
+
+	ctx := context.Background()
+
+	// 1. Begin a task; note the worktree it provisions.
+	beginRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_begin_task",
+			Arguments: map[string]any{
+				"objective":     "Build a command line calculator",
+				"budget_tokens": float64(50000),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("team_begin_task: %v", err)
+	}
+	var begun a4c.BeginTaskResult
+	if err := json.Unmarshal([]byte(beginRes.Content[0].(mcp.TextContent).Text), &begun); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// 2. Progress happens in the worktree — invisible from the main checkout.
+	prior := "package calc\n\nfunc Add(a, b int) int { return a + b }\n"
+	applyRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_apply_patch",
+			Arguments: map[string]any{
+				"task_id": begun.TaskID,
+				"path":    "src/calc.go",
+				"content": prior,
+				"agent":   "coder",
+			},
+		},
+	})
+	if err != nil || applyRes.IsError {
+		t.Fatalf("team_apply_patch: %v %+v", err, applyRes)
+	}
+
+	// 3. A new host resumes WITHOUT naming the task — the reported scenario.
+	resumeRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Name: "team_resume", Arguments: map[string]any{}},
+	})
+	if err != nil {
+		t.Fatalf("team_resume: %v", err)
+	}
+	if resumeRes.IsError {
+		t.Fatalf("team_resume returned error: %+v", resumeRes)
+	}
+
+	var chk a4c.TaskCheckpoint
+	if err := json.Unmarshal([]byte(resumeRes.Content[0].(mcp.TextContent).Text), &chk); err != nil {
+		t.Fatalf("unmarshal checkpoint: %v\n%s", err, resumeRes.Content[0].(mcp.TextContent).Text)
+	}
+
+	if chk.TaskID != begun.TaskID {
+		t.Errorf("resumed %q, want the existing task %q", chk.TaskID, begun.TaskID)
+	}
+	if chk.WorktreePath != begun.WorktreePath {
+		t.Errorf("resumed into a DIFFERENT worktree:\n  got  %s\n  want %s\nprior work would be invisible",
+			chk.WorktreePath, begun.WorktreePath)
+	}
+
+	// The checkpoint must surface the prior work, not just the path.
+	found := false
+	for _, f := range append(chk.NewFiles, chk.ModifiedFiles...) {
+		if strings.Contains(f, "src/calc.go") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("checkpoint did not report the prior work; got new=%v modified=%v",
+			chk.NewFiles, chk.ModifiedFiles)
 	}
 }

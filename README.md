@@ -115,11 +115,13 @@ After selecting the agent or skill in any of the three hosts, try:
 
 For a small change, ask for **Direct** mode. For independent read-only review, ask for **Reviewed** mode. Request **Team** mode when you want explicit specialist collaboration.
 
-A4C records the task, works in its assigned isolated worktree, runs verification, and preserves evidence and checkpoints. It returns a task ID for inspection and continuation. Human acceptance and integration remain explicit CLI actions; the agent does not approve or merge its own work.
+A4C records the task, works in its assigned isolated worktree, runs verification, and preserves evidence and checkpoints. Human acceptance and integration remain explicit CLI actions; the agent does not approve or merge its own work.
 
 To continue in another host, open the same repository, select its A4C agent or skill, and ask:
 
-> Resume A4C task `<task-id>` from its checkpoint. Inspect the saved changes and verification evidence before continuing.
+> Resume my a4c task from its checkpoint. Inspect the saved changes and verification evidence before continuing.
+
+You do not need to supply a task ID — it is resolved to the task that most needs attention and named back to you. Note where the work actually lives: the task's **worktree** (`.a4c/worktrees/<task-id>/tree`), not the main checkout. A partially-completed task therefore looks like an empty repository if you only inspect the checkout, which is why the agent is instructed to check for an unfinished task and call `team_resume` — returning the worktree path and the work already done — rather than beginning again.
 
 The `.a4c/` directory contains local task state and evidence; it is not committed with the code. A different machine needs that state as well as the task branch, with saved workspace paths relocated if necessary.
 

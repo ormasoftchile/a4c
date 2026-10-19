@@ -52,7 +52,6 @@ type TeamService interface {
 	ApplyWorkspaceFile(ctx context.Context, req ApplyWorkspaceFileRequest) (*ApplyFileResult, error)
 }
 
-
 // TeamServiceImpl is the default production implementation of TeamService.
 type TeamServiceImpl struct {
 	mu             sync.Mutex
@@ -307,6 +306,26 @@ func (s *TeamServiceImpl) ListTasks(ctx context.Context, filter TaskFilter) ([]T
 }
 
 // GetTaskDiff computes file modifications between the task worktree and the base repository.
+// untrackedFiles lists files git has not been told about, enumerated
+// individually (-uall) rather than collapsed to their top directory.
+func untrackedFiles(ctx context.Context, dir string) []string {
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "-uall")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 4 || !strings.HasPrefix(line, "??") {
+			continue
+		}
+		files = append(files, strings.TrimSpace(line[3:]))
+	}
+	return files
+}
+
 func (s *TeamServiceImpl) GetTaskDiff(ctx context.Context, taskID string) (*DiffResult, error) {
 	_, err := s.store.Get(taskID)
 	if err != nil {
@@ -338,6 +357,19 @@ func (s *TeamServiceImpl) GetTaskDiff(ctx context.Context, taskID string) (*Diff
 		cmdBranchDiff.Dir = workDir
 		if bOut, bErr := cmdBranchDiff.CombinedOutput(); bErr == nil && len(strings.TrimSpace(string(bOut))) > 0 {
 			rawDiff = string(bOut)
+		}
+	}
+
+	// 2b. Untracked files are invisible to 'git diff' — and new work is exactly
+	// what a task usually produces. Without this a task that created
+	// src/calc.go reports an empty diff, inviting the operator to approve
+	// nothing. Enumerate them and synthesize a per-file diff.
+	for _, rel := range untrackedFiles(ctx, workDir) {
+		cmdNew := exec.CommandContext(ctx, "git", "diff", "--no-index", "--", "/dev/null", rel)
+		cmdNew.Dir = workDir
+		// --no-index exits 1 when the files differ; the output is what matters.
+		if out, _ := cmdNew.CombinedOutput(); len(out) > 0 {
+			rawDiff += string(out)
 		}
 	}
 
@@ -1457,7 +1489,6 @@ func (s *TeamServiceImpl) reviewedSnapshot(taskID string) string {
 	return best
 }
 
-
 func parseGitDiff(raw string) ([]FileDiff, int, int) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, 0, 0
@@ -2164,7 +2195,6 @@ func (s *TeamServiceImpl) RecordReview(ctx context.Context, req RecordReviewRequ
 		commit = req.SnapshotSHA
 	}
 
-
 	revActID := fmt.Sprintf("%s-review-%d", req.TaskID, time.Now().UnixNano()%1000000)
 	isApproved := strings.EqualFold(req.Verdict, "approved")
 	revResult := ActivityResult{
@@ -2228,4 +2258,3 @@ func (s *TeamServiceImpl) RecordReview(ctx context.Context, req RecordReviewRequ
 		SnapshotSHA:    commit,
 	}, nil
 }
-

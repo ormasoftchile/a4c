@@ -5,6 +5,8 @@ go 1.25.7
 require (
 	github.com/github/copilot-sdk/go v1.0.17
 	github.com/mark3labs/mcp-go v1.2.0
+	golang.org/x/sys v0.22.0
+	modernc.org/sqlite v1.34.5
 )
 
 require (
@@ -25,10 +27,8 @@ require (
 	go.opentelemetry.io/otel v1.35.0 // indirect
 	go.opentelemetry.io/otel/metric v1.35.0 // indirect
 	go.opentelemetry.io/otel/trace v1.35.0 // indirect
-	golang.org/x/sys v0.22.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect
 	modernc.org/memory v1.8.0 // indirect
-	modernc.org/sqlite v1.34.5 // indirect
 )

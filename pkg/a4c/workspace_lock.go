@@ -37,7 +37,7 @@ func AcquireWorkspaceLock(workspaceDir string, coordID string, taskID string) (*
 	}
 	lockPath := filepath.Join(dotDir, "workspace.lock")
 
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	f, err := openLockFile(lockPath)
 	if err != nil {
 		return nil, fmt.Errorf("lock: failed to open %s: %w", lockPath, err)
 	}

@@ -10,6 +10,15 @@ import (
 	"time"
 )
 
+// requireMake skips a preflight that executes a Makefile-based verification
+// contract on hosts without make installed (commonly the case on Windows).
+func requireMake(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skipf("make not available on this host, skipping Makefile verification preflight: %v", err)
+	}
+}
+
 // preflightRepo creates a committed git fixture.
 func preflightRepo(t *testing.T, dir string, files map[string]string) {
 	t.Helper()
@@ -43,6 +52,7 @@ func preflightRepo(t *testing.T, dir string, files map[string]string) {
 //	reviewer workspace -> evidence inspection -> tool-boundary verdict ->
 //	task transition, plus diff hygiene and .a4c isolation.
 func TestIntegrationPreflight_FullChain(t *testing.T) {
+	requireMake(t)
 	// ---- Fixture: a C-style (Makefile) project that ALSO has a Go module, so
 	// the trust rule (baseline-locked verification) is exercised. ----
 	producer := t.TempDir()
@@ -159,6 +169,7 @@ func TestIntegrationPreflight_FullChain(t *testing.T) {
 // evidence is classified as a verification gap (never a pass), and a dummy
 // go.mod cannot flip a C contract.
 func TestIntegrationPreflight_ReplayPreservedBenchmarkFailure(t *testing.T) {
+	requireMake(t)
 	// The preserved coder evidence was: `go test -short ./...` exit 0, output
 	// "[no test files]", previously recorded valid=true (a false pass).
 	preservedOutput := "?   \tgithub.com/DeusData/codebase-memory-mcp\t[no test files]\n"

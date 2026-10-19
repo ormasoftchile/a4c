@@ -14,7 +14,11 @@ import (
 func TestDiscoverOpenCodeService(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
+	// Redirect the home location as well: os.UserHomeDir resolves $HOME on
+	// Unix and %USERPROFILE% on Windows, so both must point away from the
+	// developer's real service registration.
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
 
 	if _, _, ok := a4c.DiscoverOpenCodeService(); ok {
 		t.Fatalf("expected no service when no registration exists")
@@ -47,7 +51,11 @@ func TestDiscoverOpenCodeService(t *testing.T) {
 func TestDiscoverOpenCodeService_IgnoresMalformedRegistration(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
+	// Redirect the home location as well: os.UserHomeDir resolves $HOME on
+	// Unix and %USERPROFILE% on Windows, so both must point away from the
+	// developer's real service registration.
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
 
 	dir := filepath.Join(state, "opencode")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

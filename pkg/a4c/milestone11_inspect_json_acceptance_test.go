@@ -16,7 +16,7 @@ import (
 // TestMilestone11_Acceptance_TaskInspectJSON verifies the independent acceptance criteria
 // for the autonomously implemented feature: 'a4c task inspect <task-id> --json'.
 func TestMilestone11_Acceptance_TaskInspectJSON(t *testing.T) {
-	absBin := filepath.Join(t.TempDir(), "a4c")
+	absBin := filepath.Join(t.TempDir(), "a4c"+a4cExeSuffix())
 	cmdBuild := exec.Command("go", "build", "-o", absBin, "./cmd/a4c")
 	cmdBuild.Dir = filepath.Join("..", "..")
 	if out, err := cmdBuild.CombinedOutput(); err != nil {

@@ -37,6 +37,12 @@ func TestMilestone14_CLI_MCP_Parity(t *testing.T) {
 		t.Fatalf("a4c init failed: %s (%v)", string(out), err)
 	}
 
+	// `a4c init` wires host integrations (agent definitions, MCP config) into
+	// the repository. Commit that scaffolding so the base checkout is clean,
+	// which `task integrate` requires.
+	runGitCmd(t, repoDir, "add", "-A")
+	runGitCmd(t, repoDir, "commit", "-m", "a4c init host scaffolding")
+
 	// 1. Submit task via CLI
 	cmdSubmit := exec.Command(a4cBin, "task", "submit", "Implement parity feature", "35000", "--strategy", "direct")
 	cmdSubmit.Dir = repoDir
@@ -319,22 +325,20 @@ func TestMilestone14_MCP_Stdio_Subprocess(t *testing.T) {
 
 func findA4CBinary(t *testing.T) string {
 	t.Helper()
+	suffix := a4cExeSuffix()
 	candidates := []string{
-		"../../a4c",
-		"../a4c",
-		"./a4c",
+		"../../a4c" + suffix,
+		"../a4c" + suffix,
+		"./a4c" + suffix,
 	}
 	for _, c := range candidates {
 		abs, err := filepath.Abs(c)
-		if err == nil {
-			info, err := os.Stat(abs)
-			if err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
-				return abs
-			}
+		if err == nil && isExecutableFile(abs) {
+			return abs
 		}
 	}
 
-	tmpBin := filepath.Join(t.TempDir(), "a4c")
+	tmpBin := filepath.Join(t.TempDir(), "a4c"+suffix)
 	cmd := exec.Command("go", "build", "-o", tmpBin, "github.com/ormasoftchile/a4c/cmd/a4c")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed to build a4c binary for test: %s (%v)", string(out), err)

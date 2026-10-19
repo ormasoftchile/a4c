@@ -45,6 +45,7 @@ func initGitRepo(t *testing.T, dir string, files map[string]string) {
 // TestVerification_CRepoExecutesConfiguredCTests: a repository whose committed
 // baseline is a Makefile project resolves to and runs the make test command.
 func TestVerification_CRepoExecutesConfiguredCTests(t *testing.T) {
+	requireMake(t)
 	dir := t.TempDir()
 	initGitRepo(t, dir, map[string]string{
 		"Makefile": "test:\n\t@echo 'PASS: suite_cypher ok'\n\t@echo 'All tests passed'\n",
@@ -99,6 +100,7 @@ func TestVerification_GoRepoExecutesGoTests(t *testing.T) {
 // adding an uncommitted go.mod (and a dummy Go test) to a C repository must NOT
 // change the configured C verification contract into a Go contract.
 func TestVerification_DummyGoModCannotFlipCVerification(t *testing.T) {
+	requireMake(t)
 	dir := t.TempDir()
 	// Committed baseline is a Makefile (C-style) project.
 	initGitRepo(t, dir, map[string]string{
@@ -137,6 +139,7 @@ func TestVerification_NoTestFilesIsNotAPass(t *testing.T) {
 // TestVerification_FailedTestsProduceFailureEvidence: a non-zero exit is a
 // genuine failure, not vacuous.
 func TestVerification_FailedTestsProduceFailureEvidence(t *testing.T) {
+	requireMake(t)
 	dir := t.TempDir()
 	initGitRepo(t, dir, map[string]string{
 		"Makefile": "test:\n\t@echo 'FAIL: suite_cypher not ok'\n\t@exit 1\n",
@@ -175,6 +178,7 @@ func TestVerification_MissingConfigIsExplicit(t *testing.T) {
 // TestVerification_AuthoredConfigOverridesDetection: .a4c/verify.json is
 // trusted configuration and takes precedence over detection.
 func TestVerification_AuthoredConfigOverridesDetection(t *testing.T) {
+	requireMake(t)
 	dir := t.TempDir()
 	initGitRepo(t, dir, map[string]string{
 		"go.mod":    "module example.com/x\n\ngo 1.22\n", // detection would pick go
@@ -202,6 +206,7 @@ func TestVerification_AuthoredConfigOverridesDetection(t *testing.T) {
 // TestVerification_EvidenceBindsToSourceRevision: recorded verification
 // identifies the git revision it validated.
 func TestVerification_EvidenceBindsToSourceRevision(t *testing.T) {
+	requireMake(t)
 	dir := t.TempDir()
 	initGitRepo(t, dir, map[string]string{
 		"Makefile": "test:\n\t@echo 'PASS: ok'\n\t@echo 'All tests passed'\n",
@@ -224,6 +229,7 @@ func TestVerification_EvidenceBindsToSourceRevision(t *testing.T) {
 // TestVerification_UnavailableRunnerRunTestsContract: the legacy RunTests
 // surface still works for the project runner.
 func TestVerification_UnavailableRunnerRunTestsContract(t *testing.T) {
+	requireMake(t)
 	dir := t.TempDir()
 	initGitRepo(t, dir, map[string]string{
 		"Makefile": "test:\n\t@echo 'PASS: ok'\n\t@echo 'All tests passed'\n",

@@ -72,7 +72,10 @@ func TestIndependentAcceptance_TaskInspectVerification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve repo root: %v", err)
 	}
-	cmd := exec.Command("go", "build", "-o", "bin/a4c", "./cmd/a4c")
+	// Windows resolves and executes binaries by extension, so the build
+	// output must carry the ".exe" suffix to be runnable through os/exec.
+	binName := "a4c" + a4cExeSuffix()
+	cmd := exec.Command("go", "build", "-o", filepath.Join("bin", binName), "./cmd/a4c")
 	cmd.Dir = repoRoot
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -81,7 +84,7 @@ func TestIndependentAcceptance_TaskInspectVerification(t *testing.T) {
 
 	// 2. Test running inspect on a seeded task
 	dir := t.TempDir()
-	initCmd := exec.Command(filepath.Join(repoRoot, "bin", "a4c"), "init", dir)
+	initCmd := exec.Command(filepath.Join(repoRoot, "bin", binName), "init", dir)
 	if out, err := initCmd.CombinedOutput(); err != nil {
 		t.Fatalf("init failed: %v\nOutput: %s", err, string(out))
 	}
@@ -163,7 +166,7 @@ func TestIndependentAcceptance_TaskInspectVerification(t *testing.T) {
 	_, _ = mem.Promote("arch.diagnostics", "lead")
 
 	// Execute inspect command
-	inspectCmd := exec.Command(filepath.Join(repoRoot, "bin", "a4c"), "task", "inspect", "test-inspect-root")
+	inspectCmd := exec.Command(filepath.Join(repoRoot, "bin", binName), "task", "inspect", "test-inspect-root")
 	inspectCmd.Dir = dir
 	inspectOut, inspectErr := inspectCmd.CombinedOutput()
 

@@ -515,13 +515,14 @@ func (p *CopilotProvider) buildSession(ctx context.Context, sessionID string, co
 			}
 			target := filepath.Join(config.WorkspaceDir, cleanPath)
 
-			// Record intent prior to mutation
+			// Record intent prior to mutation. Patch paths are git-style, so the
+			// journal target is recorded in slash form for cross-host evidence.
 			if config.IntentJournal != nil {
 				_ = config.IntentJournal.RecordIntent(IntentRecord{
 					IntentID:   fmt.Sprintf("intent-patch-%d", time.Now().UnixNano()),
 					ActivityID: "activity-current",
 					Action:     "apply_patch",
-					Target:     cleanPath,
+					Target:     filepath.ToSlash(cleanPath),
 				})
 			}
 

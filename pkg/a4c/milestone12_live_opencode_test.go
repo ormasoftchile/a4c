@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +17,13 @@ func getLiveOpenCodeProvider(t *testing.T) (*spike.OpenCodeProvider, *spike.Open
 	binPath, err := spike.FindOpenCodeBinary()
 	if err != nil {
 		t.Skipf("OpenCode CLI binary not available on system, skipping live test: %v", err)
+	}
+
+	// The managed OpenCode server is launched inside this repository, where the
+	// workspace MCP config spawns the `a4c` CLI. Without it on PATH the agent
+	// turns hang instead of failing fast, so the live test requires it.
+	if _, err := exec.LookPath("a4c"); err != nil {
+		t.Skipf("a4c CLI not on PATH (the OpenCode MCP config spawns it), skipping live test: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

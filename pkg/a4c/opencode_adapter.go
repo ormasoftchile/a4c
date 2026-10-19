@@ -721,7 +721,7 @@ func (s *OpenCodeSessionAdapter) applyGovernedPatches(content string) error {
 				IntentID:    intentID,
 				ActivityID:  s.config.AgentID,
 				Action:      "apply_patch",
-				Target:      cleanPath,
+				Target:      filepath.ToSlash(cleanPath),
 				PayloadHash: payloadHash,
 			})
 		}
@@ -737,7 +737,7 @@ func (s *OpenCodeSessionAdapter) applyGovernedPatches(content string) error {
 		}
 
 		if s.config.IntentJournal != nil {
-			_ = s.config.IntentJournal.RecordOutcome(intentID, "committed-"+cleanPath)
+			_ = s.config.IntentJournal.RecordOutcome(intentID, "committed-"+filepath.ToSlash(cleanPath))
 		}
 
 		s.mu.Lock()

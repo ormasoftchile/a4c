@@ -68,7 +68,7 @@ func TestSquadComparison_LiveBenchmark(t *testing.T) {
 	t.Logf("results directory: %s", outDir)
 
 	// ---- preflight ---------------------------------------------------------
-	a4cBin := filepath.Join(outDir, "a4c")
+	a4cBin := filepath.Join(outDir, "a4c"+a4cExeSuffix())
 	build := exec.Command("go", "build", "-o", a4cBin, "../../cmd/a4c")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build a4c: %v\n%s", err, out)

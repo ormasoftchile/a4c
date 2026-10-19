@@ -8,6 +8,11 @@ import (
 	"syscall"
 )
 
+// openLockFile opens (creating it if needed) the workspace lock file.
+func openLockFile(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
+}
+
 // osFlock attempts non-blocking exclusive flock.
 func osFlock(f *os.File, blocking bool) (bool, error) {
 	flag := syscall.LOCK_EX

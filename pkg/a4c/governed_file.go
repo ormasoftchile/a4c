@@ -132,7 +132,7 @@ func (s *TeamServiceImpl) ApplyWorkspaceFile(ctx context.Context, req ApplyWorks
 // workspacePath resolves a worktree-relative path, rejecting absolute paths
 // and traversal, and enforces containment within the worktree.
 func workspacePath(worktree, rel string) (string, error) {
-	if filepath.IsAbs(rel) {
+	if isAbsolutePath(rel) {
 		return "", fmt.Errorf("service: path must be worktree-relative, got absolute %q", rel)
 	}
 	cleaned := filepath.Clean(rel)

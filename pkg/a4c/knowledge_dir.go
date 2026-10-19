@@ -128,7 +128,7 @@ func KnowledgePath(kbDir, relPath string) (string, error) {
 	// Claims are relative to the knowledge dir. An absolute input is accepted
 	// only when it already sits inside the knowledge dir.
 	var target string
-	if filepath.IsAbs(relPath) {
+	if isAbsolutePath(relPath) {
 		target = canonicalizePath(filepath.Clean(relPath))
 	} else {
 		target = canonicalizePath(filepath.Clean(filepath.Join(kbAbs, relPath)))
@@ -170,6 +170,20 @@ func requireContained(kbAbs, target string) error {
 		return ErrKnowledgeOutsideDir
 	}
 	return nil
+}
+
+// isAbsolutePath reports whether p is absolute in the local convention OR in
+// the POSIX sense. Claims travel between hosts, so a "/etc/passwd"-style path
+// must not be reinterpreted on Windows as a relative name inside the target
+// directory: there it is root-relative to the current drive.
+func isAbsolutePath(p string) bool {
+	if filepath.IsAbs(p) || filepath.VolumeName(p) != "" {
+		return true
+	}
+	if strings.HasPrefix(p, "/") {
+		return true
+	}
+	return filepath.Separator == '\\' && strings.HasPrefix(p, `\`)
 }
 
 // VerifyKnowledgePaths checks that each claimed path exists as a non-empty

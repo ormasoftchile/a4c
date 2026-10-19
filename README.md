@@ -355,23 +355,27 @@ a4c task resume task-1791671400473010000 --runtime opencode --run
 ```
 
 ### Human Review & Integration
-A4C maintains a strict human acceptance boundary:
+A4C maintains a strict human acceptance boundary. Acceptance **shows you what you are approving** — the file list and change counts travel with the approval — so inspecting is not a separate ritual step:
+
 ```bash
-# Inspect task audit trail and activity DAG
-a4c task inspect task-1791671400473010000
+# Approve: prints the diff summary, then records sign-off against a snapshot
+a4c task accept "Approved for production"
 
-# View review diff in isolated worktree against base branch
-a4c task diff task-1791671400473010000
+# Approve and merge in one step
+a4c task accept --integrate
 
-# Provide human review feedback (re-opens task for revision)
-a4c task feedback task-1791671400473010000 "Please add benchmarks for concurrent access"
+# Send it back for revision (re-opens the task)
+a4c task feedback "Please add benchmarks for concurrent access"
 
-# Record explicit human approval of reviewed snapshot
-a4c task accept task-1791671400473010000 "Approved for production"
+# Deeper inspection when you want the full patch or the audit trail
+a4c task diff            # full unified patch
+a4c task inspect         # audit trail and activity DAG
 
-# Cleanly integrate approved worktree branch into base repository
-a4c task integrate task-1791671400473010000
+# Merge an already-approved task later
+a4c task integrate
 ```
+
+A task ID is optional throughout. Two invariants stay intact: `accept` refuses to let an AI approve its own work, and `integrate` refuses if the worktree changed since you approved — which is why the two remain separate steps when you want them to be.
 
 ---
 

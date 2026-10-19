@@ -603,7 +603,7 @@ func withImplicitTaskID(svc *a4c.TeamServiceImpl, args []string) []string {
 	// A positional ID was supplied.
 	if len(args) > 1 {
 		switch args[0] {
-		case "feedback", "reject":
+		case "feedback", "reject", "accept":
 			// Free text follows the ID here, so anything not shaped like a task
 			// ID is the text, not the ID.
 			if strings.HasPrefix(args[1], "task-") {
@@ -629,6 +629,16 @@ func withImplicitTaskID(svc *a4c.TeamServiceImpl, args []string) []string {
 	out = append(out, args[0], resolved.TaskID)
 	out = append(out, args[1:]...)
 	return out
+}
+
+// printDiffSummary shows what a task actually changed. Acceptance is a human
+// sign-off, so the evidence must travel with the approval rather than live in a
+// separate command the operator has to remember to run.
+func printDiffSummary(d *a4c.DiffResult) {
+	fmt.Printf("Files changed: %d | +%d / -%d\n", d.TotalFiles, d.TotalAdds, d.TotalDels)
+	for _, f := range d.Files {
+		fmt.Printf("  %-46s [%s] (+%d/-%d)\n", f.Path, f.Status, f.Additions, f.Deletions)
+	}
 }
 
 func runTask(args []string) {
@@ -1327,10 +1337,7 @@ func runTask(args []string) {
 			return
 		}
 		fmt.Printf("Diff for Task %s (Snapshot: %s, Base: %s):\n", diffRes.TaskID, diffRes.SnapshotID, diffRes.BaseBranch)
-		fmt.Printf("Files Changed: %d | +%d / -%d\n", diffRes.TotalFiles, diffRes.TotalAdds, diffRes.TotalDels)
-		for _, f := range diffRes.Files {
-			fmt.Printf("  - %-30s [%s] (+%d/-%d)\n", f.Path, f.Status, f.Additions, f.Deletions)
-		}
+		printDiffSummary(diffRes)
 		if diffRes.RawDiff != "" {
 			fmt.Println("\n" + diffRes.RawDiff)
 		}
@@ -1362,23 +1369,38 @@ func runTask(args []string) {
 
 	case "accept":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task accept [task-id] [comments] [--token <auth-token>]")
+			fmt.Println("Usage: a4c task accept [task-id] [comments] [--token <auth-token>] [--integrate]")
 			return
 		}
 		taskID := args[1]
 		comments := ""
 		token := ""
+		doIntegrate := false
 		for i := 2; i < len(args); i++ {
-			if (args[i] == "--token" || args[i] == "-t") && i+1 < len(args) {
+			switch {
+			case (args[i] == "--token" || args[i] == "-t") && i+1 < len(args):
 				token = args[i+1]
 				i++
-			} else {
+			case args[i] == "--integrate":
+				doIntegrate = true
+			default:
 				if comments != "" {
 					comments += " "
 				}
 				comments += args[i]
 			}
 		}
+
+		// Show what is about to be approved. Acceptance is a human sign-off
+		// bound to a snapshot, and a snapshot hash is not evidence — so the
+		// evidence travels with the approval rather than living in a separate
+		// command the operator has to remember to run.
+		if dres, derr := svc.GetTaskDiff(ctx, taskID); derr == nil {
+			fmt.Printf("Approving %s against snapshot %s\n", taskID, dres.SnapshotID)
+			printDiffSummary(dres)
+			fmt.Println()
+		}
+
 		stat, statErr := os.Stdin.Stat()
 		isInteractive := statErr == nil && (stat.Mode()&os.ModeCharDevice) != 0
 
@@ -1393,8 +1415,20 @@ func runTask(args []string) {
 			fmt.Fprintf(os.Stderr, "Failed to accept task: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Task %s accepted successfully at snapshot %s (auth: %s).\nWorking checkout untouched. Run 'a4c task integrate %s' to apply changes.\n",
-			res.TaskID, res.AcceptedSnapshot, res.AuthorizationMethod, res.TaskID)
+		fmt.Printf("Accepted %s at snapshot %s (auth: %s).\n", res.TaskID, res.AcceptedSnapshot, res.AuthorizationMethod)
+
+		if !doIntegrate {
+			fmt.Println("Working checkout untouched. Run 'a4c task integrate' to apply the changes.")
+			return
+		}
+
+		ires, ierr := svc.IntegrateTask(ctx, a4c.IntegrateTaskRequest{TaskID: taskID})
+		if ierr != nil {
+			fmt.Fprintf(os.Stderr, "Accepted, but integration failed: %v\n", ierr)
+			os.Exit(1)
+		}
+		fmt.Printf("Integrated %s. Commit: %s | Files modified: %d\n",
+			ires.TaskID, ires.IntegratedCommit, ires.FilesChanged)
 
 	case "integrate":
 		if len(args) < 2 {

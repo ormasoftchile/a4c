@@ -191,6 +191,7 @@ func (s *Server) registerTools() {
 			mcp.WithString("files_modified", mcp.Description("Comma-separated list of modified file paths")),
 			mcp.WithString("validation_evidence", mcp.Description("Verification command output or test evidence")),
 			mcp.WithBoolean("success", mcp.Description("Whether the activity succeeded (default: true)")),
+			mcp.WithString("usage", mcp.Description("Optional provider-reported usage as JSON: {\"input_tokens\":N,\"cache_read_tokens\":N,\"cache_write_tokens\":N,\"output_tokens\":N,\"reasoning_tokens\":N,\"model_invocations\":N,\"cost_reported\":N,\"cost_unit\":\"usd|ai_credits|unpriced\",\"model\":\"...\",\"source\":\"copilot|opencode|antigravity\",\"scope\":\"activity|session_including_subagents\"}. Report only what your host telemetry actually provides and omit unknown fields; units are preserved as reported and never converted.")),
 		),
 		s.handleCompleteActivity,
 	)
@@ -551,6 +552,15 @@ func (s *Server) handleCompleteActivity(ctx context.Context, req mcp.CallToolReq
 		knowledge = &claim
 	}
 
+	var usage *a4c.HostUsage
+	if raw := strings.TrimSpace(req.GetString("usage", "")); raw != "" {
+		var u a4c.HostUsage
+		if err := json.Unmarshal([]byte(raw), &u); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid 'usage' parameter: %v", err)), nil
+		}
+		usage = &u
+	}
+
 	res, err := s.service.CompleteActivity(ctx, a4c.CompleteActivityRequest{
 		TaskID:             taskID,
 		ActivityID:         activityID,
@@ -560,6 +570,7 @@ func (s *Server) handleCompleteActivity(ctx context.Context, req mcp.CallToolReq
 		ValidationEvidence: evidence,
 		Success:            success,
 		Knowledge:          knowledge,
+		Usage:              usage,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("complete activity failed: %v", err)), nil

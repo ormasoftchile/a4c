@@ -338,6 +338,28 @@ type CheckpointResult struct {
 }
 
 // CompleteActivityRequest records completion of a specialist's assignment.
+// HostUsage carries provider-reported consumption for one activity. Every
+// field is optional: hosts report only what their own telemetry actually
+// provides. Unreported values are absent (nil), never presented as measured
+// zeros, and provider accounting units are preserved as reported (Copilot AIU
+// credits, OpenCode USD, Antigravity unpriced quota) — never converted or
+// conflated.
+type HostUsage struct {
+	InputTokens      *int     `json:"input_tokens,omitempty"`       // uncached input as the host reports it
+	CacheReadTokens  *int     `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens *int     `json:"cache_write_tokens,omitempty"`
+	OutputTokens     *int     `json:"output_tokens,omitempty"`
+	ReasoningTokens  *int     `json:"reasoning_tokens,omitempty"` // host semantics: subset of output or separate
+	ModelInvocations *int     `json:"model_invocations,omitempty"`
+	CostReported     *float64 `json:"cost_reported,omitempty"`
+	CostUnit         string   `json:"cost_unit,omitempty"` // "usd", "ai_credits", "unpriced"
+	Model            string   `json:"model,omitempty"`
+	Source           string   `json:"source,omitempty"` // host id: "copilot", "opencode", "antigravity"
+	// Scope is "activity" (default) or "session_including_subagents" when the
+	// reported totals already include subagent consumption.
+	Scope string `json:"scope,omitempty"`
+}
+
 type CompleteActivityRequest struct {
 	TaskID             string         `json:"task_id"`
 	ActivityID         string         `json:"activity_id"`
@@ -347,6 +369,8 @@ type CompleteActivityRequest struct {
 	ValidationEvidence string         `json:"validation_evidence,omitempty"`
 	Success            bool           `json:"success"`
 	Knowledge          *KnowledgeClaim `json:"knowledge,omitempty"`
+	// Usage is optional host telemetry; completion never depends on it.
+	Usage *HostUsage `json:"usage,omitempty"`
 }
 
 // HostActivityResult represents the result of completing a specialist activity.

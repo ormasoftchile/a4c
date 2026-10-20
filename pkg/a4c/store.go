@@ -347,6 +347,8 @@ func (s *DurableActivityStore) FailWithResult(id string, result ActivityResult, 
 }
 
 // InterruptWithResult pauses an activity due to an infrastructure or provider outage.
+// Non-terminal child activities are abandoned: obsolete delegated work must not
+// remain silently eligible to complete after its parent stopped.
 func (s *DurableActivityStore) InterruptWithResult(id string, result ActivityResult, interruptionErr error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -361,7 +363,63 @@ func (s *DurableActivityStore) InterruptWithResult(id string, result ActivityRes
 	if interruptionErr != nil {
 		rec.Error = interruptionErr.Error()
 	}
-	return s.persist(rec)
+	if err := s.persist(rec); err != nil {
+		return err
+	}
+	reason := fmt.Sprintf("abandoned: parent activity %s was interrupted", id)
+	if interruptionErr != nil {
+		reason = fmt.Sprintf("abandoned: parent activity %s was interrupted (%v)", id, interruptionErr)
+	}
+	s.abandonDescendantsLocked(id, reason)
+	return nil
+}
+
+// abandonDescendantsLocked marks every non-terminal descendant of rootID as
+// failed with the given reason. Abandoned work is terminal but never
+// successful: it cannot be claimed or completed later as obsolete work, and it
+// cannot satisfy finalization. Already-terminal records are preserved
+// untouched, so repeated recovery is idempotent and history survives.
+func (s *DurableActivityStore) abandonDescendantsLocked(rootID, reason string) int {
+	abandoned := 0
+	for _, rec := range s.records {
+		if rec.Request.ID == rootID || !s.isDescendantLocked(rootID, rec.Request.ID) {
+			continue
+		}
+		if rec.Status != StatusPending && rec.Status != StatusClaimed {
+			continue
+		}
+		rec.Status = StatusFailed
+		rec.Error = reason
+		_ = s.persist(rec)
+		abandoned++
+	}
+	return abandoned
+}
+
+// AbandonDescendants is the externally callable form of abandonDescendantsLocked.
+func (s *DurableActivityStore) AbandonDescendants(rootID, reason string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.abandonDescendantsLocked(rootID, reason)
+}
+
+// isDescendantLocked reports whether id sits in rootID's subtree via parent links.
+func (s *DurableActivityStore) isDescendantLocked(rootID, id string) bool {
+	for depth := 0; depth < 1000; depth++ {
+		rec, ok := s.records[id]
+		if !ok {
+			return false
+		}
+		parent := rec.Request.ParentID
+		if parent == "" {
+			return false
+		}
+		if parent == rootID {
+			return true
+		}
+		id = parent
+	}
+	return false
 }
 
 // MarkAwaitingHuman pauses an activity pending a decision from the human engineer.

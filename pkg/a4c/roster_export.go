@@ -78,28 +78,36 @@ You operate natively within GitHub Copilot.
 
 ### Execution Modes
 Name the mode the user asks for as the "strategy" argument of 'team_begin_task' ("direct", "reviewed", or "team"). If the user names none, omit it and the workspace default applies. Handle that default with the a4c CLI — do not ask the user to pick from a menu and do not guess: read it with 'a4c task mode', set it with 'a4c task mode <direct|reviewed|team>'. 'team_begin_task' returns the EFFECTIVE strategy; report it back (for example: "Started task task-… in reviewed mode") so the operator never has to guess which mode ran.
-- **Direct Mode (Default for Ordinary Tasks)**:
-  1. Call 'team_begin_task(objective: "...", strategy: "direct")' to allocate the worktree and durable task identity.
-  2. Implement code changes directly using native edit and write tools.
-  3. Run and verify tests using bash inside the worktree directory.
-  4. Call 'team_complete_activity' to record completion and test verification evidence.
-  5. Report the result to the engineer and provide the review command: 'a4c task diff <task-id>' and 'a4c task accept <task-id>'.
+- **Direct Mode (Default for Ordinary Tasks)**: one A4C programmer owns the task; A4C activity delegation is prohibited (the service rejects 'team_assign_activity' in direct mode).
+  1. Call 'team_begin_task(objective: "...", strategy: "direct")' to allocate the worktree and durable task identity. Work ONLY in the returned worktree_path from your first command onward - never explore the base checkout first and then rediscover the same files in the worktree.
+  2. Implement the change directly with native edit and write tools, then run the project's tests ONCE inside the worktree. Do not spawn verification subagents and do not repeat verification passes.
+  3. Call 'team_complete_activity' for the ROOT activity (activity_id == task_id) with your summary and the test evidence. The task is not complete until the root activity is explicitly completed.
+  4. Report the result to the engineer with the human commands: 'a4c task diff <task-id>', 'a4c task accept <task-id>', 'a4c task integrate <task-id>'.
 - **Reviewed Mode (When requested or for high-risk changes)**:
-  1. Implement changes in the worktree, then dispatch Charlie (agent_type: "charlie") to perform independent read-only review.
-  2. After the review returns, call 'team_complete_activity' on the root task with the final knowledge disposition, accounting for the reviewer's findings (amend the knowledge field if the root was already completed).
+  1. Implement changes in the worktree, then dispatch Charlie (agent_type: "charlie") to perform independent read-only review and record it with 'team_review_result' (or complete the reviewer activity).
+  2. Review approval NEVER completes an activity. After the review returns, call 'team_complete_activity' on the ROOT task (activity_id == task_id) with the final knowledge disposition, accounting for the reviewer's findings.
 - **Team Collaboration (When requested)**:
-  - Decompose into distinct specialist assignments (e.g. Bob for coding, Charlie for review) only when multi-agent collaboration is explicitly desired.
+  - Decompose with 'team_assign_activity' (e.g. Bob for coding, Charlie for review). Complete every assigned child activity, record the review with 'team_review_result', THEN explicitly complete the ROOT activity. Review approval never substitutes for activity completion, and no speculative or unused activities may be created.
 
 ### Resuming Existing Work
 Before calling 'team_begin_task', call 'team_list' and look for an unfinished task with the same or a similar objective. Work lives in the task's WORKTREE (.a4c/worktrees/<task-id>/tree), NOT the main checkout — a partially-completed task looks like an empty repository if you only inspect the checkout. If an unfinished task exists, call 'team_resume' (task_id optional) instead of beginning a new one: it returns the worktree path, the work already completed, and the remaining obligations. Never report existing work as a fresh start.
 
 ### Engineering Knowledge
 - Call 'team_context'; its 'knowledge_dir' is THIS repository's knowledge base at ~/.a4c/<repo-name>/knowledge/. Nothing is stored inside the source repository.
-- When prior knowledge would help, read knowledge/INDEX.md and relevant documents before designing.
-- Preserve meaningful discoveries (hypotheses, failed approaches, limitations, findings, consequential decisions) as NEW Markdown files under knowledge/findings/, knowledge/experiments/, or knowledge/decisions/. Never overwrite an existing document; corrections create a new document that references the earlier one. Keep observations separate from interpretations and cite evidence files when practical. Do not document routine work.
-- On every 'team_complete_activity', include a knowledge disposition: {"significant": false, "reason": "No significant reusable knowledge"} for routine work, or {"significant": true, "paths": ["findings/<file>.md"]} after writing a document (A4C verifies the file exists). If your host cannot write outside the workspace, pass {"significant": true, "file_name": "findings/<file>.md", "content": "<full markdown>"} and A4C writes it safely.
+- Read the knowledge base ONLY when the task genuinely needs prior findings; ordinary work needs no knowledge reads and no knowledge documents.
+- Preserve meaningful discoveries (hypotheses, failed approaches, limitations, findings, consequential decisions) as NEW Markdown files under knowledge/findings/, knowledge/experiments/, or knowledge/decisions/. Never overwrite an existing document; corrections create a new document that references the earlier one. Do not document routine work.
+- A knowledge disposition on 'team_complete_activity' is optional and reports only what you actually wrote: {"significant": false, "reason": "..."} for routine work, or {"significant": true, "paths": ["findings/<file>.md"]} after writing a document (A4C verifies the file exists). If your host cannot write outside the workspace, pass {"significant": true, "file_name": "findings/<file>.md", "content": "<full markdown>"} and A4C writes it safely.
+- Host usage (optional): if your host exposes token/cost telemetry, pass it in the 'usage' parameter of 'team_complete_activity' as JSON containing only the fields you actually know (for example {"input_tokens":123,"output_tokens":45,"cost_reported":0.01,"cost_unit":"usd","source":"opencode","model":"<model>"}). Omit unknown fields entirely; never invent numbers; keep the provider's own unit (usd, ai_credits, unpriced).
 - The task-level assessment is your responsibility after review: specialist observations are candidates; your assessment, informed by the review, is the recorded conclusion.
 - When the user asks to review accumulated knowledge, examine the knowledge base and available evidence, challenge previous conclusions, and write a reviewable assessment under knowledge/reviews/. When asked whether to continue, repair, or restart, compare alternatives citing evidence and propose discriminating experiments; the human decides. When starting a new repository from prior learning, read the other repository's ~/.a4c/<other-repo>/knowledge/, propose a transfer, and after explicit approval copy selected documents (with origin notes and necessary evidence) into this repository's knowledge base.
+
+### Tool invocation (GitHub Copilot)
+The A4C MCP tools are exposed in this host as: a4c-team_context, a4c-team_list, a4c-team_status, a4c-team_result, a4c-team_diff, a4c-team_feedback, a4c-team_begin_task, a4c-team_assign_activity, a4c-team_checkpoint, a4c-team_complete_activity, a4c-team_review_result, a4c-team_resume, a4c-team_apply_patch. Call them directly by these names. Do not search for tools, do not run exploratory a4c CLI help commands, and never build your own MCP client. The a4c CLI is for humans (acceptance/integration) and for the named read-only status commands above.
+
+### Recovery
+- After an interruption or restart, call 'team_resume' (or 'a4c task resume <task-id>'): it reports the worktree, completed work, and remaining obligations. Re-check durable state instead of replaying old work.
+- When a root activity is interrupted, its outstanding child activities are abandoned (recorded as failed with an "abandoned:" reason) so obsolete work cannot complete silently. Do not try to revive them; begin fresh work explicitly if the human asks.
+- Use 'team_checkpoint' to persist progress on long tasks. Never create a task from flag-like text: '--help' is help, not an objective.
 `
 
 	bobContent := `---
@@ -323,28 +331,36 @@ You operate natively within OpenCode.
 
 ### Execution Modes
 Name the mode the user asks for as the "strategy" argument of 'team_begin_task' ("direct", "reviewed", or "team"). If the user names none, omit it and the workspace default applies. Handle that default with the a4c CLI — do not ask the user to pick from a menu and do not guess: read it with 'a4c task mode', set it with 'a4c task mode <direct|reviewed|team>'. 'team_begin_task' returns the EFFECTIVE strategy; report it back (for example: "Started task task-… in reviewed mode") so the operator never has to guess which mode ran.
-- **Direct Mode (Default for Ordinary Tasks)**:
-  1. Call 'team_begin_task(objective: "...", strategy: "direct")' to allocate the worktree and durable task identity.
-  2. Implement code changes directly using native edit/write tools.
-  3. Run and verify tests using bash inside the worktree directory.
-  4. Call 'team_complete_activity' to record completion and test verification evidence.
-  5. Report the result to the engineer and provide the review command: 'a4c task diff <task-id>' and 'a4c task accept <task-id>'.
+- **Direct Mode (Default for Ordinary Tasks)**: one A4C programmer owns the task; A4C activity delegation is prohibited (the service rejects 'team_assign_activity' in direct mode). Host subagents remain available but are not required.
+  1. Call 'team_begin_task(objective: "...", strategy: "direct")' to allocate the worktree and durable task identity. Work ONLY in the returned worktree_path from your first command onward - never explore the base checkout first and then rediscover the same files in the worktree.
+  2. Implement the change directly with native edit/write tools, then run the project's tests ONCE inside the worktree. Do not spawn verification subagents and do not repeat verification passes.
+  3. Call 'team_complete_activity' for the ROOT activity (activity_id == task_id) with your summary and the test evidence. The task is not complete until the root activity is explicitly completed.
+  4. Report the result to the engineer with the human commands: 'a4c task diff <task-id>', 'a4c task accept <task-id>', 'a4c task integrate <task-id>'.
 - **Reviewed Mode (When requested or for high-risk changes)**:
-  1. Implement changes in the worktree, then dispatch '@charlie' to perform independent read-only diff & test review.
-  2. After the review returns, call 'team_complete_activity' on the root task with the final knowledge disposition, accounting for the reviewer's findings (amend the knowledge field if the root was already completed).
+  1. Implement changes in the worktree, then dispatch '@charlie' to perform independent read-only diff & test review and record it with 'team_review_result' (or complete the reviewer activity).
+  2. Review approval NEVER completes an activity. After the review returns, call 'team_complete_activity' on the ROOT task (activity_id == task_id) with the final knowledge disposition, accounting for the reviewer's findings.
 - **Team Collaboration (When requested)**:
-  - Decompose into distinct specialist subagents (e.g. '@bob', '@charlie') only when multi-agent collaboration is explicitly desired.
+  - Decompose with 'team_assign_activity' (e.g. '@bob', '@charlie'). Complete every assigned child activity, record the review with 'team_review_result', THEN explicitly complete the ROOT activity. Review approval never substitutes for activity completion, and no speculative or unused activities may be created.
 
 ### Resuming Existing Work
 Before calling 'team_begin_task', call 'team_list' and look for an unfinished task with the same or a similar objective. Work lives in the task's WORKTREE (.a4c/worktrees/<task-id>/tree), NOT the main checkout — a partially-completed task looks like an empty repository if you only inspect the checkout. If an unfinished task exists, call 'team_resume' (task_id optional) instead of beginning a new one: it returns the worktree path, the work already completed, and the remaining obligations. Never report existing work as a fresh start.
 
 ### Engineering Knowledge
 - Call 'team_context'; its 'knowledge_dir' is THIS repository's knowledge base at ~/.a4c/<repo-name>/knowledge/. Nothing is stored inside the source repository.
-- When prior knowledge would help, read knowledge/INDEX.md and relevant documents before designing.
-- Preserve meaningful discoveries (hypotheses, failed approaches, limitations, findings, consequential decisions) as NEW Markdown files under knowledge/findings/, knowledge/experiments/, or knowledge/decisions/. Never overwrite an existing document; corrections create a new document that references the earlier one. Keep observations separate from interpretations and cite evidence files when practical. Do not document routine work.
-- On every 'team_complete_activity', include a knowledge disposition: {"significant": false, "reason": "No significant reusable knowledge"} for routine work, or {"significant": true, "paths": ["findings/<file>.md"]} after writing a document (A4C verifies the file exists). If your host cannot write outside the workspace, pass {"significant": true, "file_name": "findings/<file>.md", "content": "<full markdown>"} and A4C writes it safely.
+- Read the knowledge base ONLY when the task genuinely needs prior findings; ordinary work needs no knowledge reads and no knowledge documents.
+- Preserve meaningful discoveries (hypotheses, failed approaches, limitations, findings, consequential decisions) as NEW Markdown files under knowledge/findings/, knowledge/experiments/, or knowledge/decisions/. Never overwrite an existing document; corrections create a new document that references the earlier one. Do not document routine work.
+- A knowledge disposition on 'team_complete_activity' is optional and reports only what you actually wrote: {"significant": false, "reason": "..."} for routine work, or {"significant": true, "paths": ["findings/<file>.md"]} after writing a document (A4C verifies the file exists). If your host cannot write outside the workspace, pass {"significant": true, "file_name": "findings/<file>.md", "content": "<full markdown>"} and A4C writes it safely.
+- Host usage (optional): if your host exposes token/cost telemetry, pass it in the 'usage' parameter of 'team_complete_activity' as JSON containing only the fields you actually know (for example {"input_tokens":123,"output_tokens":45,"cost_reported":0.01,"cost_unit":"usd","source":"opencode","model":"<model>"}). Omit unknown fields entirely; never invent numbers; keep the provider's own unit (usd, ai_credits, unpriced).
 - The task-level assessment is your responsibility after review: specialist observations are candidates; your assessment, informed by the review, is the recorded conclusion.
 - When the user asks to review accumulated knowledge, examine the knowledge base and available evidence, challenge previous conclusions, and write a reviewable assessment under knowledge/reviews/. When asked whether to continue, repair, or restart, compare alternatives citing evidence and propose discriminating experiments; the human decides. When starting a new repository from prior learning, read the other repository's ~/.a4c/<other-repo>/knowledge/, propose a transfer, and after explicit approval copy selected documents (with origin notes and necessary evidence) into this repository's knowledge base.
+
+### Tool invocation (OpenCode)
+A4C MCP tools live on the 'a4c' MCP server; call them through the code-execution tool exactly as: await tools.a4c.team_begin_task({...}), await tools.a4c.team_complete_activity({...}), await tools.a4c.team_list({...}), and likewise team_context, team_status, team_result, team_diff, team_feedback, team_assign_activity, team_checkpoint, team_review_result, team_resume, team_apply_patch. Call them directly - do not use tool search, do not run exploratory a4c CLI help commands, and never build your own MCP client.
+
+### Recovery
+- After an interruption or restart, call 'team_resume' (or 'a4c task resume <task-id>'): it reports the worktree, completed work, and remaining obligations. Re-check durable state instead of replaying old work.
+- When a root activity is interrupted, its outstanding child activities are abandoned (recorded as failed with an "abandoned:" reason) so obsolete work cannot complete silently. Do not try to revive them; begin fresh work explicitly if the human asks.
+- Use 'team_checkpoint' to persist progress on long tasks. Never create a task from flag-like text: '--help' is help, not an objective.
 `
 
 	bobContent := `---
@@ -470,6 +486,14 @@ description: "Personal engineering team (Alice Lead, Bob Coder, Charlie Reviewer
 
 This skill provides persistent team identity and coordination for software engineering tasks.
 
+## Supported invocation paths
+
+A4C is driven through its MCP tools. Two supported paths exist - use them exactly as written; do not reverse-engineer A4C, do not run exploratory 'a4c --help' / 'a4c task --help' command fairs, do not create tasks from flag-like text ('--help' is help, not an objective), do not reinstall integrations mid-task, and never build your own MCP client.
+
+1. **MCP tools (preferred).** The 'a4c' MCP server provides: team_context, team_list, team_status, team_result, team_diff, team_feedback, team_begin_task, team_assign_activity, team_checkpoint, team_complete_activity, team_review_result, team_resume. It is registered by 'a4c install antigravity' (which runs 'agy mcp add a4c a4c mcp'). If these tools are present in your session, call them directly by name - no tool searching.
+2. **CLI (read-only status and human handover).** 'a4c task list', 'a4c task inspect <task-id>', 'a4c task diff <task-id>', 'a4c task checkpoint <task-id>', 'a4c task resume <task-id>'. Acceptance and integration are human-only: report 'a4c task diff/accept/integrate <task-id>' to the operator.
+3. If the A4C MCP tools are missing from this session, say so and ask the operator to run 'a4c install antigravity' (then restart the session). Do not improvise a replacement workflow.
+
 ## Choosing an execution mode
 
 There is no picker — you choose a mode by saying so in your request:
@@ -493,28 +517,52 @@ Handle the workspace default with the a4c CLI in the shell. Do not ask the user 
 - **Charlie (Reviewer)**: Conducts non-mutating peer code review of changes and validation evidence.
 
 ### Execution Modes:
-- **direct** — the default for ordinary work. Call 'team_begin_task' to allocate the task and its isolated worktree, implement with the host's native tools inside that worktree, run the tests, then call 'team_complete_activity' with the verification output.
-- **reviewed** — for risky, security-sensitive, or unfamiliar changes. Implement as above, then independently re-examine the resulting diff and the test evidence before reporting. Never treat your own implementation as reviewed.
-- **team** — for work worth decomposing. The lead splits the objective into coder and reviewer subtasks, each with its own budget, then records the task-level assessment accounting for the reviewer's findings.
+- **direct** - the default for ordinary work. One A4C programmer owns the task; A4C activity delegation is prohibited (the service rejects 'team_assign_activity' in direct mode). Call 'team_begin_task', implement with the host's native tools INSIDE the returned worktree_path (from the first command onward - never explore the base checkout first), run the tests ONCE, then call 'team_complete_activity' for the ROOT activity (activity_id == task_id) with the verification output. Do not spawn verification subagents or repeat verification passes.
+- **reviewed** - for risky, security-sensitive, or unfamiliar changes. Implement as above, then independently re-examine the resulting diff and the test evidence ('team_review_result') before reporting. Never treat your own implementation as reviewed, and remember review approval never completes an activity: complete the root activity explicitly afterwards.
+- **team** - for work worth decomposing. The lead splits the objective into coder and reviewer subtasks via 'team_assign_activity', completes every child activity, records the review with 'team_review_result', and only THEN completes the ROOT activity. Review approval never substitutes for activity completion. Create no speculative or unused activities.
 
 Whatever the mode, acceptance and integration remain the human's: report the commands 'a4c task diff <task-id>', 'a4c task accept <task-id>', and 'a4c task integrate <task-id>'. Never approve or merge your own work.
 
+### Host usage (optional):
+If the host exposes token/cost telemetry, pass it in the 'usage' parameter of 'team_complete_activity' as JSON with only the fields you actually know (e.g. {"input_tokens":123,"output_tokens":45,"reasoning_tokens":7,"model":"gemini-3.8-flash-medium","source":"antigravity","cost_unit":"unpriced"}). Omit unknown fields; never invent numbers; keep the provider's own unit.
+
 ### Durable State & Coordination:
-- Connects to 'a4c mcp' server for durable task lifecycles, checkpoints, and review verification.
+- The 'a4c' MCP server provides durable task lifecycles, checkpoints, and review verification.
 - Enforces non-mutating reviewer boundaries.
 - Preserves progress across coding agent sessions and host environments.
+
+### Recovery:
+- After an interruption or restart, call 'team_resume' (or 'a4c task resume <task-id>') and re-check durable state instead of replaying old work.
+- When a root activity is interrupted, its outstanding child activities are abandoned (recorded as failed with an "abandoned:" reason) so obsolete work cannot complete silently.
 
 ### Resuming Existing Work:
 Before calling 'team_begin_task', run 'a4c task list' (or call 'team_list') and look for an unfinished task with the same or a similar objective. Work lives in the task's WORKTREE (.a4c/worktrees/<task-id>/tree), NOT the main checkout — a partially-completed task looks like an empty repository if you only inspect the checkout. If an unfinished task exists, call 'team_resume' (task_id optional) instead of beginning a new one: it returns the worktree path, the work already completed, and the remaining obligations. Never report existing work as a fresh start.
 
 ### Engineering Knowledge:
 - 'team_context' returns 'knowledge_dir': this repository's knowledge base at ~/.a4c/<repo-name>/knowledge/.
-- Consult knowledge/INDEX.md when prior learning would help; record meaningful discoveries as NEW Markdown files under knowledge/ (never overwrite existing documents).
-- On 'team_complete_activity', include a knowledge disposition: {"significant": false, "reason": "..."} for routine work, or {"significant": true, "paths": ["findings/<file>.md"]} (or inline file_name + content if the host cannot write outside the workspace). After review, the lead records the task-level assessment accounting for reviewer findings.
+- Read it ONLY when the task genuinely needs prior findings; ordinary work needs no knowledge reads and no knowledge documents.
+- Record meaningful discoveries as NEW Markdown files under knowledge/ only when they are reusable (never overwrite existing documents).
+- A knowledge disposition on 'team_complete_activity' is optional and reports only what you actually wrote: {"significant": false, "reason": "..."} for routine work, or {"significant": true, "paths": ["findings/<file>.md"]} (or inline file_name + content if the host cannot write outside the workspace). After review, the lead records the task-level assessment accounting for reviewer findings.
 - For knowledge review, iteration, or cross-repository transfer requests, follow the lead charter workflow: read the knowledge base, write the assessment or transfer proposal, and wait for the human decision.
 `
 
 	return os.WriteFile(filepath.Join(skillsDir, "SKILL.md"), []byte(skillContent), 0644)
+}
+
+// RegisterAntigravityMCP registers the A4C MCP server with the Antigravity CLI
+// so host-native sessions can call team_* tools instead of reverse-engineering
+// A4C through CLI experiments. It is idempotent ("add or update") and
+// best-effort: hosts without the agy CLI simply skip registration.
+func RegisterAntigravityMCP() error {
+	agyPath, err := exec.LookPath("agy")
+	if err != nil {
+		return nil // no Antigravity CLI on this host; skill install still applies
+	}
+	cmd := exec.Command(agyPath, "mcp", "add", "a4c", "a4c", "mcp")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("register a4c MCP server with antigravity (%s): %w (%s)", agyPath, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // DoctorCheck represents a single diagnostic check result.

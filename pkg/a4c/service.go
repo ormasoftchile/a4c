@@ -812,6 +812,10 @@ func (s *TeamServiceImpl) RejectTask(ctx context.Context, req RejectTaskRequest)
 		return nil, fmt.Errorf("service: save rejection: %w", err)
 	}
 
+	// A rejected task abandons its non-terminal delegated work: obsolete
+	// activities must not remain silently eligible to complete later.
+	s.store.AbandonDescendants(req.TaskID, fmt.Sprintf("abandoned: task %s rejected by human (%s)", req.TaskID, req.Reason))
+
 	return &RejectResult{
 		TaskID:     req.TaskID,
 		RejectedAt: lifecycle.RejectedAt,
@@ -2077,6 +2081,13 @@ func (s *TeamServiceImpl) CompleteActivity(ctx context.Context, req CompleteActi
 			"actor":          req.Actor,
 		},
 	}
+	if req.Usage != nil {
+		// Optional host telemetry: raw report preserved verbatim (absent
+		// fields stay absent) plus a derived ExecutionMetrics for reporting.
+		// Completion never depends on telemetry availability.
+		result.Outputs["host_usage"] = req.Usage
+		result.Metrics = metricsFromHostUsage(req.Usage)
+	}
 	if req.TaskID != "" {
 		if snap := s.resolveCurrentSnapshot(req.TaskID); snap != "" {
 			result.Outputs["snapshot_id"] = snap
@@ -2116,6 +2127,59 @@ func (s *TeamServiceImpl) CompleteActivity(ctx context.Context, req CompleteActi
 		Knowledge:     knowledgeOut,
 		CompletedAt:   time.Now(),
 	}, nil
+}
+
+// metricsFromHostUsage derives ExecutionMetrics from host-reported usage,
+// preserving provenance and accounting boundaries. Only fields the host
+// actually reported are populated; ReportedFields records exactly which ones,
+// so unreported metrics remain unknown rather than becoming measured zeros.
+// Cost values stay in the provider's own unit (usd / ai_credits / unpriced).
+func metricsFromHostUsage(u *HostUsage) *ExecutionMetrics {
+	if u == nil {
+		return nil
+	}
+	m := &ExecutionMetrics{
+		UsageSource: u.Source,
+		UsageModel:  u.Model,
+		CostUnit:    u.CostUnit,
+		UsageScope:  u.Scope,
+	}
+	if m.UsageScope == "" {
+		m.UsageScope = "activity"
+	}
+	if u.InputTokens != nil {
+		m.PromptTokens = *u.InputTokens
+		m.ReportedFields = append(m.ReportedFields, "input_tokens")
+	}
+	if u.CacheReadTokens != nil {
+		m.CacheReadTokens = *u.CacheReadTokens
+		m.CachedTokens = *u.CacheReadTokens // legacy alias for existing consumers
+		m.ReportedFields = append(m.ReportedFields, "cache_read_tokens")
+	}
+	if u.CacheWriteTokens != nil {
+		m.CacheWriteTokens = *u.CacheWriteTokens
+		m.ReportedFields = append(m.ReportedFields, "cache_write_tokens")
+	}
+	if u.OutputTokens != nil {
+		m.CompletionTokens = *u.OutputTokens
+		m.ReportedFields = append(m.ReportedFields, "output_tokens")
+	}
+	if u.ReasoningTokens != nil {
+		m.ReasoningTokens = *u.ReasoningTokens
+		m.ReportedFields = append(m.ReportedFields, "reasoning_tokens")
+	}
+	if u.ModelInvocations != nil {
+		m.ModelInvocations = *u.ModelInvocations
+		m.ReportedFields = append(m.ReportedFields, "model_invocations")
+	}
+	if u.CostReported != nil {
+		m.ReportedCost = *u.CostReported
+		m.ReportedFields = append(m.ReportedFields, "cost_reported")
+	}
+	// Documented sum of reported categories only (gross incl. cache); never an
+	// estimate of fields the host did not report.
+	m.TotalTokens = m.PromptTokens + m.CacheReadTokens + m.CacheWriteTokens + m.CompletionTokens
+	return m
 }
 
 // processKnowledgeClaim verifies a knowledge claim against the resolved

@@ -88,8 +88,26 @@ type ExecutionMetrics struct {
 	// invocations were accepted by the session adapter (via OnProposeActivity).
 	ProposalsRecorded int `json:"proposals_recorded,omitempty"`
 	// How many governed_* tool calls were rejected by in-session limits
-	// (budget, tool-call cap) — surfaces "delegation tools are failing".
+	// (budget, tool-call cap) - surfaces "delegation tools are failing".
 	ToolLimitHits int `json:"tool_limit_hits,omitempty"`
+
+	// Host-reported usage provenance (optional). Populated only when a host
+	// submits usage on completion; absent metrics are unknown, never measured
+	// zeros (see ReportedFields).
+	CacheReadTokens  int     `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int     `json:"cache_write_tokens,omitempty"`
+	UsageSource      string  `json:"usage_source,omitempty"` // "copilot", "opencode", "antigravity"
+	UsageModel       string  `json:"usage_model,omitempty"`
+	// CostUnit preserves the provider's own accounting boundary: "usd",
+	// "ai_credits" (Copilot), or "unpriced". Values are never converted.
+	CostUnit     string  `json:"cost_unit,omitempty"`
+	ReportedCost float64 `json:"reported_cost,omitempty"`
+	// UsageScope is "activity" (default) or "session_including_subagents"
+	// when the host's totals already include subagent consumption.
+	UsageScope string `json:"usage_scope,omitempty"`
+	// ReportedFields lists the metrics the host actually reported. Anything
+	// not listed is unknown rather than zero.
+	ReportedFields []string `json:"reported_fields,omitempty"`
 }
 
 // BilledConsumption returns the budget-relevant token consumption for a

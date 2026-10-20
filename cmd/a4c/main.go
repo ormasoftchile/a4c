@@ -261,6 +261,9 @@ func runInstall(args []string) {
 			fmt.Fprintf(os.Stderr, "Failed to install Antigravity customization: %v\n", err)
 			os.Exit(1)
 		}
+		if err := a4c.RegisterAntigravityMCP(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Antigravity skill installed, but MCP registration failed: %v\n", err)
+		}
 		fmt.Printf("✅ Installed Antigravity skill customization in %s\n", workDir)
 
 	case "all":
@@ -641,6 +644,36 @@ func printDiffSummary(d *a4c.DiffResult) {
 	}
 }
 
+// taskHelpRequested reports whether the arguments request subcommand help.
+func taskHelpRequested(args []string) bool {
+	for _, a := range args {
+		if a == "--help" || a == "-h" {
+			return true
+		}
+	}
+	return false
+}
+
+// flagLikeObjective reports whether a positional value looks like an option
+// rather than a task objective. `a4c task start --help` used to create a task
+// whose objective was "--help"; flag-like values must never become objectives.
+func flagLikeObjective(v string) bool {
+	return strings.HasPrefix(v, "-")
+}
+
+// taskUsageFor returns the usage text for a task subcommand.
+func taskUsageFor(sub string) string {
+	switch sub {
+	case "submit":
+		return "Usage: a4c task submit <objective> [budget_tokens] [--strategy direct|reviewed|team] [--specialist <agent>] [--runtime copilot|opencode] [--model <model>]"
+	case "start":
+		return "Usage: a4c task start <objective> [budget_tokens] [--strategy direct|reviewed|team] [--specialist <agent>] [--runtime copilot|opencode|antigravity] [--model <model>] [--reviewer-runtime <r>] [--reviewer-model <m>] [--agent-runtimes a1=r1,a2=r2] [--steps N]"
+	case "adopt":
+		return "Usage: a4c task adopt <objective> [--notes <text>] [--runtime <r>] [--model <m>] [--strategy <s>] [--in-place] [--run] [--steps N]"
+	}
+	return "Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject|decide|worker|loop|mode> [options]"
+}
+
 func runTask(args []string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: a4c task <submit|start|run|resume|adopt|escalate|checkpoint|list|history|inspect|diff|feedback|accept|integrate|reject|decide|worker|loop|mode> [options]")
@@ -663,6 +696,14 @@ func runTask(args []string) {
 		return
 	}
 
+	// Help is handled before any workspace access, task resolution, or task
+	// creation: `--help` must never become a task objective and must never
+	// trigger side effects (including implicit task-id execution).
+	if taskHelpRequested(args[1:]) {
+		fmt.Println(taskUsageFor(args[0]))
+		return
+	}
+
 	ctx := context.Background()
 	svc, err := buildService(workDir)
 	if err != nil {
@@ -679,7 +720,11 @@ func runTask(args []string) {
 	switch subCmd {
 	case "submit":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task submit <objective> [budget_tokens] [--strategy direct|reviewed|team] [--specialist <agent>] [--runtime copilot|opencode] [--model <model>]")
+			fmt.Println(taskUsageFor("submit"))
+			return
+		}
+		if flagLikeObjective(args[1]) {
+			fmt.Fprintf(os.Stderr, "a4c task submit: refusing flag-like objective %q; options come after the objective (see 'a4c task submit --help')\n", args[1])
 			return
 		}
 		objective := args[1]
@@ -724,6 +769,9 @@ func runTask(args []string) {
 				i++
 			} else if b, err := strconv.ParseFloat(args[i], 64); err == nil {
 				budgetTokens = b
+			} else {
+				fmt.Fprintf(os.Stderr, "a4c task %s: unsupported argument %q (see 'a4c task %s --help')\n", subCmd, args[i], subCmd)
+				return
 			}
 		}
 
@@ -756,7 +804,11 @@ func runTask(args []string) {
 
 	case "start":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task start <objective> [budget_tokens] [--strategy direct|reviewed|team] [--specialist <agent>] [--runtime copilot|opencode|antigravity] [--model <model>] [--reviewer-runtime <r>] [--reviewer-model <m>] [--agent-runtimes a1=r1,a2=r2] [--steps N]")
+			fmt.Println(taskUsageFor("start"))
+			return
+		}
+		if flagLikeObjective(args[1]) {
+			fmt.Fprintf(os.Stderr, "a4c task start: refusing flag-like objective %q; options come after the objective (see 'a4c task start --help')\n", args[1])
 			return
 		}
 		objective := args[1]
@@ -813,6 +865,9 @@ func runTask(args []string) {
 				i++
 			} else if b, err := strconv.ParseFloat(args[i], 64); err == nil {
 				budgetTokens = b
+			} else {
+				fmt.Fprintf(os.Stderr, "a4c task %s: unsupported argument %q (see 'a4c task %s --help')\n", subCmd, args[i], subCmd)
+				return
 			}
 		}
 
@@ -1085,7 +1140,11 @@ func runTask(args []string) {
 
 	case "adopt":
 		if len(args) < 2 {
-			fmt.Println("Usage: a4c task adopt <objective> [--notes <text>] [--runtime <r>] [--model <m>] [--strategy <s>] [--in-place] [--run] [--steps N]")
+			fmt.Println(taskUsageFor("adopt"))
+			return
+		}
+		if flagLikeObjective(args[1]) {
+			fmt.Fprintf(os.Stderr, "a4c task adopt: refusing flag-like objective %q; options come after the objective (see 'a4c task adopt --help')\n", args[1])
 			return
 		}
 		objective := args[1]

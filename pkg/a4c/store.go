@@ -97,6 +97,28 @@ func (s *DurableActivityStore) load() error {
 	return nil
 }
 
+// snapshotCopy returns a detached copy of a record so readers can inspect it
+// while writers concurrently mutate the store's internal state. Concurrent
+// completion attempts must never expose torn lifecycle state to readers.
+func (r *ActivityRecord) snapshotCopy() *ActivityRecord {
+	if r == nil {
+		return nil
+	}
+	cp := *r
+	if r.Result != nil {
+		res := *r.Result
+		if r.Result.Outputs != nil {
+			out := make(map[string]any, len(r.Result.Outputs))
+			for k, v := range r.Result.Outputs {
+				out[k] = v
+			}
+			res.Outputs = out
+		}
+		cp.Result = &res
+	}
+	return &cp
+}
+
 func (s *DurableActivityStore) persist(rec *ActivityRecord) error {
 	path := filepath.Join(s.dir, fmt.Sprintf("%s.json", rec.Request.ID))
 	data, err := json.MarshalIndent(rec, "", "  ")
@@ -209,6 +231,11 @@ func (s *DurableActivityStore) ClaimNextForAgent(agentID string) (*ActivityReque
 	return nil, nil // None pending and ready
 }
 
+// Complete persists a completion outcome for a pending or claimed activity.
+// A failure outcome is persisted as a genuine failure (the reported failure
+// status is never discarded). Retrying the same outcome is a no-op; a
+// conflicting outcome on an already-terminal activity is rejected so durable
+// state can never silently flip (e.g. failed -> completed).
 func (s *DurableActivityStore) Complete(id string, result ActivityResult) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -218,7 +245,26 @@ func (s *DurableActivityStore) Complete(id string, result ActivityResult) error 
 		return ErrActivityNotFound
 	}
 
-	rec.Status = StatusCompleted
+	failed := result.Status == StatusFailed
+	if rec.Status == StatusInterrupted {
+		return ErrActivityTerminal
+	}
+	if rec.Status == StatusCompleted || rec.Status == StatusFailed {
+		recFailed := rec.Status == StatusFailed || (rec.Result != nil && rec.Result.Status == StatusFailed)
+		if recFailed == failed {
+			return nil // idempotent retry of the same outcome
+		}
+		return ErrActivityTerminal
+	}
+
+	if failed {
+		rec.Status = StatusFailed
+		if summary, ok := result.Outputs["summary"].(string); ok && summary != "" && rec.Error == "" {
+			rec.Error = summary
+		}
+	} else {
+		rec.Status = StatusCompleted
+	}
 	rec.Result = &result
 	return s.persist(rec)
 }
@@ -418,7 +464,7 @@ func (s *DurableActivityStore) FindActivityByProposalID(parentID, objective stri
 
 	for _, rec := range s.records {
 		if rec.Request.ParentID == parentID && rec.Request.Objective == objective {
-			return rec
+			return rec.snapshotCopy()
 		}
 	}
 	return nil
@@ -440,7 +486,7 @@ func (s *DurableActivityStore) Get(id string) (*ActivityRecord, error) {
 	if !exists {
 		return nil, ErrActivityNotFound
 	}
-	return rec, nil
+	return rec.snapshotCopy(), nil
 }
 
 // Update updates an existing activity record and persists it to disk.
@@ -529,7 +575,7 @@ func (s *DurableActivityStore) GetTaskTree(rootID string) []*ActivityRecord {
 	var list []*ActivityRecord
 	for _, rec := range s.records {
 		if descendants[rec.Request.ID] {
-			list = append(list, rec)
+			list = append(list, rec.snapshotCopy())
 		}
 	}
 
@@ -594,8 +640,7 @@ func (s *DurableActivityStore) QueryActivities(filter ActivityFilter) []*Activit
 			}
 		}
 
-		cp := *rec
-		list = append(list, &cp)
+		list = append(list, rec.snapshotCopy())
 	}
 	return list
 }

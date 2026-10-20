@@ -494,6 +494,9 @@ func (s *TeamServiceImpl) SubmitFeedback(ctx context.Context, req FeedbackReques
 
 // AcceptTask records explicit human approval of an exact reviewed snapshot without touching working checkout.
 func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest) (*AcceptResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	state, lifecycle, err := s.deriveTaskState(req.TaskID)
 	if err != nil {
 		return nil, err
@@ -538,8 +541,27 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 		return nil, fmt.Errorf("unauthorized: non-interactive invocation requires explicit human authorization token (--token or A4C_HUMAN_AUTH_TOKEN); automated agents cannot approve tasks")
 	}
 
-	snapshotID := s.resolveCurrentSnapshot(req.TaskID)
-	if reviewed := s.reviewedSnapshot(req.TaskID); reviewed != "" && snapshotID != "" && snapshotID != reviewed {
+	// Independent finalization gate: the activity graph must be successfully
+	// complete. An approved review never substitutes for completed work.
+	if violations, verr := s.ValidateTaskGraph(req.TaskID); verr != nil {
+		return nil, verr
+	} else if len(violations) > 0 {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "accept", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "activity_graph_incomplete", "violations": formatViolations(violations),
+		})
+		return nil, fmt.Errorf("%w: %s", ErrActivityGraphIncomplete, formatViolations(violations))
+	}
+
+	snapshotID, snapErr := s.snapshotStrict(req.TaskID)
+	if snapErr != nil {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "accept", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "snapshot_verification_failed", "error": snapErr.Error(),
+		})
+		return nil, snapErr
+	}
+	if reviewed := s.reviewedSnapshot(req.TaskID); reviewed != "" && snapshotID != reviewed {
 		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
 			"op": "accept", "task_id": req.TaskID, "outcome": "denied",
 			"reason": "stale_or_unreviewed_snapshot", "reviewed_snapshot": reviewed, "current_snapshot": snapshotID,
@@ -581,6 +603,9 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 
 // IntegrateTask applies changes from an accepted task to the base repository working checkout.
 func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRequest) (*IntegrateResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	state, lifecycle, err := s.deriveTaskState(req.TaskID)
 	if err != nil {
 		return nil, err
@@ -589,15 +614,39 @@ func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRe
 	if state == TaskStateIntegrated {
 		return nil, ErrTaskAlreadyIntegrated
 	}
-	if lifecycle.Accepted {
-		currentSnapshot := s.resolveCurrentSnapshot(req.TaskID)
-		if lifecycle.AcceptedSnapshot != "" && currentSnapshot != "" && currentSnapshot != lifecycle.AcceptedSnapshot {
-			_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
-				"op": "integrate", "task_id": req.TaskID, "outcome": "denied",
-				"reason": "snapshot_mismatch", "accepted_snapshot": lifecycle.AcceptedSnapshot, "current_snapshot": currentSnapshot,
-			})
-			return nil, fmt.Errorf("%w: accepted %s != current %s", ErrSnapshotMismatch, lifecycle.AcceptedSnapshot, currentSnapshot)
-		}
+	if !lifecycle.Accepted {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "integrate", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "task_not_accepted", "state": state,
+		})
+		return nil, fmt.Errorf("%w: task state is %s", ErrTaskNotAccepted, state)
+	}
+
+	// Independent revalidation: an approval issued against a valid state never
+	// authorizes integrating a subsequently changed or incomplete state.
+	if violations, verr := s.ValidateTaskGraph(req.TaskID); verr != nil {
+		return nil, verr
+	} else if len(violations) > 0 {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "integrate", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "activity_graph_incomplete", "violations": formatViolations(violations),
+		})
+		return nil, fmt.Errorf("%w: %s", ErrActivityGraphIncomplete, formatViolations(violations))
+	}
+	currentSnapshot, snapErr := s.snapshotStrict(req.TaskID)
+	if snapErr != nil {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "integrate", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "snapshot_verification_failed", "error": snapErr.Error(),
+		})
+		return nil, snapErr
+	}
+	if lifecycle.AcceptedSnapshot != "" && currentSnapshot != lifecycle.AcceptedSnapshot {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "integrate", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "snapshot_mismatch", "accepted_snapshot": lifecycle.AcceptedSnapshot, "current_snapshot": currentSnapshot,
+		})
+		return nil, fmt.Errorf("%w: accepted %s != current %s", ErrSnapshotMismatch, lifecycle.AcceptedSnapshot, currentSnapshot)
 	}
 	if state != TaskStateAccepted {
 		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
@@ -606,8 +655,6 @@ func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRe
 		})
 		return nil, fmt.Errorf("%w: task state is %s", ErrTaskNotAccepted, state)
 	}
-
-	currentSnapshot := s.resolveCurrentSnapshot(req.TaskID)
 
 	// 2. Verify base working checkout is clean (excluding internal .a4c state directory)
 	cmdStatus := exec.CommandContext(ctx, "git", "status", "--porcelain")
@@ -642,14 +689,55 @@ func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRe
 	if s.wtMgr != nil {
 		if wt, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && wt != nil {
 			if wt.WorktreePath != "" {
-				// Stage and commit approved changes in the worktree
+				// Stage and commit approved changes in the worktree. Staging or
+				// commit failures are fatal: proceeding silently would merge
+				// content that was never verified against the approval.
 				cmdAdd := exec.CommandContext(ctx, "git", "add", "-A")
 				cmdAdd.Dir = wt.WorktreePath
-				_ = cmdAdd.Run()
+				if out, err := cmdAdd.CombinedOutput(); err != nil {
+					return nil, fmt.Errorf("service: git add failed during integration: %s (%w)", strings.TrimSpace(string(out)), err)
+				}
 
 				cmdCommit := exec.CommandContext(ctx, "git", "commit", "-m", fmt.Sprintf("feat(a4c): task %s approved changes", req.TaskID))
 				cmdCommit.Dir = wt.WorktreePath
-				_ = cmdCommit.Run()
+				if out, err := cmdCommit.CombinedOutput(); err != nil {
+					// An already-clean tree legitimately has nothing to commit;
+					// any other commit failure aborts integration.
+					clean := false
+					cmdClean := exec.CommandContext(ctx, "git", "status", "--porcelain")
+					cmdClean.Dir = wt.WorktreePath
+					if stOut, stErr := cmdClean.CombinedOutput(); stErr == nil && strings.TrimSpace(string(stOut)) == "" {
+						clean = true
+					}
+					if !clean {
+						return nil, fmt.Errorf("service: git commit failed during integration: %s (%w)", strings.TrimSpace(string(out)), err)
+					}
+				}
+
+				// Post-commit re-verification closes the check-to-commit race:
+				// content that changed between approval verification and the
+				// commit is never merged.
+				if postSnap, perr := s.snapshotStrict(req.TaskID); perr != nil {
+					_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+						"op": "integrate", "task_id": req.TaskID, "outcome": "denied",
+						"reason": "snapshot_verification_failed_after_commit", "error": perr.Error(),
+					})
+					return nil, perr
+				} else if postSnap != currentSnapshot {
+					_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+						"op": "integrate", "task_id": req.TaskID, "outcome": "denied",
+						"reason": "content_changed_during_integration",
+						"approved_snapshot": currentSnapshot, "committed_snapshot": postSnap,
+					})
+					return nil, fmt.Errorf("%w: worktree changed during integration (approved %s, committed %s)",
+						ErrSnapshotMismatch, currentSnapshot, postSnap)
+				}
+				cmdStat := exec.CommandContext(ctx, "git", "status", "--porcelain")
+				cmdStat.Dir = wt.WorktreePath
+				if out, err := cmdStat.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "" {
+					return nil, fmt.Errorf("service: worktree is not clean after staging approved content; integration aborted: %s (err %v)",
+						strings.TrimSpace(string(out)), err)
+				}
 			}
 
 			if wt.Branch != "" {
@@ -1283,6 +1371,91 @@ func (s *TeamServiceImpl) AdoptExistingWork(ctx context.Context, req AdoptWorkRe
 	}, nil
 }
 
+// activitySucceeded reports whether a record represents successful completion.
+// A record persisted as completed but carrying a failed result (legacy writers)
+// is never success.
+func activitySucceeded(rec *ActivityRecord) bool {
+	if rec == nil || rec.Status != StatusCompleted {
+		return false
+	}
+	return rec.Result == nil || rec.Result.Status != StatusFailed
+}
+
+// isReviewRecord reports whether an activity carries review semantics.
+func isReviewRecord(rec *ActivityRecord) bool {
+	if rec == nil {
+		return false
+	}
+	agent := strings.ToLower(rec.Request.AgentID)
+	return agent == "reviewer" || agent == "charlie" || strings.Contains(rec.Request.ID, "review")
+}
+
+// strategyRequiresReview reports whether the strategy mandates independent review.
+func strategyRequiresReview(strategy ExecutionStrategy) bool {
+	return strategy == StrategyReviewed || strategy == StrategyTeam
+}
+
+// GraphViolation describes one reason a task cannot be accepted or integrated.
+type GraphViolation struct {
+	ActivityID string `json:"activity_id"`
+	Status     string `json:"status"`
+	Reason     string `json:"reason"`
+}
+
+// ValidateTaskGraph reports every reason the task cannot be finalized: any
+// required activity that is not in a successful terminal state, and a missing
+// approved review where the strategy requires one. It is read-only: historical
+// records are reported, never rewritten.
+func (s *TeamServiceImpl) ValidateTaskGraph(taskID string) ([]GraphViolation, error) {
+	rootRec, err := s.store.Get(taskID)
+	if err != nil {
+		return nil, ErrTaskNotFound
+	}
+	var violations []GraphViolation
+	add := func(id, status, reason string) {
+		violations = append(violations, GraphViolation{ActivityID: id, Status: status, Reason: reason})
+	}
+	for _, rec := range s.store.GetTaskTree(taskID) {
+		switch {
+		case rec.Status == StatusInterrupted:
+			add(rec.Request.ID, string(rec.Status), "interrupted activity did not finish")
+		case rec.Status == StatusFailed || (rec.Result != nil && rec.Result.Status == StatusFailed):
+			add(rec.Request.ID, string(rec.Status), "failed activity cannot count as successful completion")
+		case rec.Status == StatusPending || rec.Status == StatusClaimed ||
+			rec.Status == StatusAwaitingHuman || rec.Status == StatusIndeterminate:
+			add(rec.Request.ID, string(rec.Status), "activity is not in a terminal state")
+		case !activitySucceeded(rec):
+			add(rec.Request.ID, string(rec.Status), "activity did not complete successfully")
+		}
+	}
+	if strategyRequiresReview(rootRec.Request.Strategy) && !s.hasApprovedReviewRecord(taskID) {
+		add(taskID, "", fmt.Sprintf("strategy %q requires an approved review before acceptance", rootRec.Request.Strategy))
+	}
+	return violations, nil
+}
+
+// hasApprovedReviewRecord reports whether the task graph contains an approved
+// review recorded by a completed review activity.
+func (s *TeamServiceImpl) hasApprovedReviewRecord(taskID string) bool {
+	for _, rec := range s.store.GetTaskTree(taskID) {
+		if !activitySucceeded(rec) || !isReviewRecord(rec) || rec.Result == nil {
+			continue
+		}
+		if app, ok := rec.Result.Outputs["approved"].(bool); ok && app {
+			return true
+		}
+	}
+	return false
+}
+
+func formatViolations(vs []GraphViolation) string {
+	parts := make([]string, 0, len(vs))
+	for _, v := range vs {
+		parts = append(parts, fmt.Sprintf("%s (%s: %s)", v.ActivityID, v.Status, v.Reason))
+	}
+	return strings.Join(parts, "; ")
+}
+
 // deriveTaskState derives the active lifecycle state from authoritative activity state and lifecycle facts.
 func (s *TeamServiceImpl) deriveTaskState(rootID string) (TaskLifecycleState, *HumanLifecycleRecord, error) {
 	rootRec, err := s.store.Get(rootID)
@@ -1319,31 +1492,31 @@ func (s *TeamServiceImpl) deriveTaskState(rootID string) (TaskLifecycleState, *H
 	hasFailures := false
 	hasInterrupted := false
 	hasAwaitingDecision := false
-	hasRunning := false
-	hasApprovedReview := false
+	hasNonTerminal := false
 	allCompleted := true
 
 	for _, rec := range subtasks {
 		switch rec.Status {
 		case StatusInterrupted:
 			hasInterrupted = true
+			allCompleted = false
 		case StatusFailed:
 			hasFailures = true
+			allCompleted = false
 		case StatusAwaitingHuman:
 			hasAwaitingDecision = true
-		case StatusClaimed:
-			hasRunning = true
 			allCompleted = false
-		case StatusPending:
-			if rec.Request.ID != rootID {
-				hasRunning = true
-			}
+		case StatusPending, StatusClaimed, StatusIndeterminate:
+			// Non-terminal work (including a still-pending root) must never be
+			// masked by an approved review.
+			hasNonTerminal = true
 			allCompleted = false
 		case StatusCompleted:
-			if (rec.Request.AgentID == "reviewer" || rec.Request.AgentID == "charlie" || strings.Contains(rec.Request.ID, "review")) && rec.Result != nil {
-				if app, ok := rec.Result.Outputs["approved"].(bool); ok && app {
-					hasApprovedReview = true
-				}
+			if rec.Result != nil && rec.Result.Status == StatusFailed {
+				// Failure persisted under a completed status (legacy writers)
+				// counts as failure, never as success.
+				hasFailures = true
+				allCompleted = false
 			}
 		}
 	}
@@ -1356,9 +1529,6 @@ func (s *TeamServiceImpl) deriveTaskState(rootID string) (TaskLifecycleState, *H
 	}
 	if hasAwaitingDecision {
 		return TaskStateAwaitingDecision, lifecycle, nil
-	}
-	if hasApprovedReview {
-		return TaskStateAwaitingHumanReview, lifecycle, nil
 	}
 
 	// If latest action was human feedback, check if revision activity is still active
@@ -1375,22 +1545,19 @@ func (s *TeamServiceImpl) deriveTaskState(rootID string) (TaskLifecycleState, *H
 		}
 	}
 
-	if hasRunning {
+	// An approved review is necessary where the strategy requires it, but it
+	// can never substitute for completed engineering work: an incomplete
+	// activity graph is not review-ready.
+	if hasNonTerminal {
+		if rootRec.Status == StatusPending && len(subtasks) <= 1 {
+			return TaskStateQueued, lifecycle, nil
+		}
 		return TaskStateRunning, lifecycle, nil
 	}
 
 	// Check if entire tree finished
-	if allCompleted {
-		if hasApprovedReview || (rootRec.Request.Strategy == StrategyDirect && rootRec.Status == StatusCompleted) {
-			return TaskStateAwaitingHumanReview, lifecycle, nil
-		}
-		if rootRec.Status == StatusCompleted {
-			return TaskStateAwaitingHumanReview, lifecycle, nil
-		}
-	}
-
-	if rootRec.Status == StatusPending && len(subtasks) <= 1 {
-		return TaskStateQueued, lifecycle, nil
+	if allCompleted && activitySucceeded(rootRec) {
+		return TaskStateAwaitingHumanReview, lifecycle, nil
 	}
 
 	return TaskStateRunning, lifecycle, nil
@@ -1416,10 +1583,22 @@ func (s *TeamServiceImpl) absPath(p string) string {
 	return abs
 }
 
-// resolveCurrentSnapshot returns the content-addressed identity of the task's worktree.
+// resolveCurrentSnapshot returns the content-addressed identity of the task's worktree,
+// or "" when it cannot be computed. It is informational; gates use snapshotStrict.
 // A git commit SHA is NOT used: it does not change when the working tree changes, so it
 // cannot bind an approval to what a human or reviewer actually saw.
 func (s *TeamServiceImpl) resolveCurrentSnapshot(taskID string) string {
+	id, err := s.snapshotStrict(taskID)
+	if err != nil {
+		return ""
+	}
+	return id
+}
+
+// snapshotStrict returns the content-addressed identity of the task's worktree
+// and fails closed: a hash failure is an error, never permission to fall back
+// to a previously recorded (stale) verification result.
+func (s *TeamServiceImpl) snapshotStrict(taskID string) (string, error) {
 	workDir := s.absPath(s.workspaceDir)
 	if s.wtMgr != nil {
 		if wt, err := s.wtMgr.GetWorktree(taskID); err == nil && wt != nil && wt.WorktreePath != "" {
@@ -1427,20 +1606,14 @@ func (s *TeamServiceImpl) resolveCurrentSnapshot(taskID string) string {
 		}
 	}
 
-	if id, err := NewStrictWorkspaceSnapshotter().ComputeSnapshot(workDir); err == nil {
-		return id
+	id, err := NewStrictWorkspaceSnapshotter().ComputeSnapshot(workDir)
+	if err != nil {
+		return "", fmt.Errorf("service: snapshot verification failed: %w", err)
 	}
-
-	// Fallback to evidence snapshot if available
-	subtasks := s.store.GetTaskTree(taskID)
-	for _, sub := range subtasks {
-		if sub.Result != nil {
-			if snap, ok := sub.Result.Outputs["snapshot_id"].(string); ok && snap != "" {
-				return snap
-			}
-		}
+	if id == "" {
+		return "", fmt.Errorf("service: snapshot verification produced no identity for %s", workDir)
 	}
-	return ""
+	return id, nil
 }
 
 // coderCompletionSnapshot returns the snapshot recorded by the most recent completed
@@ -1717,6 +1890,31 @@ func (s *TeamServiceImpl) AssignActivity(ctx context.Context, req AssignActivity
 		return nil, fmt.Errorf("service: agent is required")
 	}
 
+	// Lifecycle gates at the service boundary: Direct mode does not delegate
+	// (its contract is a single programmer working in the root activity), and
+	// a finalized task's graph can no longer be extended without invalidating
+	// the accepted result. Native host subagents are unaffected: they never
+	// create A4C activities.
+	rootRec, err := s.store.Get(req.TaskID)
+	if err != nil {
+		return nil, ErrTaskNotFound
+	}
+	if rootRec.Request.Strategy == StrategyDirect {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "assign_activity", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "direct_mode_no_delegation", "agent": req.Agent,
+		})
+		return nil, ErrDelegationNotPermitted
+	}
+	if lifecycle, _ := s.lifecycleStore.Get(req.TaskID); lifecycle != nil &&
+		(lifecycle.Accepted || lifecycle.Integrated || lifecycle.Rejected) {
+		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
+			"op": "assign_activity", "task_id": req.TaskID, "outcome": "denied",
+			"reason": "task_finalized", "agent": req.Agent,
+		})
+		return nil, ErrTaskFinalized
+	}
+
 	wtPath := s.workspaceDir
 	if s.wtMgr != nil {
 		if rec, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && rec != nil {
@@ -1892,7 +2090,9 @@ func (s *TeamServiceImpl) CompleteActivity(ctx context.Context, req CompleteActi
 	}
 
 	if s.store != nil {
-		_ = s.store.Complete(req.ActivityID, result)
+		if err := s.store.Complete(req.ActivityID, result); err != nil {
+			return nil, fmt.Errorf("service: persist activity completion: %w", err)
+		}
 	}
 
 	if s.journal != nil {
@@ -2211,14 +2411,18 @@ func (s *TeamServiceImpl) RecordReview(ctx context.Context, req RecordReviewRequ
 	}
 
 	if s.store != nil {
-		_ = s.store.Enqueue(ActivityRequest{
+		if err := s.store.Enqueue(ActivityRequest{
 			ID:        revActID,
 			ParentID:  req.TaskID,
 			AgentID:   req.Reviewer,
 			Objective: fmt.Sprintf("Independent code review of snapshot %s", commit),
 			CreatedAt: time.Now(),
-		})
-		_ = s.store.Complete(revActID, revResult)
+		}); err != nil {
+			return nil, fmt.Errorf("service: record review activity: %w", err)
+		}
+		if err := s.store.Complete(revActID, revResult); err != nil {
+			return nil, fmt.Errorf("service: persist review outcome: %w", err)
+		}
 	}
 
 	targetState := TaskStateAwaitingHumanReview

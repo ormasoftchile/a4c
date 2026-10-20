@@ -262,6 +262,31 @@ func (g *PaymentGateway) ProcessPayment(req PaymentRequest) bool {
 		t.Fatalf("opencode: expected state %s, got %s", a4c.TaskStateAwaitingHumanReview, revResult.LifecycleState)
 	}
 
+	// Step 10b: Charlie's delegated activity is completed work and must be
+	// closed in the durable graph before human acceptance.
+	if _, err := openCodeSvc.CompleteActivity(ctx, a4c.CompleteActivityRequest{
+		TaskID:             taskID,
+		ActivityID:         assignCharlie.ActivityID,
+		Actor:              "charlie",
+		Summary:            "Independent review recorded",
+		ValidationEvidence: "review verdict: approved",
+		Success:            true,
+	}); err != nil {
+		t.Fatalf("opencode: CompleteActivity for Charlie failed: %v", err)
+	}
+
+	// Step 10c: the coordinating lead finalizes its own root activity;
+	// reviewer approval never substitutes for completed work.
+	if _, err := openCodeSvc.CompleteActivity(ctx, a4c.CompleteActivityRequest{
+		TaskID:     taskID,
+		ActivityID: taskID,
+		Actor:      "alice",
+		Summary:    "Cross-host coordination complete; implementation and review finished",
+		Success:    true,
+	}); err != nil {
+		t.Fatalf("opencode: CompleteActivity for root failed: %v", err)
+	}
+
 	// Step 11: Human accepts task via CLI
 	accRes, err := openCodeSvc.AcceptTask(ctx, a4c.AcceptTaskRequest{
 		TaskID:        taskID,

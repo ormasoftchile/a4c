@@ -12,6 +12,7 @@ var (
 	ErrUnfinishedIntentDetected = errors.New("reconciliation: unfinished external intent detected on restart")
 	ErrWorkspaceConcurrentEdit  = errors.New("evidence: workspace content modified concurrently during validation")
 	ErrActivityNotFound         = errors.New("store: activity not found")
+	ErrActivityTerminal         = errors.New("store: activity is already terminal; conflicting outcome rejected")
 	ErrWorkspaceLocked          = errors.New("workspace: exclusive lock held by another coordinator process")
 	ErrTurnLimitExceeded        = errors.New("limits: max model turns exceeded for activity")
 	ErrToolCallLimitExceeded    = errors.New("limits: max tool calls exceeded for activity")

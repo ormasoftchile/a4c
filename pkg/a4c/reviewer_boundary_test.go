@@ -65,10 +65,11 @@ func TestReviewerBoundaryEnforcement(t *testing.T) {
 	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr)
 	ctx := context.Background()
 
-	// 1. Begin task
+	// 1. Begin task (team strategy: the reviewer-boundary flow delegates)
 	beginRes, err := svc.BeginTask(ctx, a4c.BeginTaskRequest{
 		Objective:   "Implement security token parser",
 		Coordinator: "alice",
+		Strategy:    a4c.StrategyTeam,
 	})
 	if err != nil {
 		t.Fatalf("BeginTask failed: %v", err)
@@ -83,12 +84,15 @@ func TestReviewerBoundaryEnforcement(t *testing.T) {
 	runGitCmd(t, worktreePath, "commit", "-m", "feat: implement Token")
 
 	// 3. Bob completes activity
-	assignBob, _ := svc.AssignActivity(ctx, a4c.AssignActivityRequest{
+	assignBob, err := svc.AssignActivity(ctx, a4c.AssignActivityRequest{
 		TaskID:    taskID,
 		Agent:     "bob",
 		Role:      "coder",
 		Objective: "Write Token",
 	})
+	if err != nil {
+		t.Fatalf("AssignActivity failed: %v", err)
+	}
 	_, _ = svc.CompleteActivity(ctx, a4c.CompleteActivityRequest{
 		TaskID:             taskID,
 		ActivityID:         assignBob.ActivityID,

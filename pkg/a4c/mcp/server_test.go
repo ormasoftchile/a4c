@@ -714,6 +714,25 @@ func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
 		t.Fatalf("expected state %s, got %s", a4c.TaskStateAwaitingHumanReview, revResult.LifecycleState)
 	}
 
+	// 6b. The lead finalizes its own root activity: reviewer approval never
+	// substitutes for completed engineering work.
+	rootCompRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_complete_activity",
+			Arguments: map[string]any{
+				"task_id":             beginResult.TaskID,
+				"activity_id":         beginResult.TaskID,
+				"actor":               "alice",
+				"summary":             "Coordination complete; implementation and review finished",
+				"validation_evidence": "review verdict: approved",
+				"success":             true,
+			},
+		},
+	})
+	if err != nil || rootCompRes.IsError {
+		t.Fatalf("team_complete_activity (root) failed: %v (%+v)", err, rootCompRes)
+	}
+
 	// 7. team_accept & team_integrate
 	// Verify that MCP call (e.g. AI agent trying to self-approve) is rejected
 	unauthRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{

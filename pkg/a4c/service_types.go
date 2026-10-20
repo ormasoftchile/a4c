@@ -14,6 +14,10 @@ var (
 	ErrTaskAlreadyIntegrated    = errors.New("service: task already integrated")
 	ErrTaskNotReadyForReview    = errors.New("service: task is not awaiting human review")
 	ErrTaskNotAccepted          = errors.New("service: task must be accepted before integration")
+	ErrActivityGraphIncomplete  = errors.New("service: task activity graph is not successfully complete")
+	ErrReviewRequired           = errors.New("service: strategy requires an approved review before acceptance")
+	ErrDelegationNotPermitted   = errors.New("service: direct mode does not delegate activities; complete the work in the root activity")
+	ErrTaskFinalized            = errors.New("service: task is finalized; new activities would invalidate the accepted result")
 )
 
 // TaskLifecycleState describes the end-to-end status of a root task from assignment to integration.

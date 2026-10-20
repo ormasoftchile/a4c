@@ -284,6 +284,14 @@ func TestRosterExport_CharterMatchesServiceContract(t *testing.T) {
 	if !strings.Contains(docs["copilot"], "a4c-team_begin_task") {
 		t.Errorf("copilot charter does not name the runtime tool form a4c-team_*")
 	}
+	// The whitelist must name the host's real shell tools: Windows Copilot
+	// exposes "powershell", not "bash" (Stage 2 finding F5 — an agent that
+	// whitelists only "bash" has no shell at all and cannot run verification).
+	for _, shell := range []string{"bash", "powershell"} {
+		if !strings.Contains(docs["copilot"], `"`+shell+`"`) {
+			t.Errorf("copilot charter tools list misses host shell tool %q", shell)
+		}
+	}
 	if !strings.Contains(docs["opencode"], "tools.a4c.team_begin_task") {
 		t.Errorf("opencode charter does not teach the code-execution call form")
 	}

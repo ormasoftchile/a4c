@@ -64,7 +64,7 @@ func ExportCopilotAgents(rootDir string) error {
 	aliceContent := `---
 name: a4c
 description: "A4C — Autonomous personal software engineering partner with durable task identity and host-native execution."
-tools: ["read", "edit", "write", "bash", "agent", "a4c/team_context", "a4c/team_list", "a4c/team_status", "a4c/team_result", "a4c/team_diff", "a4c/team_feedback", "a4c/team_begin_task", "a4c/team_assign_activity", "a4c/team_checkpoint", "a4c/team_complete_activity", "a4c/team_review_result"]
+tools: ["read", "edit", "write", "bash", "powershell", "agent", "a4c/team_context", "a4c/team_list", "a4c/team_status", "a4c/team_result", "a4c/team_diff", "a4c/team_feedback", "a4c/team_begin_task", "a4c/team_assign_activity", "a4c/team_checkpoint", "a4c/team_complete_activity", "a4c/team_review_result"]
 ---
 
 You are **A4C (Agents for Coding)** — your autonomous personal software engineering partner.
@@ -113,7 +113,7 @@ The A4C MCP tools are exposed in this host as: a4c-team_context, a4c-team_list, 
 	bobContent := `---
 name: bob
 description: "Bob (Coder) — Senior Software Engineer. Implements code changes and tests natively in the assigned worktree."
-tools: ["read", "edit", "write", "bash", "a4c/team_status", "a4c/team_checkpoint", "a4c/team_diff"]
+tools: ["read", "edit", "write", "bash", "powershell", "a4c/team_status", "a4c/team_checkpoint", "a4c/team_diff"]
 ---
 
 You are **Bob (Senior Software Engineer)** of A4C (Agents for Coding).
@@ -135,7 +135,7 @@ Your responsibility is high-quality, minimal, deterministic code implementation.
 	charlieContent := `---
 name: charlie
 description: "Charlie (Reviewer) — Quality & Verification Reviewer. Independently reviews changes. Strictly read-only."
-tools: ["read", "bash", "a4c/team_status", "a4c/team_checkpoint", "a4c/team_diff", "a4c/team_review_result"]
+tools: ["read", "bash", "powershell", "a4c/team_status", "a4c/team_checkpoint", "a4c/team_diff", "a4c/team_review_result"]
 ---
 
 You are **Charlie (Quality & Verification Reviewer)** of A4C (Agents for Coding).
@@ -266,14 +266,14 @@ permissions:
 const copilotStrictLeadPermissions = `---
 name: a4c-strict
 description: "A4C (Strict Governance) — mutations routed through the journaled team_apply_patch tool"
-tools: ["read", "bash", "agent", "a4c/team_context", "a4c/team_list", "a4c/team_status", "a4c/team_result", "a4c/team_diff", "a4c/team_feedback", "a4c/team_begin_task", "a4c/team_assign_activity", "a4c/team_checkpoint", "a4c/team_complete_activity", "a4c/team_review_result", "a4c/team_apply_patch"]
+tools: ["read", "bash", "powershell", "agent", "a4c/team_context", "a4c/team_list", "a4c/team_status", "a4c/team_result", "a4c/team_diff", "a4c/team_feedback", "a4c/team_begin_task", "a4c/team_assign_activity", "a4c/team_checkpoint", "a4c/team_complete_activity", "a4c/team_review_result", "a4c/team_apply_patch"]
 ---
 `
 
 const copilotStrictCoderPermissions = `---
 name: bob-strict
 description: "Bob (Coder, Strict Governance) — journaled writes via team_apply_patch"
-tools: ["read", "bash", "a4c/team_status", "a4c/team_checkpoint", "a4c/team_diff", "a4c/team_apply_patch"]
+tools: ["read", "bash", "powershell", "a4c/team_status", "a4c/team_checkpoint", "a4c/team_diff", "a4c/team_apply_patch"]
 ---
 `
 

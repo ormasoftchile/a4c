@@ -17,17 +17,34 @@ import (
 // helpers
 // ---------------------------------------------------------------------------
 
-func liBegin(t *testing.T, h *serviceTestHarness, strategy a4c.ExecutionStrategy) *a4c.BeginTaskResult {
+// liBegin creates a new task the only way new work is created: direct is
+// implicit. Tests that need Team/Reviewed-shaped graphs build them from durable
+// records (liAddChild/liAddReview), exactly as historical data looks.
+func liBegin(t *testing.T, h *serviceTestHarness) *a4c.BeginTaskResult {
 	t.Helper()
 	res, err := h.service.BeginTask(context.Background(), a4c.BeginTaskRequest{
 		Objective:    "implement interval algebra",
 		BudgetTokens: 10000,
-		Strategy:     strategy,
 	})
 	if err != nil {
 		t.Fatalf("BeginTask: %v", err)
 	}
 	return res
+}
+
+// liMarkLegacyStrategy rewrites the root record's strategy field, fabricating
+// what a historical Team/Reviewed task looks like on disk. Nothing creates
+// these any more; the durable format must keep reading them.
+func liMarkLegacyStrategy(t *testing.T, h *serviceTestHarness, taskID string, strategy a4c.ExecutionStrategy) {
+	t.Helper()
+	rec, err := h.store.Get(taskID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", taskID, err)
+	}
+	rec.Request.Strategy = strategy
+	if err := h.store.Update(*rec); err != nil {
+		t.Fatalf("store.Update(%s): %v", taskID, err)
+	}
 }
 
 func liComplete(t *testing.T, h *serviceTestHarness, taskID, activityID string, success bool) {
@@ -120,7 +137,7 @@ func requireFinalizationRejected(t *testing.T, err error, what string) {
 
 func TestLifecycle_Regress_ApprovedReviewPendingChild_AcceptRejected(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyReviewed)
+	task := liBegin(t, h)
 	liComplete(t, h, task.TaskID, task.TaskID, true)
 	liAddReview(t, h, task.TaskID)
 	liAddChild(t, h, task.TaskID, "child-pending", "bob") // stays pending
@@ -134,7 +151,7 @@ func TestLifecycle_Regress_ApprovedReviewPendingChild_AcceptRejected(t *testing.
 
 func TestLifecycle_Regress_ApprovedReviewRunningChild_AcceptRejected(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyReviewed)
+	task := liBegin(t, h)
 	liComplete(t, h, task.TaskID, task.TaskID, true)
 	liAddReview(t, h, task.TaskID)
 	liAddChild(t, h, task.TaskID, "child-running", "bob")
@@ -147,7 +164,7 @@ func TestLifecycle_Regress_ApprovedReviewRunningChild_AcceptRejected(t *testing.
 
 func TestLifecycle_Regress_ApprovedReviewFailedChild_AcceptRejected(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyTeam)
+	task := liBegin(t, h)
 	liComplete(t, h, task.TaskID, task.TaskID, true)
 	liAddReview(t, h, task.TaskID)
 	liAddChild(t, h, task.TaskID, "child-failed", "bob")
@@ -168,7 +185,7 @@ func TestLifecycle_Regress_ApprovedReviewFailedChild_AcceptRejected(t *testing.T
 // The root is required work and must block finalization.
 func TestLifecycle_Regress_TeamRootPendingCompletedChildren_AcceptRejected(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyTeam)
+	task := liBegin(t, h)
 	liAddChild(t, h, task.TaskID, task.TaskID+"-coder-1", "bob")
 	liAddChild(t, h, task.TaskID, task.TaskID+"-reviewer-1", "reviewer")
 	liComplete(t, h, task.TaskID, task.TaskID+"-coder-1", true)
@@ -203,7 +220,7 @@ func TestLifecycle_Regress_TeamRootPendingCompletedChildren_AcceptRejected(t *te
 
 func TestLifecycle_DirectTask_FullAcceptIntegrate(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyDirect)
+	task := liBegin(t, h)
 	if err := os.WriteFile(filepath.Join(task.WorktreePath, "feature.go"), []byte("package fixture\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +239,7 @@ func TestLifecycle_DirectTask_FullAcceptIntegrate(t *testing.T) {
 
 func TestLifecycle_ReviewedTask_FullAcceptIntegrate(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyReviewed)
+	task := liBegin(t, h)
 	liComplete(t, h, task.TaskID, task.TaskID, true)
 	liAddReview(t, h, task.TaskID)
 
@@ -236,7 +253,7 @@ func TestLifecycle_ReviewedTask_FullAcceptIntegrate(t *testing.T) {
 
 func TestLifecycle_TeamTask_FullAcceptIntegrate(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyTeam)
+	task := liBegin(t, h)
 	liAddChild(t, h, task.TaskID, task.TaskID+"-coder-1", "bob")
 	liAddChild(t, h, task.TaskID, task.TaskID+"-charlie-1", "charlie")
 	liComplete(t, h, task.TaskID, task.TaskID+"-coder-1", true)
@@ -258,7 +275,7 @@ func TestLifecycle_TeamTask_FullAcceptIntegrate(t *testing.T) {
 
 func TestLifecycle_FailedCompletion_PersistsFailed(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyDirect)
+	task := liBegin(t, h)
 	liComplete(t, h, task.TaskID, task.TaskID, false) // reports failure
 
 	rec, err := h.store.Get(task.TaskID)
@@ -279,7 +296,7 @@ func TestLifecycle_FailedCompletion_PersistsFailed(t *testing.T) {
 
 func TestStore_Complete_PersistenceErrorPropagates(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyDirect)
+	task := liBegin(t, h)
 
 	// Completing an activity that does not exist must surface the store error.
 	_, err := h.service.CompleteActivity(context.Background(), a4c.CompleteActivityRequest{
@@ -302,7 +319,7 @@ func TestStore_Complete_PersistenceErrorPropagates(t *testing.T) {
 
 func TestLifecycle_SnapshotChangedAfterApproval_IntegrateRejected(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyDirect)
+	task := liBegin(t, h)
 	if err := os.WriteFile(filepath.Join(task.WorktreePath, "feature.go"), []byte("package fixture\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +339,7 @@ func TestLifecycle_SnapshotChangedAfterApproval_IntegrateRejected(t *testing.T) 
 
 func TestLifecycle_SnapshotVerificationFails_IntegrateRejected(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyDirect)
+	task := liBegin(t, h)
 	liComplete(t, h, task.TaskID, task.TaskID, true)
 	if err := liAccept(h, task.TaskID); err != nil {
 		t.Fatalf("accept: %v", err)
@@ -340,20 +357,15 @@ func TestLifecycle_SnapshotVerificationFails_IntegrateRejected(t *testing.T) {
 
 func TestLifecycle_ActivityAppearsAfterAcceptance_IntegrateRejected(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyTeam)
+	task := liBegin(t, h)
 	liAddReview(t, h, task.TaskID)
 	liComplete(t, h, task.TaskID, task.TaskID, true)
 	if err := liAccept(h, task.TaskID); err != nil {
 		t.Fatalf("accept: %v", err)
 	}
 
-	// The service boundary refuses new delegation on a finalized task...
-	if _, err := h.service.AssignActivity(context.Background(), a4c.AssignActivityRequest{
-		TaskID: task.TaskID, Agent: "bob", Objective: "late work",
-	}); !errors.Is(err, a4c.ErrTaskFinalized) {
-		t.Fatalf("AssignActivity after accept: err = %v, want ErrTaskFinalized", err)
-	}
-	// ...and even a directly injected activity invalidates integration.
+	// Even a directly injected activity invalidates integration: nothing that
+	// appears after acceptance can ride along.
 	liAddChild(t, h, task.TaskID, "late-child", "bob")
 	if err := liIntegrate(h, task.TaskID); !errors.Is(err, a4c.ErrActivityGraphIncomplete) {
 		t.Fatalf("integrate with late activity: err = %v, want ErrActivityGraphIncomplete", err)
@@ -366,7 +378,7 @@ func TestLifecycle_ActivityAppearsAfterAcceptance_IntegrateRejected(t *testing.T
 
 func TestStore_DuplicateCompletion_StateConsistent(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyDirect)
+	task := liBegin(t, h)
 	liComplete(t, h, task.TaskID, task.TaskID, true)
 
 	// Retry of the same outcome is an idempotent no-op.
@@ -391,7 +403,7 @@ func TestStore_DuplicateCompletion_StateConsistent(t *testing.T) {
 
 func TestLifecycle_ReloadIncompleteWorkflow_NoFalseSuccess(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyTeam)
+	task := liBegin(t, h)
 	liAddReview(t, h, task.TaskID)
 	liAddChild(t, h, task.TaskID, "child-pending", "bob")
 
@@ -404,7 +416,7 @@ func TestLifecycle_ReloadIncompleteWorkflow_NoFalseSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload lifecycle: %v", err)
 	}
-	svc2 := a4c.NewTeamService(h.repoDir, store2, lifecycle2, h.coordinator, h.roster, h.memory, h.journal, h.wtMgr)
+	svc2 := a4c.NewTeamService(h.repoDir, store2, lifecycle2, a4c.NewPolicyGovernor([]string{"governed_read_file", "governed_apply_patch", "governed_propose_memory"}), h.memory, h.journal, h.wtMgr)
 
 	rec, err := store2.Get("child-pending")
 	if err != nil || rec.Status != a4c.StatusPending {
@@ -425,7 +437,7 @@ func TestLifecycle_ReloadIncompleteWorkflow_NoFalseSuccess(t *testing.T) {
 
 func TestLifecycle_HistoricalIntegratedGraph_ReportedNotRewritten(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyTeam)
+	task := liBegin(t, h)
 	liAddReview(t, h, task.TaskID)
 	liAddChild(t, h, task.TaskID, "orphan-pending", "bob")
 	liComplete(t, h, task.TaskID, task.TaskID, true)
@@ -471,26 +483,7 @@ func TestLifecycle_HistoricalIntegratedGraph_ReportedNotRewritten(t *testing.T) 
 // §3: Direct mode does not delegate; other strategies may
 // ---------------------------------------------------------------------------
 
-func TestLifecycle_DirectModeDelegationRejected(t *testing.T) {
-	h := setupServiceTestHarness(t)
-	direct := liBegin(t, h, a4c.StrategyDirect)
-	if _, err := h.service.AssignActivity(context.Background(), a4c.AssignActivityRequest{
-		TaskID: direct.TaskID, Agent: "bob", Objective: "verify things",
-	}); !errors.Is(err, a4c.ErrDelegationNotPermitted) {
-		t.Fatalf("direct delegation: err = %v, want ErrDelegationNotPermitted", err)
-	}
 
-	team := liBegin(t, h, a4c.StrategyTeam)
-	ref, err := h.service.AssignActivity(context.Background(), a4c.AssignActivityRequest{
-		TaskID: team.TaskID, Agent: "bob", Objective: "implement things",
-	})
-	if err != nil {
-		t.Fatalf("team delegation must remain possible: %v", err)
-	}
-	if ref.ActivityID == "" {
-		t.Fatalf("delegated activity not created")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // §4: concurrency — completion racing acceptance cannot produce false success
@@ -499,7 +492,7 @@ func TestLifecycle_DirectModeDelegationRejected(t *testing.T) {
 func TestLifecycle_ConcurrentCompletionAccept_NoFalseSuccess(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		h := setupServiceTestHarness(t)
-		task := liBegin(t, h, a4c.StrategyTeam)
+		task := liBegin(t, h)
 		liAddReview(t, h, task.TaskID)
 		liAddChild(t, h, task.TaskID, "racy-child", "bob")
 
@@ -535,8 +528,9 @@ func TestLifecycle_ConcurrentCompletionAccept_NoFalseSuccess(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLifecycle_ReviewBeforeChildCompletion_NoAcceptance(t *testing.T) {
+	// Historical shape: a legacy Reviewed root keeps its recorded contract.
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyReviewed)
+	task := liBegin(t, h)
 	liComplete(t, h, task.TaskID, task.TaskID, true)
 	liAddReview(t, h, task.TaskID)   // reviewer finishes first
 	liAddChild(t, h, task.TaskID, "late-review-check", "bob") // child still open
@@ -547,9 +541,10 @@ func TestLifecycle_ReviewBeforeChildCompletion_NoAcceptance(t *testing.T) {
 		t.Fatalf("review finished before child: acceptance must be rejected")
 	}
 
-	// Review is also necessary where the strategy requires it.
+	// Review is also necessary for a legacy reviewed record.
 	h2 := setupServiceTestHarness(t)
-	t2 := liBegin(t, h2, a4c.StrategyReviewed)
+	t2 := liBegin(t, h2)
+	liMarkLegacyStrategy(t, h2, t2.TaskID, a4c.StrategyReviewed)
 	liComplete(t, h2, t2.TaskID, t2.TaskID, true)
 	if err := liAccept(h2, t2.TaskID); err != nil {
 		requireFinalizationRejected(t, err, "reviewed task without review")
@@ -565,7 +560,7 @@ func TestLifecycle_ReviewBeforeChildCompletion_NoAcceptance(t *testing.T) {
 
 func TestLifecycle_FailureAfterSuccess_TaskFailed(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyTeam)
+	task := liBegin(t, h)
 	liAddReview(t, h, task.TaskID)
 	liAddChild(t, h, task.TaskID, "ok-child", "bob")
 	liAddChild(t, h, task.TaskID, "bad-child", "bob")

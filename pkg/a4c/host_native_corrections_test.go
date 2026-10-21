@@ -18,7 +18,7 @@ import (
 
 func TestRecovery_InterruptedRootAbandonsChildren(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyReviewed)
+	task := liBegin(t, h)
 	liAddChild(t, h, task.TaskID, "orphan-review", "reviewer")
 	liAddChild(t, h, task.TaskID, "orphan-coder", "bob")
 
@@ -70,7 +70,7 @@ func TestRecovery_InterruptedRootAbandonsChildren(t *testing.T) {
 
 func TestRecovery_RejectAbandonsChildren(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyTeam)
+	task := liBegin(t, h)
 	liAddChild(t, h, task.TaskID, "rejected-child", "bob")
 
 	if _, err := h.service.RejectTask(context.Background(), a4c.RejectTaskRequest{
@@ -96,7 +96,7 @@ func floatPtr(v float64) *float64 { return &v }
 
 func TestMetrics_HostUsagePersistsAndReports(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyDirect)
+	task := liBegin(t, h)
 	if _, err := h.service.CompleteActivity(context.Background(), a4c.CompleteActivityRequest{
 		TaskID:     task.TaskID,
 		ActivityID: task.TaskID,
@@ -171,7 +171,7 @@ func TestMetrics_HostUsagePersistsAndReports(t *testing.T) {
 
 func TestMetrics_MissingUsageIsAbsentNotZero(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyDirect)
+	task := liBegin(t, h)
 	if _, err := h.service.CompleteActivity(context.Background(), a4c.CompleteActivityRequest{
 		TaskID: task.TaskID, ActivityID: task.TaskID, Actor: "alice", Summary: "done", Success: true,
 	}); err != nil {
@@ -188,7 +188,7 @@ func TestMetrics_MissingUsageIsAbsentNotZero(t *testing.T) {
 
 func TestMetrics_UnreportedFieldsStayUnknown(t *testing.T) {
 	h := setupServiceTestHarness(t)
-	task := liBegin(t, h, a4c.StrategyDirect)
+	task := liBegin(t, h)
 	if _, err := h.service.CompleteActivity(context.Background(), a4c.CompleteActivityRequest{
 		TaskID: task.TaskID, ActivityID: task.TaskID, Actor: "alice", Summary: "done", Success: true,
 		Usage: &a4c.HostUsage{

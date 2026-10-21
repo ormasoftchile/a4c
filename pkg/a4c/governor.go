@@ -1,8 +1,6 @@
 package a4c
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -62,29 +60,6 @@ const (
 	DefaultParentBudgetReserveTokens = 10000.0
 )
 
-// SetBudgetFloor configures the viable child-allocation floor and the parent
-// coordination reserve. A non-positive minChild disables floor enforcement.
-func (g *PolicyGovernor) SetBudgetFloor(minChild, parentReserve float64) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.minChildBudget = minChild
-	g.parentReserve = parentReserve
-}
-
-// MinChildBudget returns the configured viable child-allocation floor.
-func (g *PolicyGovernor) MinChildBudget() float64 {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.minChildBudget
-}
-
-// ParentReserve returns the configured parent coordination reserve.
-func (g *PolicyGovernor) ParentReserve() float64 {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.parentReserve
-}
-
 // AvailableFor reports the remaining (unreserved, unconsumed) budget of an
 // activity, or 0 when the activity has no tracked budget.
 func (g *PolicyGovernor) AvailableFor(activityID string) float64 {
@@ -94,58 +69,6 @@ func (g *PolicyGovernor) AvailableFor(activityID string) float64 {
 		return b.Available()
 	}
 	return 0
-}
-
-// ReallocateChild re-funds a child activity from its parent's remaining
-// budget after an explicit budget-exhaustion recovery decision. It never
-// grants capacity beyond the parent's available budget minus the coordination
-// reserve, and it never invents a parent budget that does not exist.
-func (g *PolicyGovernor) ReallocateChild(parentID, childID string, newAllocated float64) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	p, ok := g.activeBudgets[parentID]
-	if !ok || p.Allocated <= 0 {
-		return fmt.Errorf("governor: parent %q has no tracked token budget to reallocate from", parentID)
-	}
-	if newAllocated > p.Available()-g.parentReserve {
-		return fmt.Errorf("%w: reallocation %.0f exceeds parent available %.0f after reserve %.0f",
-			ErrBudgetExceeded, newAllocated, p.Available(), g.parentReserve)
-	}
-	p.Reserved += newAllocated
-	g.activeBudgets[childID] = &Budget{Allocated: newAllocated}
-	if rec, ok := g.budgetRecords[parentID]; ok {
-		rec.Reserved = p.Reserved
-		rec.UpdatedAt = time.Now()
-		_ = g.persistBudgetLocked(parentID)
-	}
-	if cRec, ok := g.budgetRecords[childID]; ok {
-		cRec.Allocated = newAllocated
-		cRec.Reserved = 0
-		cRec.Consumed = 0
-		cRec.Status = "active"
-		cRec.UpdatedAt = time.Now()
-		_ = g.persistBudgetLocked(childID)
-	} else {
-		g.budgetRecords[childID] = &BudgetRecord{
-			ID:        childID,
-			ParentID:  parentID,
-			Allocated: newAllocated,
-			Status:    "active",
-			UpdatedAt: time.Now(),
-		}
-		_ = g.persistBudgetLocked(childID)
-	}
-	g.logTxLocked(BudgetTx{
-		TxID:      fmt.Sprintf("tx-realloc-%d-%s", time.Now().UnixNano(), childID),
-		Type:      TxReserve,
-		ParentID:  parentID,
-		ChildID:   childID,
-		Allocated: newAllocated,
-		Status:    "committed",
-		Timestamp: time.Now().UTC(),
-	})
-	return nil
 }
 
 func NewPolicyGovernor(allowedTools []string) *PolicyGovernor {
@@ -286,138 +209,6 @@ func (g *PolicyGovernor) SetAgentTools(agentID string, tools []string) {
 		tm[t] = true
 	}
 	g.agentTools[agentID] = tm
-}
-
-// AuthorizeProposal evaluates a child proposal against parent's budget and idempotency rules.
-func (g *PolicyGovernor) AuthorizeProposal(parent ActivityRequest, proposal ActivityProposal, newID string) (*ActivityRequest, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	// 1. Idempotency check: prevent duplicate delegation after restart/interruption
-	key := proposal.ProposalID
-	if key == "" {
-		h := sha256.New()
-		h.Write([]byte(parent.ID))
-		h.Write([]byte(proposal.ProposedAgentID))
-		h.Write([]byte(proposal.Objective))
-		key = hex.EncodeToString(h.Sum(nil))
-	}
-	dedupKey := fmt.Sprintf("%s:%s", parent.ID, key)
-	if existing, found := g.authorizedProposals[dedupKey]; found {
-		return existing, nil
-	}
-
-	// 2. Budget verification
-	budget, ok := g.activeBudgets[parent.ID]
-	if !ok {
-		budgetCopy := parent.Budget
-		budget = &budgetCopy
-		g.activeBudgets[parent.ID] = budget
-	}
-
-	requested := proposal.RequestedBudget.Allocated
-	if budget.Allocated > 0 {
-		// Viability enforcement applies only when the parent is itself sized
-		// to fund a viable child plus the coordination reserve; below that
-		// scale the human-set parent budget remains the sole binding
-		// constraint (preserves legacy semantics for small fixtures).
-		if g.minChildBudget > 0 && budget.Allocated >= g.minChildBudget+g.parentReserve {
-			if requested < g.minChildBudget {
-				childMax := budget.Available() - g.parentReserve
-				if childMax < g.minChildBudget {
-					return nil, fmt.Errorf("%w: proposed child budget %.0f tokens is below the viable minimum %.0f and the parent cannot fund it (available %.0f, coordination reserve %.0f); propose a smaller-scope activity, reallocate from another source, or escalate",
-						ErrInsufficientBudget, requested, g.minChildBudget, budget.Available(), g.parentReserve)
-				}
-				requested = g.minChildBudget
-			}
-			if childMax := budget.Available() - g.parentReserve; requested > childMax {
-				return nil, fmt.Errorf("%w: requested %.2f exceeds parent available %.2f after retaining coordination reserve %.2f",
-					ErrBudgetExceeded, requested, budget.Available(), g.parentReserve)
-			}
-		} else if requested > budget.Available() {
-			return nil, fmt.Errorf("%w: requested %.2f exceeds parent available %.2f",
-				ErrBudgetExceeded, requested, budget.Available())
-		}
-	}
-
-	// Deduct requested from parent reservation
-	txID := fmt.Sprintf("tx-res-%d-%s", time.Now().UnixNano(), newID)
-	g.logTxLocked(BudgetTx{
-		TxID:      txID,
-		Type:      TxReserve,
-		ParentID:  parent.ID,
-		ChildID:   newID,
-		Allocated: requested,
-		Status:    "prepared",
-		Timestamp: time.Now().UTC(),
-	})
-
-	budget.Reserved += requested
-	if parentRec, exists := g.budgetRecords[parent.ID]; exists {
-		parentRec.Reserved = budget.Reserved
-		parentRec.UpdatedAt = time.Now()
-		_ = g.persistBudgetLocked(parent.ID)
-	} else {
-		g.budgetRecords[parent.ID] = &BudgetRecord{
-			ID:        parent.ID,
-			Allocated: budget.Allocated,
-			Reserved:  budget.Reserved,
-			Consumed:  budget.Consumed,
-			Status:    "active",
-			UpdatedAt: time.Now(),
-		}
-		_ = g.persistBudgetLocked(parent.ID)
-	}
-
-	childBudget := Budget{
-		Allocated: requested,
-		Reserved:  0,
-		Consumed:  0,
-	}
-
-	childReq := &ActivityRequest{
-		ID:        newID,
-		ParentID:  parent.ID,
-		AgentID:   proposal.ProposedAgentID,
-		Objective: proposal.Objective,
-		Inputs:    proposal.Inputs,
-		DependsOn: proposal.DependsOn,
-		Budget:    childBudget,
-		CreatedAt: time.Now(),
-	}
-	if requested != proposal.RequestedBudget.Allocated {
-		if childReq.Inputs == nil {
-			childReq.Inputs = map[string]any{}
-		}
-		childReq.Inputs["budget_adjusted_from"] = proposal.RequestedBudget.Allocated
-		childReq.Inputs["budget_viable_minimum"] = g.minChildBudget
-	}
-
-	childBudgetCopy := childBudget
-	g.activeBudgets[newID] = &childBudgetCopy
-	g.budgetRecords[newID] = &BudgetRecord{
-		ID:        newID,
-		ParentID:  parent.ID,
-		Allocated: requested,
-		Reserved:  0,
-		Consumed:  0,
-		Status:    "active",
-		UpdatedAt: time.Now(),
-	}
-	_ = g.persistBudgetLocked(newID)
-
-	g.logTxLocked(BudgetTx{
-		TxID:      txID,
-		Type:      TxReserve,
-		ParentID:  parent.ID,
-		ChildID:   newID,
-		Allocated: requested,
-		Status:    "committed",
-		Timestamp: time.Now().UTC(),
-	})
-
-	g.authorizedProposals[dedupKey] = childReq
-	return childReq, nil
 }
 
 // SetBudget sets or updates the budget record for an activity or root task.

@@ -22,7 +22,8 @@ func governedFileHarness(t *testing.T) (*a4c.TeamServiceImpl, string) {
 	if err != nil {
 		t.Fatalf("create journal: %v", err)
 	}
-	svc := a4c.NewTeamService(dir, nil, nil, nil, nil, nil, journal, nil)
+	gov := a4c.NewPolicyGovernor([]string{"governed_read_file", "governed_apply_patch", "governed_propose_memory"})
+	svc := a4c.NewTeamService(dir, nil, nil, gov, nil, journal, nil)
 	return svc, dir
 }
 
@@ -108,30 +109,6 @@ func TestGovernedFile_RejectsEscapes(t *testing.T) {
 	}
 }
 
-// TestGovernedFile_RejectsNonMutatingAgent: the mutating-role boundary holds
-// even when the tool is reachable, so a reviewer cannot write through it.
-func TestGovernedFile_RejectsNonMutatingAgent(t *testing.T) {
-	svc, dir := governedFileHarness(t)
-
-	for _, agent := range []string{"reviewer", "charlie", "lead", "alice"} {
-		_, err := svc.ApplyWorkspaceFile(context.Background(), a4c.ApplyWorkspaceFileRequest{
-			TaskID:  "task-1",
-			AgentID: agent,
-			Path:    "x.txt",
-			Content: "nope",
-		})
-		if err == nil {
-			t.Fatalf("expected rejection for non-mutating agent %q", agent)
-		}
-		if !strings.Contains(err.Error(), "non-mutating") {
-			t.Errorf("unexpected error for %q: %v", agent, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(dir, "x.txt")); err == nil {
-		t.Errorf("non-mutating agent wrote a file")
-	}
-}
-
 // TestGovernedFile_RejectsInvalidParams: required fields are enforced and empty
 // content never creates a zero-byte file.
 func TestGovernedFile_RejectsInvalidParams(t *testing.T) {
@@ -151,13 +128,12 @@ func TestGovernedFile_RejectsInvalidParams(t *testing.T) {
 	}
 }
 
-// TestGovernedFile_PolicyDeniesFailClosed: an agent the roster does not grant
+// TestGovernedFile_PolicyDeniesFailClosed: an agent not granted
 // governed_apply_patch falls through to the governor's global allowlist. When
 // that allowlist excludes the tool, the write must not land.
 func TestGovernedFile_PolicyDeniesFailClosed(t *testing.T) {
 	repoDir := t.TempDir()
 	store, _ := a4c.NewDurableActivityStore(filepath.Join(repoDir, ".a4c", "activities"))
-	roster, _ := a4c.DefaultTeamRoster(filepath.Join(repoDir, ".a4c", "roster"))
 	mem, _ := a4c.NewDurableMemoryStore(filepath.Join(repoDir, ".a4c", "memory"))
 	journal, _ := a4c.NewDurableIntentJournal(filepath.Join(repoDir, ".a4c", "journal"))
 
@@ -165,10 +141,9 @@ func TestGovernedFile_PolicyDeniesFailClosed(t *testing.T) {
 	// coordinator grants roster members their AllowedTools per-agent, so an
 	// agent outside the roster is what exercises this global gate.
 	gov := a4c.NewPolicyGovernor([]string{"governed_read_file"})
-	coord := a4c.NewTeamCoordinator(repoDir, store, roster, mem, gov, journal, &mockTestRunner{}, a4c.NewFakeProvider())
 
 	worktree := t.TempDir()
-	svc := a4c.NewTeamService(worktree, store, nil, coord, roster, mem, journal, nil)
+	svc := a4c.NewTeamService(worktree, store, nil, gov, mem, journal, nil)
 
 	_, err := svc.ApplyWorkspaceFile(context.Background(), a4c.ApplyWorkspaceFileRequest{
 		TaskID:  "task-1",

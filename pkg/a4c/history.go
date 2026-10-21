@@ -232,7 +232,7 @@ func BuildTaskHistory(
 		report.FinalOutcome = fmt.Sprintf("Task failed: %s", failErr)
 	} else if hasApprovedReview {
 		report.FinalOutcome = "Task successfully implemented, verified natively, and reviewed."
-	} else if rootRec.Request.Strategy == StrategyDirect && rootRec.Status == StatusCompleted {
+	} else if (rootRec.Request.Strategy == StrategyDirect || rootRec.Request.Strategy == "") && rootRec.Status == StatusCompleted {
 		report.FinalOutcome = "Task successfully implemented, verified natively, and completed."
 	} else if !allDone {
 		report.FinalOutcome = "Task in progress."

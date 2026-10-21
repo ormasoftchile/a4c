@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -91,77 +90,32 @@ func TestIntegrationPreflight_FullChain(t *testing.T) {
 		EvidenceID: evidenceID, Command: res.Command, ExitCode: res.ExitCode,
 		Valid: !res.Vacuous && !res.Unavailable, TestsExecuted: res.TestsExecuted,
 		Vacuous: res.Vacuous, SourceRevision: res.SourceRevision,
-		LogPath: logRel, WorkspaceDir: producer, OutputSummary: truncateSummary(res.Output, 200),
+		LogPath: logRel, WorkspaceDir: producer, OutputSummary: res.Output[:min(200, len(res.Output))],
 		WorkspaceSnapshotID: "preflight-snap", CompletedAt: time.Now(),
 	}
 
-	// ---- 3. Reviewer workspace: a disposable copy of the producer EXCLUDING
-	// .a4c (mirrors createDisposableReviewWorkspace), on a separate filesystem.
-	reviewer := t.TempDir()
-	for _, rel := range []string{"src.c", "tests/test_cypher.c", "Makefile"} {
-		data, rerr := os.ReadFile(filepath.Join(producer, rel))
-		if rerr != nil {
-			continue
-		}
-		dst := filepath.Join(reviewer, rel)
-		_ = os.MkdirAll(filepath.Dir(dst), 0o755)
-		_ = os.WriteFile(dst, data, 0o644)
-	}
-	c := &TeamCoordinator{}
-	bundle := c.materializeReviewEvidence(reviewer, &ActivityRequest{Objective: "obj"},
-		"diff --git a/src.c b/src.c\n+int main(){return 0;}",
-		[]string{"src.c", "tests/test_cypher.c"}, nil, nil, &evidence, "VALID")
 
-	// ---- 4. Reviewer can ACTUALLY read the evidence log (historical failure) ----
-	if bundle == nil || !bundle.LogAvailable {
-		t.Fatalf("PREFLIGHT FAIL: reviewer cannot read the verification log (the historical defect). missing=%v", bundle)
+	// The verification evidence record is what acceptance/integration gates
+	// consume: a failing or vacuous run must never look valid here.
+	if evidence.Vacuous {
+		t.Fatalf("PREFLIGHT FAIL: a run with executed tests was classified vacuous")
 	}
-	logData, err := os.ReadFile(filepath.Join(reviewer, bundle.LogPath))
-	if err != nil {
-		t.Fatalf("PREFLIGHT FAIL: reviewer read of verification log failed: %v", err)
+	if evidence.Valid && evidence.TestsExecuted <= 0 {
+		t.Fatalf("PREFLIGHT FAIL: evidence marked valid with zero executed tests")
 	}
-	if !strings.Contains(string(logData), "TestCypher") {
-		t.Fatalf("PREFLIGHT FAIL: reviewer log missing test output")
-	}
-	// Changed-files index lists test names so the reviewer need not page files.
-	filesData, _ := os.ReadFile(filepath.Join(reviewer, bundle.FilesPath))
-	if !strings.Contains(string(filesData), "TestPropertyToProperty") {
-		t.Fatalf("PREFLIGHT FAIL: changed-files index does not list test names: %s", filesData)
+	if evidence.LogPath == "" {
+		t.Fatalf("PREFLIGHT FAIL: evidence record has no durable log path")
 	}
 
-	// ---- 5. Tool boundary: verdict submission works after exploration cap ----
-	enforcer := newToolBudgetEnforcer(2, nil)
-	for i := 0; i < 2; i++ {
-		if err := enforcer.check("governed_read_file"); err != nil {
-			t.Fatalf("PREFLIGHT FAIL: exploration %d: %v", i, err)
-		}
-	}
-	if err := enforcer.check("governed_read_file"); err == nil {
-		t.Fatalf("PREFLIGHT FAIL: expected exploration cap to bind")
-	}
-	// Terminal verdict submission must still succeed.
-	if err := enforcer.check("governed_submit_review"); err != nil {
-		t.Fatalf("PREFLIGHT FAIL: submit_review blocked after exploration exhaustion: %v", err)
-	}
+	// The reviewer-bundle, reviewer tool-cap, and diff-hygiene sections were
+	// retired with A4C-managed review. The verification-evidence chain above
+	// (independent run -> durable log -> evidence record) is the part that
+	// governs acceptance and integration and remains enforced.
 
-	// ---- 6. Diff hygiene flags the planted unrelated go.mod ----
-	warnings := FlagDiffHygiene([]string{"src.c", "tests/test_cypher.c", "go.mod", "dummy_test.go"}, "implement feature", false)
-	joined := strings.Join(warnings, "\n")
-	if !strings.Contains(joined, "go.mod") {
-		t.Fatalf("PREFLIGHT FAIL: unrelated go.mod not flagged: %v", warnings)
-	}
-
-	// ---- 7. A4C operational state never enters the deliverable ----
-	if isA4CInternal(logRel) == false {
-		t.Fatalf("PREFLIGHT FAIL: durable log path should be A4C-internal")
-	}
-	if got := excludeA4CInternal([]string{"src.c", ".a4c/evidence/x.log"}); len(got) != 1 || got[0] != "src.c" {
-		t.Fatalf("PREFLIGHT FAIL: .a4c not excluded from deliverable: %v", got)
-	}
-
-	t.Logf("PREFLIGHT PASS: command=%v tests=%d rev=%s reviewer_log=%s hygiene=%d",
-		res.Command, res.TestsExecuted, res.SourceRevision[:8], bundle.LogPath, len(warnings))
+	t.Logf("PREFLIGHT PASS: command=%v tests=%d rev=%s log=%s",
+		res.Command, res.TestsExecuted, res.SourceRevision[:8], logRel)
 }
+
 
 // TestIntegrationPreflight_ReplayPreservedBenchmarkFailure replays the exact
 // evidence from the failed 2026-10-15 reviewfix benchmark and confirms the

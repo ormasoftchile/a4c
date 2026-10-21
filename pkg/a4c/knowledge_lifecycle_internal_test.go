@@ -38,10 +38,6 @@ func setupKBHarness(t *testing.T) *kbHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	roster, err := DefaultTeamRoster(filepath.Join(dotDir, "roster"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	memory, err := NewDurableMemoryStore(filepath.Join(dotDir, "memory"))
 	if err != nil {
 		t.Fatal(err)
@@ -55,12 +51,9 @@ func setupKBHarness(t *testing.T) *kbHarness {
 		t.Fatal(err)
 	}
 	gov := NewPolicyGovernor([]string{
-		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
-		"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+		"governed_read_file", "governed_apply_patch", "governed_propose_memory",
 	})
-	coord := NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, &NativeGoTestRunner{}, nil)
-	coord.SetWorktreeManager(wtMgr)
-	svc := NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr)
+	svc := NewTeamService(repoDir, store, lifecycleStore, gov, memory, journal, wtMgr)
 
 	kbDir, err := ResolveKnowledgeDir(repoDir)
 	if err != nil {
@@ -73,9 +66,7 @@ func setupKBHarness(t *testing.T) *kbHarness {
 func (h *kbHarness) beginDirect(t *testing.T, objective string) string {
 	t.Helper()
 	res, err := h.svc.BeginTask(context.Background(), BeginTaskRequest{
-		Objective:   objective,
-		Strategy:    StrategyDirect,
-		Coordinator: "coder",
+		Objective: objective,
 	})
 	if err != nil {
 		t.Fatalf("BeginTask: %v", err)
@@ -294,7 +285,7 @@ func TestKnowledgeLifecycle_AmendPreservesCompletionEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	amend, err := h.svc.CompleteActivity(context.Background(), CompleteActivityRequest{
-		TaskID: taskID, ActivityID: taskID, Actor: "lead", Summary: "", Success: true,
+		TaskID: taskID, ActivityID: taskID, Actor: "coder", Summary: "", Success: true,
 		Knowledge: &KnowledgeClaim{Significant: true, Paths: []string{"findings/final-conclusion.md"}},
 	})
 	if err != nil {
@@ -348,7 +339,7 @@ func TestKnowledgeLifecycle_KBSurvivesWorktreeAndInit(t *testing.T) {
 
 	taskID := h.beginDirect(t, "cleanup survivor")
 	ctx := context.Background()
-	rec, err := h.wtMgr.AcquireWorktree(ctx, taskID, "coder")
+	rec, err := h.wtMgr.AcquireWorktree(ctx, taskID, "host")
 	if err != nil {
 		t.Fatal(err)
 	}

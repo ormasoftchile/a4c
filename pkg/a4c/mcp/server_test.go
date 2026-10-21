@@ -36,7 +36,6 @@ func setupMCPHarness(t *testing.T) *mcpHarness {
 
 	dotDir := filepath.Join(repoDir, ".a4c")
 	storeDir := filepath.Join(dotDir, "activities")
-	rosterDir := filepath.Join(dotDir, "roster")
 	memDir := filepath.Join(dotDir, "memory")
 	journalDir := filepath.Join(dotDir, "journal")
 	lifecycleDir := filepath.Join(dotDir, "lifecycle")
@@ -49,10 +48,6 @@ func setupMCPHarness(t *testing.T) *mcpHarness {
 	lifecycleStore, err := a4c.NewDurableLifecycleStore(lifecycleDir)
 	if err != nil {
 		t.Fatalf("create lifecycle store: %v", err)
-	}
-	roster, err := a4c.DefaultTeamRoster(rosterDir)
-	if err != nil {
-		t.Fatalf("create roster: %v", err)
 	}
 	memory, err := a4c.NewDurableMemoryStore(memDir)
 	if err != nil {
@@ -68,73 +63,16 @@ func setupMCPHarness(t *testing.T) *mcpHarness {
 	}
 
 	gov := a4c.NewPolicyGovernor([]string{
-		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
-		"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+		"governed_read_file", "governed_apply_patch", "governed_propose_memory",
 	})
-	coord := a4c.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, &a4c.NativeGoTestRunner{}, nil)
-	coord.SetWorktreeManager(wtMgr)
-
-	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr)
-	return createMCPHarnessWithRole(t, repoDir, svc, store, "")
+	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, gov, memory, journal, wtMgr)
+	return createMCPHarness(t, repoDir, svc, store)
 }
 
-func setupMCPHarnessWithRole(t *testing.T, role string) *mcpHarness {
-	t.Helper()
-	repoDir := t.TempDir()
 
-	runGit(t, repoDir, "init")
-	runGit(t, repoDir, "config", "user.name", "MCP Tester")
-	runGit(t, repoDir, "config", "user.email", "mcp@example.com")
-	_ = os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("# MCP Test Repo\n"), 0644)
-	runGit(t, repoDir, "add", "README.md")
-	runGit(t, repoDir, "commit", "-m", "init")
 
-	dotDir := filepath.Join(repoDir, ".a4c")
-	storeDir := filepath.Join(dotDir, "activities")
-	rosterDir := filepath.Join(dotDir, "roster")
-	memDir := filepath.Join(dotDir, "memory")
-	journalDir := filepath.Join(dotDir, "journal")
-	lifecycleDir := filepath.Join(dotDir, "lifecycle")
-	wtDir := filepath.Join(dotDir, "worktrees")
-
-	store, err := a4c.NewDurableActivityStore(storeDir)
-	if err != nil {
-		t.Fatalf("create store: %v", err)
-	}
-	lifecycleStore, err := a4c.NewDurableLifecycleStore(lifecycleDir)
-	if err != nil {
-		t.Fatalf("create lifecycle store: %v", err)
-	}
-	roster, err := a4c.DefaultTeamRoster(rosterDir)
-	if err != nil {
-		t.Fatalf("create roster: %v", err)
-	}
-	memory, err := a4c.NewDurableMemoryStore(memDir)
-	if err != nil {
-		t.Fatalf("create memory: %v", err)
-	}
-	journal, err := a4c.NewDurableIntentJournal(journalDir)
-	if err != nil {
-		t.Fatalf("create journal: %v", err)
-	}
-	wtMgr, err := a4c.NewWorktreeManager(repoDir, wtDir)
-	if err != nil {
-		t.Fatalf("create worktrees: %v", err)
-	}
-
-	gov := a4c.NewPolicyGovernor([]string{
-		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
-		"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
-	})
-	coord := a4c.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, &a4c.NativeGoTestRunner{}, nil)
-	coord.SetWorktreeManager(wtMgr)
-
-	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr)
-	return createMCPHarnessWithRole(t, repoDir, svc, store, role)
-}
-
-func createMCPHarnessWithRole(t *testing.T, repoDir string, svc a4c.TeamService, store *a4c.DurableActivityStore, role string) *mcpHarness {
-	srv := a4cmcp.NewServerWithRole(svc, role)
+func createMCPHarness(t *testing.T, repoDir string, svc a4c.TeamService, store *a4c.DurableActivityStore) *mcpHarness {
+	srv := a4cmcp.NewServer(svc)
 
 	cli, err := client.NewInProcessClient(srv.MCPServer())
 	if err != nil {
@@ -188,7 +126,6 @@ func TestMCPServer_ToolDiscovery(t *testing.T) {
 	}
 
 	expectedTools := map[string]bool{
-		"team_delegate":          false,
 		"team_list":              false,
 		"team_status":            false,
 		"team_result":            false,
@@ -196,15 +133,16 @@ func TestMCPServer_ToolDiscovery(t *testing.T) {
 		"team_feedback":          false,
 		"team_context":           false,
 		"team_begin_task":        false,
-		"team_assign_activity":   false,
 		"team_checkpoint":        false,
 		"team_complete_activity": false,
-		"team_review_result":     false,
 		"team_apply_patch":       false,
 		"team_resume":            false,
 	}
 
 	prohibitedTools := map[string]bool{
+		"team_delegate":                      true,
+		"team_assign_activity":               true,
+		"team_review_result":                 true,
 		"team_accept":                        true,
 		"team_integrate":                     true,
 		"governed_read_file":                 true,
@@ -247,237 +185,13 @@ func TestMCPServer_ToolDiscovery(t *testing.T) {
 	}
 }
 
-func TestMCPServer_RoleDiscovery_Coder(t *testing.T) {
-	h := setupMCPHarnessWithRole(t, "coder")
-	defer h.client.Close()
 
-	ctx := context.Background()
-	toolsRes, err := h.client.ListTools(ctx, mcp.ListToolsRequest{})
-	if err != nil {
-		t.Fatalf("ListTools failed: %v", err)
-	}
 
-	allowed := map[string]bool{
-		"team_status":            true,
-		"team_diff":              true,
-		"team_checkpoint":        true,
-		"team_complete_activity": true,
-		"team_apply_patch":       true,
-		"team_resume":            true,
-	}
 
-	prohibited := []string{
-		"team_review_result", "team_delegate", "team_list", "team_feedback",
-		"team_context", "team_begin_task", "team_assign_activity",
-		"team_accept", "team_integrate",
-		"governed_read_file", "governed_apply_patch", "governed_git_inspect", "governed_run_tests",
-		"governed_structural_search_symbols", "governed_structural_context_for", "governed_structural_callers",
-	}
 
-	toolMap := make(map[string]bool)
-	for _, tool := range toolsRes.Tools {
-		toolMap[tool.Name] = true
-		if !allowed[tool.Name] {
-			t.Errorf("VIOLATION: coder sees unpermitted tool %q", tool.Name)
-		}
-	}
 
-	for name := range allowed {
-		if !toolMap[name] {
-			t.Errorf("coder missing expected tool %q", name)
-		}
-	}
 
-	for _, name := range prohibited {
-		if toolMap[name] {
-			t.Errorf("VIOLATION: coder exposed prohibited tool %q", name)
-		}
-	}
-}
 
-func TestMCPServer_RoleDiscovery_Reviewer(t *testing.T) {
-	h := setupMCPHarnessWithRole(t, "reviewer")
-	defer h.client.Close()
-
-	ctx := context.Background()
-	toolsRes, err := h.client.ListTools(ctx, mcp.ListToolsRequest{})
-	if err != nil {
-		t.Fatalf("ListTools failed: %v", err)
-	}
-
-	allowed := map[string]bool{
-		"team_status":        true,
-		"team_result":        true,
-		"team_diff":          true,
-		"team_checkpoint":    true,
-		"team_review_result": true,
-	}
-
-	prohibited := []string{
-		"team_delegate", "team_complete_activity", "team_list", "team_feedback",
-		"team_context", "team_begin_task", "team_assign_activity",
-		"team_accept", "team_integrate", "team_apply_patch", "team_resume",
-		"governed_read_file", "governed_apply_patch", "governed_git_inspect", "governed_run_tests",
-		"governed_structural_search_symbols", "governed_structural_context_for", "governed_structural_callers",
-	}
-
-	toolMap := make(map[string]bool)
-	for _, tool := range toolsRes.Tools {
-		toolMap[tool.Name] = true
-		if !allowed[tool.Name] {
-			t.Errorf("VIOLATION: reviewer sees unpermitted tool %q", tool.Name)
-		}
-	}
-
-	for name := range allowed {
-		if !toolMap[name] {
-			t.Errorf("reviewer missing expected tool %q", name)
-		}
-	}
-
-	for _, name := range prohibited {
-		if toolMap[name] {
-			t.Errorf("VIOLATION: reviewer exposed prohibited tool %q", name)
-		}
-	}
-}
-
-func TestMCPServer_RoleDiscovery_Lead(t *testing.T) {
-	h := setupMCPHarnessWithRole(t, "lead")
-	defer h.client.Close()
-
-	ctx := context.Background()
-	toolsRes, err := h.client.ListTools(ctx, mcp.ListToolsRequest{})
-	if err != nil {
-		t.Fatalf("ListTools failed: %v", err)
-	}
-
-	allowed := map[string]bool{
-		"team_delegate":          true,
-		"team_list":              true,
-		"team_status":            true,
-		"team_result":            true,
-		"team_diff":              true,
-		"team_feedback":          true,
-		"team_context":           true,
-		"team_begin_task":        true,
-		"team_assign_activity":   true,
-		"team_checkpoint":        true,
-		"team_complete_activity": true,
-		"team_resume":            true,
-	}
-
-	prohibited := []string{
-		"team_review_result", "team_accept", "team_integrate", "team_apply_patch",
-		"governed_read_file", "governed_apply_patch", "governed_git_inspect", "governed_run_tests",
-		"governed_structural_search_symbols", "governed_structural_context_for", "governed_structural_callers",
-	}
-
-	toolMap := make(map[string]bool)
-	for _, tool := range toolsRes.Tools {
-		toolMap[tool.Name] = true
-		if !allowed[tool.Name] {
-			t.Errorf("VIOLATION: lead sees unpermitted tool %q", tool.Name)
-		}
-	}
-
-	for name := range allowed {
-		if !toolMap[name] {
-			t.Errorf("lead missing expected tool %q", name)
-		}
-	}
-
-	for _, name := range prohibited {
-		if toolMap[name] {
-			t.Errorf("VIOLATION: lead exposed prohibited tool %q", name)
-		}
-	}
-}
-
-func TestMCPServer_DelegateStatusAndList(t *testing.T) {
-	h := setupMCPHarness(t)
-	defer h.client.Close()
-
-	ctx := context.Background()
-
-	// 1. team_delegate
-	callReq := mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_delegate",
-			Arguments: map[string]any{
-				"objective":     "Implement fast JSON encoder",
-				"budget_tokens": float64(30000),
-				"strategy":      "team",
-			},
-		},
-	}
-	res, err := h.client.CallTool(ctx, callReq)
-	if err != nil {
-		t.Fatalf("CallTool team_delegate failed: %v", err)
-	}
-	if res.IsError {
-		t.Fatalf("team_delegate returned error result: %+v", res)
-	}
-
-	var taskRef a4c.TaskRef
-	textContent := res.Content[0].(mcp.TextContent).Text
-	if err := json.Unmarshal([]byte(textContent), &taskRef); err != nil {
-		t.Fatalf("failed to unmarshal taskRef: %v\nOutput: %s", err, textContent)
-	}
-	if taskRef.TaskID == "" || taskRef.State != a4c.TaskStateQueued {
-		t.Fatalf("unexpected taskRef: %+v", taskRef)
-	}
-
-	// 2. team_status
-	statusReq := mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_status",
-			Arguments: map[string]any{
-				"task_id": taskRef.TaskID,
-			},
-		},
-	}
-	statusRes, err := h.client.CallTool(ctx, statusReq)
-	if err != nil {
-		t.Fatalf("CallTool team_status failed: %v", err)
-	}
-	if statusRes.IsError {
-		t.Fatalf("team_status returned error: %+v", statusRes)
-	}
-
-	var details a4c.TaskDetails
-	statusText := statusRes.Content[0].(mcp.TextContent).Text
-	if err := json.Unmarshal([]byte(statusText), &details); err != nil {
-		t.Fatalf("failed to unmarshal details: %v", err)
-	}
-	if details.TaskID != taskRef.TaskID || details.Objective != "Implement fast JSON encoder" {
-		t.Fatalf("unexpected details: %+v", details)
-	}
-
-	// 3. team_list
-	listReq := mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name:      "team_list",
-			Arguments: map[string]any{},
-		},
-	}
-	listRes, err := h.client.CallTool(ctx, listReq)
-	if err != nil {
-		t.Fatalf("CallTool team_list failed: %v", err)
-	}
-	if listRes.IsError {
-		t.Fatalf("team_list returned error: %+v", listRes)
-	}
-
-	var summaries []a4c.TaskSummary
-	listText := listRes.Content[0].(mcp.TextContent).Text
-	if err := json.Unmarshal([]byte(listText), &summaries); err != nil {
-		t.Fatalf("failed to unmarshal summaries: %v", err)
-	}
-	if len(summaries) != 1 || summaries[0].TaskID != taskRef.TaskID {
-		t.Fatalf("unexpected summaries: %+v", summaries)
-	}
-}
 
 func TestMCPServer_AcceptAndIntegrateLifecycle(t *testing.T) {
 	h := setupMCPHarness(t)
@@ -488,7 +202,7 @@ func TestMCPServer_AcceptAndIntegrateLifecycle(t *testing.T) {
 	// Delegate direct task
 	delReq := mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
-			Name: "team_delegate",
+			Name: "team_begin_task",
 			Arguments: map[string]any{
 				"objective": "Add utils package",
 				"strategy":  "direct",
@@ -585,207 +299,7 @@ func TestMCPServer_AcceptAndIntegrateLifecycle(t *testing.T) {
 	}
 }
 
-func TestMCPServer_HostNativeCoordinationFlow(t *testing.T) {
-	h := setupMCPHarness(t)
-	defer h.client.Close()
 
-	ctx := context.Background()
-
-	// 1. team_context
-	ctxRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name:      "team_context",
-			Arguments: map[string]any{},
-		},
-	})
-	if err != nil || ctxRes.IsError {
-		t.Fatalf("team_context failed: %v (%+v)", err, ctxRes)
-	}
-	var envCtx a4c.TeamContextResult
-	_ = json.Unmarshal([]byte(ctxRes.Content[0].(mcp.TextContent).Text), &envCtx)
-	if len(envCtx.TeamMembers) < 3 {
-		t.Fatalf("expected at least 3 team members, got %d", len(envCtx.TeamMembers))
-	}
-
-	// 2. team_begin_task
-	beginRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_begin_task",
-			Arguments: map[string]any{
-				"objective":   "Implement host-native math library",
-				"coordinator": "alice",
-				"runtime":     "copilot",
-			},
-		},
-	})
-	if err != nil || beginRes.IsError {
-		t.Fatalf("team_begin_task failed: %v (%+v)", err, beginRes)
-	}
-	var beginResult a4c.BeginTaskResult
-	_ = json.Unmarshal([]byte(beginRes.Content[0].(mcp.TextContent).Text), &beginResult)
-	if beginResult.TaskID == "" || beginResult.WorktreePath == "" {
-		t.Fatalf("invalid begin task result: %+v", beginResult)
-	}
-
-	// 3. team_assign_activity (Bob Coder)
-	assignRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_assign_activity",
-			Arguments: map[string]any{
-				"task_id":   beginResult.TaskID,
-				"agent":     "bob",
-				"role":      "coder",
-				"objective": "Add Add(a, b) function and tests",
-			},
-		},
-	})
-	if err != nil || assignRes.IsError {
-		t.Fatalf("team_assign_activity failed: %v (%+v)", err, assignRes)
-	}
-	var actRef a4c.ActivityRef
-	_ = json.Unmarshal([]byte(assignRes.Content[0].(mcp.TextContent).Text), &actRef)
-	if actRef.ActivityID == "" || actRef.Agent != "bob" {
-		t.Fatalf("invalid activity ref: %+v", actRef)
-	}
-
-	// 4. team_checkpoint
-	chkRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_checkpoint",
-			Arguments: map[string]any{
-				"task_id":     beginResult.TaskID,
-				"activity_id": actRef.ActivityID,
-				"actor":       "bob",
-				"summary":     "Designed function signatures; implementing tests",
-				"assumptions": "Pure Go with no external dependencies",
-				"findings":    "Repo is using Go 1.22",
-				"next_steps":  "Run go test",
-			},
-		},
-	})
-	if err != nil || chkRes.IsError {
-		t.Fatalf("team_checkpoint failed: %v (%+v)", err, chkRes)
-	}
-
-	// Simulate Bob modifying files in the worktree
-	mathFile := filepath.Join(beginResult.WorktreePath, "math.go")
-	_ = os.WriteFile(mathFile, []byte("package main\n\nfunc Add(a, b int) int { return a + b }\n"), 0644)
-	runGit(t, beginResult.WorktreePath, "add", "math.go")
-	runGit(t, beginResult.WorktreePath, "commit", "-m", "feat: add Add function")
-
-	// 5. team_complete_activity
-	compRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_complete_activity",
-			Arguments: map[string]any{
-				"task_id":             beginResult.TaskID,
-				"activity_id":         actRef.ActivityID,
-				"actor":               "bob",
-				"summary":             "Implemented Add(a, b int) in math.go",
-				"files_modified":      "math.go",
-				"validation_evidence": "All unit tests pass",
-				"success":             true,
-			},
-		},
-	})
-	if err != nil || compRes.IsError {
-		t.Fatalf("team_complete_activity failed: %v (%+v)", err, compRes)
-	}
-
-	// 6. team_review_result (Charlie Reviewer)
-	revRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_review_result",
-			Arguments: map[string]any{
-				"task_id":  beginResult.TaskID,
-				"reviewer": "charlie",
-				"verdict":  "approved",
-				"comments": "Clean implementation and non-breaking",
-				"findings": "Zero regressions; clean style",
-			},
-		},
-	})
-	if err != nil || revRes.IsError {
-		t.Fatalf("team_review_result failed: %v (%+v)", err, revRes)
-	}
-	var revResult a4c.HostReviewResult
-	_ = json.Unmarshal([]byte(revRes.Content[0].(mcp.TextContent).Text), &revResult)
-	if revResult.LifecycleState != a4c.TaskStateAwaitingHumanReview {
-		t.Fatalf("expected state %s, got %s", a4c.TaskStateAwaitingHumanReview, revResult.LifecycleState)
-	}
-
-	// 6b. The lead finalizes its own root activity: reviewer approval never
-	// substitutes for completed engineering work.
-	rootCompRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_complete_activity",
-			Arguments: map[string]any{
-				"task_id":             beginResult.TaskID,
-				"activity_id":         beginResult.TaskID,
-				"actor":               "alice",
-				"summary":             "Coordination complete; implementation and review finished",
-				"validation_evidence": "review verdict: approved",
-				"success":             true,
-			},
-		},
-	})
-	if err != nil || rootCompRes.IsError {
-		t.Fatalf("team_complete_activity (root) failed: %v (%+v)", err, rootCompRes)
-	}
-
-	// 7. team_accept & team_integrate
-	// Verify that MCP call (e.g. AI agent trying to self-approve) is rejected
-	unauthRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_accept",
-			Arguments: map[string]any{
-				"taskID":   beginResult.TaskID,
-				"task_id":  beginResult.TaskID,
-				"comments": "Agent trying to self-approve",
-			},
-		},
-	})
-	if err == nil && (unauthRes == nil || !unauthRes.IsError) {
-		t.Fatalf("expected unauthenticated team_accept to fail closed, got %+v", unauthRes)
-	}
-
-	// Verify that MCP call to team_integrate is also rejected
-	unauthIntRes, intErr := h.client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "team_integrate",
-			Arguments: map[string]any{
-				"task_id": beginResult.TaskID,
-			},
-		},
-	})
-	if intErr == nil && (unauthIntRes == nil || !unauthIntRes.IsError) {
-		t.Fatalf("expected unauthenticated team_integrate to fail closed, got %+v", unauthIntRes)
-	}
-
-	// Now perform authenticated human CLI acceptance
-	_, err = h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{
-		TaskID:        beginResult.TaskID,
-		Comments:      "Approved for merge by human engineer via CLI",
-		AcceptedBy:    "human_cli",
-		IsInteractive: true,
-	})
-	if err != nil {
-		t.Fatalf("human CLI AcceptTask failed: %v", err)
-	}
-
-	// Now perform authenticated human CLI integration
-	_, err = h.service.IntegrateTask(ctx, a4c.IntegrateTaskRequest{
-		TaskID: beginResult.TaskID,
-	})
-	if err != nil {
-		t.Fatalf("human CLI IntegrateTask failed: %v", err)
-	}
-
-	// Verify math.go now exists in root repo checkout!
-	if _, err := os.Stat(filepath.Join(h.repoDir, "math.go")); os.IsNotExist(err) {
-		t.Fatalf("math.go was not integrated into base checkout")
-	}
-}
 
 // TestMCPServer_ApplyPatch_EndToEnd drives the governed write through the MCP
 // tool itself: begin a task to provision its worktree, apply a file, and
@@ -960,5 +474,106 @@ func TestMCPServer_Resume_DetectsPriorWork(t *testing.T) {
 	if !found {
 		t.Errorf("checkpoint did not report the prior work; got new=%v modified=%v",
 			chk.NewFiles, chk.ModifiedFiles)
+	}
+}
+
+// TestMCPServer_DirectGovernanceFlow exercises the simplified lifecycle:
+// begin -> governed write -> complete -> diff, with retired orchestration
+// tools failing closed instead of being advertised.
+func TestMCPServer_DirectGovernanceFlow(t *testing.T) {
+	h := setupMCPHarness(t)
+	defer h.client.Close()
+
+	ctx := context.Background()
+
+	ctxRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Name: "team_context", Arguments: map[string]any{}},
+	})
+	if err != nil || ctxRes.IsError {
+		t.Fatalf("team_context failed: %v (%+v)", err, ctxRes)
+	}
+	var envCtx a4c.TeamContextResult
+	_ = json.Unmarshal([]byte(ctxRes.Content[0].(mcp.TextContent).Text), &envCtx)
+	if envCtx.WorkspaceRoot == "" {
+		t.Fatalf("expected workspace root in context, got %+v", envCtx)
+	}
+
+	beginRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      "team_begin_task",
+			Arguments: map[string]any{"objective": "Add an Add(a,b) function", "strategy": "direct"},
+		},
+	})
+	if err != nil || beginRes.IsError {
+		t.Fatalf("team_begin_task failed: %v (%+v)", err, beginRes)
+	}
+	var beginResult a4c.BeginTaskResult
+	_ = json.Unmarshal([]byte(beginRes.Content[0].(mcp.TextContent).Text), &beginResult)
+	if beginResult.TaskID == "" || beginResult.WorktreePath == "" {
+		t.Fatalf("invalid begin task result: %+v", beginResult)
+	}
+
+	// Retired strategies fail explicitly instead of being reinterpreted.
+	legacyRes, legacyErr := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      "team_begin_task",
+			Arguments: map[string]any{"objective": "x", "strategy": "team"},
+		},
+	})
+	if legacyErr == nil && (legacyRes == nil || !legacyRes.IsError) {
+		t.Fatalf("retired strategy 'team' was accepted instead of failing explicitly")
+	}
+
+	// Retired orchestration tools are not exposed.
+	for _, retired := range []string{"team_delegate", "team_assign_activity", "team_review_result"} {
+		res, callErr := h.client.CallTool(ctx, mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: retired, Arguments: map[string]any{}},
+		})
+		if callErr == nil && (res == nil || !res.IsError) {
+			t.Errorf("retired tool %q was still callable", retired)
+		}
+	}
+
+	patchRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_apply_patch",
+			Arguments: map[string]any{
+				"task_id": beginResult.TaskID,
+				"path":    "add.go",
+				"content": "package add\n\nfunc Add(a, b int) int { return a + b }\n",
+			},
+		},
+	})
+	if err != nil || patchRes.IsError {
+		t.Fatalf("team_apply_patch failed: %v (%+v)", err, patchRes)
+	}
+
+	compRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "team_complete_activity",
+			Arguments: map[string]any{
+				"task_id":     beginResult.TaskID,
+				"activity_id": beginResult.TaskID,
+				"actor":       "host",
+				"success":     true,
+				"summary":     "implemented Add with tests; go test ./... green",
+			},
+		},
+	})
+	if err != nil || compRes.IsError {
+		t.Fatalf("team_complete_activity failed: %v (%+v)", err, compRes)
+	}
+
+	diffRes, err := h.client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      "team_diff",
+			Arguments: map[string]any{"task_id": beginResult.TaskID},
+		},
+	})
+	if err != nil || diffRes.IsError {
+		t.Fatalf("team_diff failed: %v (%+v)", err, diffRes)
+	}
+	if !strings.Contains(diffRes.Content[0].(mcp.TextContent).Text, "add.go") {
+		t.Fatalf("expected add.go in task diff, got %s", diffRes.Content[0].(mcp.TextContent).Text)
 	}
 }

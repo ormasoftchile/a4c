@@ -25,10 +25,6 @@ func TestGetTaskDiff_IncludesUntrackedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lifecycle store: %v", err)
 	}
-	roster, err := a4c.DefaultTeamRoster(filepath.Join(dir, ".a4c", "roster"))
-	if err != nil {
-		t.Fatalf("roster: %v", err)
-	}
 	memory, err := a4c.NewDurableMemoryStore(filepath.Join(dir, ".a4c", "memory"))
 	if err != nil {
 		t.Fatalf("memory store: %v", err)
@@ -37,7 +33,8 @@ func TestGetTaskDiff_IncludesUntrackedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("journal: %v", err)
 	}
-	svc := a4c.NewTeamService(dir, store, lifecycle, nil, roster, memory, journal, nil)
+	gov := a4c.NewPolicyGovernor([]string{"governed_read_file", "governed_apply_patch", "governed_propose_memory"})
+	svc := a4c.NewTeamService(dir, store, lifecycle, gov, memory, journal, nil)
 
 	// An initial commit, so the workspace is a real repository.
 	runGit(t, dir, "init")

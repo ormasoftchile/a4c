@@ -56,6 +56,12 @@ type verificationConfig struct {
 	Kind           string   `json:"kind,omitempty"`
 }
 
+// TestRunner runs a project's verification entry point and reports the raw
+// result. ProjectTestRunner is the production implementation.
+type TestRunner interface {
+	RunTests(ctx context.Context, workspaceDir string) (exitCode int, output string, err error)
+}
+
 // ProjectAwareRunner is implemented by runners that can report structured,
 // project-aware verification. TestRunner implementations that do not implement
 // this fall back to the legacy exit-code/output contract.
@@ -327,4 +333,64 @@ func classifyVerification(kind string, exitCode int, output string) (testsExecut
 		// vacuous; anything else is fail-closed vacuous.
 		return 0, true
 	}
+}
+
+// Test-output analysis and durable evidence logs (shared verification
+// infrastructure).
+
+// "ok   \tpkg\t0.1s", "FAIL\tpkg\t0.1s", or "?   \tpkg\t[no test files]".
+var goPackageResult = regexp.MustCompile(`(?m)^(ok|FAIL|\?)\s`)
+// goTestCase matches a verbose per-test line: "--- PASS: TestFoo (0.00s)".
+var goTestCase = regexp.MustCompile(`(?m)^\s*--- (PASS|FAIL|SKIP): `)
+func AnalyzeGoTestOutput(output string) (testsExecuted int, vacuous bool) {
+	// Prefer precise per-test counts when verbose lines are present.
+	if n := len(goTestCase.FindAllString(output, -1)); n > 0 {
+		return n, false
+	}
+	// Count packages that actually ran tests (ok/FAIL) vs "[no test files]" (?).
+	ran, noTestFiles := 0, 0
+	for _, m := range goPackageResult.FindAllStringSubmatch(output, -1) {
+		switch m[1] {
+		case "ok", "FAIL":
+			ran++
+		case "?":
+			noTestFiles++
+		}
+	}
+	if ran > 0 {
+		return ran, false
+	}
+	// No package ran tests. Vacuous only for an explicit `go test` "no test
+	// files" result or completely empty output -- not for opaque custom output.
+	if noTestFiles > 0 {
+		return 0, true
+	}
+	if strings.TrimSpace(output) == "" {
+		return 0, true
+	}
+	// Non-empty output with no Go structure: non-vacuous but uncounted.
+	return 0, false
+}
+
+func WriteDurableTestLog(workspaceDir, evidenceID, output string) string {
+	if workspaceDir == "" || evidenceID == "" {
+		return ""
+	}
+	dir := filepath.Join(workspaceDir, ".a4c", "evidence")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	safeID := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, evidenceID)
+	path := filepath.Join(dir, safeID+".log")
+	if err := os.WriteFile(path, []byte(output), 0o600); err != nil {
+		return ""
+	}
+	return filepath.Join(".a4c", "evidence", safeID+".log")
 }

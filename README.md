@@ -1,65 +1,45 @@
-# A4C: Agents for Coding — Your Host-Native Coding Agent
+# A4C: Agents for Coding - Your Host-Native Coding Agent
 
-**A4C** is a coding agent you use **inside GitHub Copilot CLI, OpenCode, or Antigravity**. Select the A4C agent or skill in your host, describe the engineering task in chat, and let it implement and verify changes using that host's native tools.
+**A4C** is a coding agent you use **inside GitHub Copilot CLI, OpenCode, or Antigravity**. Select the A4C agent or skill in your host and give it work in chat. It does the engineering in an isolated worktree, verifies the result, and hands you the evidence.
 
-The host owns the conversation, model, and editing tools. A4C adds isolated worktrees, durable task identity, verification evidence, independent review, and checkpoints that survive switching hosts.
+The `a4c` executable provides setup, MCP governance, human approval, and safe integration. **You do not need to run it by hand** - the agent uses it through MCP while you approve the result.
 
-The `a4c` executable provides setup, MCP coordination, human approval, and optional headless automation. **You do not need to launch every interactive task with `a4c task start` or run a separate `a4c task worker`.**
-
----
+A4C is a **governance and evidence layer**, not an agent framework: the native host owns coding execution (including any native subagents); A4C owns task identity, workspace isolation, durable evidence, human acceptance, and safe integration.
 
 ## 1. Use A4C as Your Coding Agent
 
 ### One-Time Setup
 
-Build the A4C executable from this source checkout, using the Go version declared in `go.mod`:
+Build (or install) the `a4c` executable:
 
 ```bash
-mkdir -p "$HOME/.local/bin"
-go build -o "$HOME/.local/bin/a4c" ./cmd/a4c
-export PATH="$HOME/.local/bin:$PATH"
+go build -o a4c ./cmd/a4c
 ```
 
 Keep that directory on your shell's `PATH`. Then initialize the repository you want the agent to work on:
 
 ```bash
-cd /path/to/your-project
-a4c init
+cd /path/to/your/repo
+a4c init .        # or: a4c install all
 ```
 
-`init` does both halves of setup in one step: it creates the `.a4c` state directory **and** wires the repo into Copilot, OpenCode, and Antigravity. Installation merges into whatever configuration the project already has — existing `opencode.json` and `.mcp.json` keys, other MCP servers, and a `default_agent` you have already chosen are all preserved, never overwritten — so re-running `init` is safe and idempotent.
-
-To create the state directory without touching host configuration, use `a4c init --no-install`. To re-wire a single host later, use `a4c install copilot`, `a4c install opencode`, or `a4c install antigravity`.
-
-Then start a host session from the project directory, and allow the local A4C MCP server to start when your host prompts for it:
-
-```bash
-copilot --agent a4c      # GitHub Copilot CLI
-opencode                 # then /agents to select a4c
-agy                      # Antigravity CLI
-```
+`init` does both halves of setup in one step: it creates the `.a4c` state directory **and** wires the repo into Copilot, OpenCode, and Antigravity.
 
 ### GitHub Copilot CLI
-
-From your project directory:
 
 ```bash
 copilot --agent a4c
 ```
 
-Copilot loads `.github/agents/a4c.agent.md`. The installer registers the `a4c mcp` server in the project's `.mcp.json` and the CLI's `~/.copilot/mcp-config.json`. Give your task directly to the A4C agent in the Copilot conversation.
+Copilot loads `.github/agents/a4c.agent.md`. The installer registers the `a4c mcp` server in the project's `.mcp.json` and in `~/.copilot/mcp-config.json`. The charter names the host's real shell tools (`bash`, `powershell`) so verification can run.
 
 ### OpenCode
-
-From the same project directory:
 
 ```bash
 opencode
 ```
 
-The installer sets `default_agent` to `a4c` in `opencode.json`, so OpenCode loads `.opencode/agents/a4c.md` as a **primary agent** and starts new sessions as A4C, with the local A4C MCP server configured in the same file. Chat with A4C normally; you do not need to start an OpenCode headless server for this interactive workflow.
-
-To pick the agent manually instead — or to switch back in an existing session — press `Shift+Tab` to cycle agents, press `Ctrl+X` then `A`, or run `/agents` and select `a4c`. For one-shot scripted runs, pass the agent to the `run` subcommand:
+The installer sets `default_agent` to `a4c` in `opencode.json`, so OpenCode loads `.opencode/agents/a4c.md` as a **primary** agent. To switch manually, press `Shift+Tab`, or run:
 
 ```bash
 opencode run --agent a4c "your task description"
@@ -67,325 +47,147 @@ opencode run --agent a4c "your task description"
 
 ### Antigravity CLI or IDE
 
-Antigravity reaches a4c as a **skill**, not as a selectable agent — so a4c will not appear in `agy`'s agent list. The installer writes `SKILL.md` to `.agents/skills/a4c/SKILL.md`, which is the project-workspace path the `agy` binary scans for skills. Start `agy` from the project directory and invoke it by typing:
-
-```text
-/a4c
-```
-
-If your installed copy is still under the older `.gemini/antigravity-cli/skills/a4c/` location, current `agy` versions do not scan it — re-run `a4c install antigravity` to place it where the host looks. `a4c status doctor` reports whether the skill is at the discoverable path.
-
-The skill also needs the A4C MCP server connected. Register it once, then start a session from your project directory:
+Antigravity reaches a4c as a **skill**, not as a selectable agent. The installer writes `.agents/skills/a4c/SKILL.md` and registers the MCP server:
 
 ```bash
-agy mcp add --type stdio a4c -- "$HOME/.local/bin/a4c" mcp
-agy
+a4c install antigravity    # writes the skill and runs: agy mcp add a4c a4c mcp
 ```
 
-Register **without** `--dir`. `agy mcp add` writes to one global registry (`~/.gemini/config/mcp_config.json`) shared by every project, so baking in `--dir "$PWD"` pins every project to whichever directory you happened to register from — a fresh repository then shows another repository's tasks. With no `--dir`, `a4c mcp` resolves the workspace from its working directory, which the host sets to the project it was launched from.
-
-To confirm the server bound to the repository you expect, ask it in the session which repository it is operating on, or run `agy mcp list` and check the command carries no stale `--dir`.
-
-For the IDE, open the project and add the equivalent stdio server through its MCP server settings. That configuration is per-project, so an explicit `--dir` is appropriate there:
-
-```json
-{
-  "mcpServers": {
-    "a4c": {
-      "command": "/absolute/path/to/a4c",
-      "args": ["mcp", "--dir", "/absolute/path/to/your-project"]
-    }
-  }
-}
-```
-
-In the agent conversation, invoke the installed skill:
-
-```text
-/a4c
-```
-
-You can also ask, "Use the a4c skill to implement this task." The skill supplies A4C's engineering workflow while Antigravity remains the coding host.
+In the agent conversation, invoke the skill with `/a4c`.
 
 ### Give A4C a Task in Chat
 
-After selecting the agent or skill in any of the three hosts, try:
+> Fix the flaky parser test in this repository and make the suite pass.
 
-> Review this repository, identify a meaningful engineering improvement, propose a plan, and execute it using A4C's Reviewed strategy. Preserve the work and evidence so I can resume it from another host.
-
-For a small change, ask for **Direct** mode. For independent read-only review, ask for **Reviewed** mode. Request **Team** mode when you want explicit specialist collaboration.
-
-A4C records the task, works in its assigned isolated worktree, runs verification, and preserves evidence and checkpoints. Human acceptance and integration remain explicit CLI actions; the agent does not approve or merge its own work.
+A4C begins the task, works in its assigned isolated worktree, verifies the result, records the outcome, and preserves evidence. It reports the human commands for acceptance. There is no execution mode to choose: one task is one governed engineering outcome, executed directly.
 
 To continue in another host, open the same repository, select its A4C agent or skill, and ask:
 
-> Resume my a4c task from its checkpoint. Inspect the saved changes and verification evidence before continuing.
+> Resume the unfinished task and continue it.
 
-You do not need to supply a task ID — it is resolved to the task that most needs attention and named back to you. Note where the work actually lives: the task's **worktree** (`.a4c/worktrees/<task-id>/tree`), not the main checkout. A partially-completed task therefore looks like an empty repository if you only inspect the checkout, which is why the agent is instructed to check for an unfinished task and call `team_resume` — returning the worktree path and the work already done — rather than beginning again.
+You do not need to supply a task ID - it is resolved to the task that most needs attention and named back to you.
 
-The `.a4c/` directory contains local task state and evidence; it is not committed with the code. A different machine needs that state as well as the task branch, with saved workspace paths relocated if necessary.
+### What A4C does and does not do
 
----
+- **The host executes.** Implementation, investigation, testing, and any native subagents are the host's own business. A4C does not orchestrate them and does not restrict them.
+- **A4C governs.** Task identity, the isolated worktree, durable records, verification evidence, human acceptance, snapshot validation, and safe integration.
+- **A human accepts.** AI agents never self-approve or integrate; `a4c task accept` and `a4c task integrate` are human operations.
 
 ## 2. Engineering Knowledge
 
-A4C keeps a per-repository engineering knowledge base (KB) of plain Markdown files under your home directory:
+A4C keeps an optional, durable engineering memory **outside** the source repository:
 
-```text
+```
 ~/.a4c/<repo-name>/knowledge/
-├── INDEX.md          # curated map (optional, hand-maintained)
-├── findings/         # confirmed discoveries
-├── experiments/      # trials, including negative results
-├── decisions/        # architectural decisions and rationale
-├── reviews/          # accumulated-knowledge assessments
-├── iterations/       # iteration transitions within the repo
-└── evidence/         # small copied artifacts (test logs, measurements)
+├── findings/        what was learned and why it matters
+├── experiments/     what was tried and what happened
+├── decisions/       consequential choices and their rationale
+└── reviews/         reviewable assessments of the accumulated knowledge
 ```
 
-No setup is required — the path is derived from the repository name (resolved correctly from linked worktrees). `a4c status doctor` reports the resolved location. The KB lives entirely outside the source repository, so worktree cleanup, task rollback, and integration never touch it.
-
-### When agents record knowledge
-
-During a task, the agent consults the KB when prior learning helps, and records only meaningful discoveries — failed approaches, limitations, consequential findings — as new documents. Routine work records no documents. At `team_complete_activity`, the agent reports a knowledge disposition that A4C verifies against the filesystem:
-
-- `{"significant": false, "reason": "No significant reusable knowledge"}` — normal for small changes; nothing is written.
-- `{"significant": true, "paths": ["findings/…​.md"]}` — A4C confirms the files exist inside the KB.
-- `{"significant": true, "file_name": "…", "content": "…"}` — inline fallback when the host cannot write outside its workspace; A4C writes the document atomically and refuses to overwrite existing files.
-
-Published documents are never overwritten by A4C-managed writes; corrections create new documents that reference the earlier ones. The task-level assessment is recorded after review (the lead's synthesis may amend only the knowledge field of an already-completed root activity). Missing or pending assessments surface as warnings at `a4c task inspect` and `a4c task accept` — they never block acceptance of the engineering work.
-
-### Reviewing and reusing knowledge
+During a task, the agent consults the knowledge base when prior learning helps, and records only meaningful discoveries - failed approaches, surprising limitations, non-obvious observations. Knowledge work is optional and never ceremonial.
 
 Inside any host, ask the A4C agent:
 
-> Review what we've learned about this implementation. What has been established, what failed, what remains uncertain, and which architectural assumptions deserve reconsideration?
-
-The agent writes a reviewable assessment under `knowledge/reviews/`. To weigh continuing vs. restarting:
-
-> Evaluate whether we should continue, repair, or start a new implementation based on what we've learned.
-
-To carry selected learning into a new repository's independent KB (the new repo gets its own `~/.a4c/<new-repo>/knowledge/`):
-
-> Review what we learned in `<old-repo>` and propose what should be carried into this new implementation.
-
-The agent proposes a transfer; after your approval it copies selected documents with origin notes. Nothing is shared or linked afterwards. OneDrive or another custom root can be considered later; today everything is local.
-
-Users of earlier A4C releases with an existing `.a4c/knowledge.db` can migrate with `a4c status knowledge` (the legacy database is read-only and left untouched).
-
----
+> Review what we know and challenge the previous conclusions.
 
 ## 3. Fundamental Architecture
 
-A4C establishes strict ownership boundaries between the coding host and the engineering organization:
+### The Coding Host Owns
 
-### The Coding Host Owns:
-- Model inference, context window management, and token generation.
-- Model-specific configuration, credentials, and quotas.
-- Native tool execution (`bash`, file editing, reading, patching).
-- Native agent turns, streaming output, and interactive developer UX.
+- Coding agent execution, native subagents, and internal delegation.
+- Tool selection, implementation planning, investigation, implementation, and verification.
 
-### A4C Owns:
-- **Organizational Identity & Roles**: Specialists (`coder`, `reviewer`, `lead`, domain specialists) defined in a durable team roster.
-- **Task Lifecycle & Intent**: Persistent task graphs, activities, and budget governance stored in `.a4c/`.
-- **Workspace Isolation**: Clean Git worktree provisioning per task (`.a4c/worktrees/<task-id>/`), eliminating state pollution on the developer's main branch.
-- **Validation Evidence**: Cryptographic workspace snapshots (`WorkspaceSnapshotter`) and deterministic test execution results (`go test ./...`), binding task completion to verified evidence.
-- **Independent Verification**: Non-mutating review guarantees enforced natively or via snapshot mutation verification and automatic rollback.
-- **Cross-Host Continuation**: Authoritative checkpoints enabling work started on one host to resume on another host without transcript replay.
-- **Human Acceptance & Integration**: Explicit engineer sign-off (`a4c task accept`) and clean merge integration (`a4c task integrate`).
+### A4C Owns
 
-Worktree removal fails closed: Git inspection or removal errors are reported without
-discarding recovery records or recursively deleting task directories. Forced removal
-permits dirty worktrees, but does not bypass Git errors or locks. Evidence and other
-task artifacts stored alongside the worktree are preserved after successful removal.
-If Git removes the worktree but saving its released record fails, A4C reports that
-partial completion and retains the in-memory record for recovery.
+- **Task identity and lifecycle** - one task is one governed engineering outcome.
+- **Workspace isolation** - an isolated worktree per task; the checkout is never dirtied.
+- **Durable records and evidence** - execution history, verification results, diffs, failure explanations.
+- **Human acceptance and integration authorization** - deterministic gates, snapshot validation, safe integration into the repository.
+- **Auditability and recovery** - checkpoints, continuation prompts, resumable tasks.
 
----
+A4C does not reproduce the host's agent hierarchy. If a host uses native subagents, they are opaque to A4C unless their work is reported as evidence.
 
-## 4. Execution Strategies
+### Task Lifecycle
 
-A4C supports three distinct execution strategies tailored to task complexity:
-
-| Strategy | Flag | Execution Flow | Overhead | Ideal Use Case |
-| :--- | :--- | :--- | :--- | :--- |
-| **Direct Mode** | `--strategy direct` (Default) | Single specialist turn with worktree isolation and test evidence collection. Zero coordinators, zero automatic reviewers. | < 0.2s | Bugfixes, focused features, rapid iterations requiring native host speed. |
-| **Reviewed Mode** | `--strategy reviewed` | Specialist implementer turn, followed by an independent read-only reviewer turn gating approval on passing test evidence. | Specialist + Reviewer | Security-sensitive changes, public API modifications, production code. |
-| **Team Mode** | `--strategy team` | Lead engineer breaks down objective into delegated subtasks for specialists, followed by quality review. | Multi-turn | Complex multi-step architectural features requiring decomposition. |
-
-### Setting a workspace default mode
-
-A mode is normally named per request ("fix this in reviewed mode"), and an explicitly named mode always wins. If you mostly work one way, set a workspace default instead — it is durable state in `.a4c/config.json`, and applies to any task that names no mode:
-
-```bash
-a4c task mode                 # show the current default
-a4c task mode reviewed        # set it
-a4c task list                 # shows Mode per task
+```
+Task created -> Worktree allocated -> Host executes -> Result recorded
+     (failed / interrupted is recorded honestly and stops here)
+        -> Verification evidence -> Human acceptance
+        -> Snapshot validation -> Safe integration
 ```
 
-Resolution happens **server-side** in `team_begin_task`, not in the host's prompt, so a task gets the intended mode even when a host never mentions one. The result carries the *effective* strategy, which the agent reports back — you are never left guessing which mode ran.
+## 4. Strict Governance (opt-in)
 
-### Strict Governance (opt-in)
-
-By default, interactive agents mutate files with the host's **native** `edit`/`write`/`patch` tools. That is fast, diff-aware, and supports the host's undo and snapshots — but each write happens outside A4C, so it is not intent-journaled.
-
-For unattended or regulated runs, the installer also ships **strict** agent variants that deny native mutation and route every write through the governed `team_apply_patch` MCP tool:
+By default, agents mutate files with the host's **native** `edit`/`write`/`patch` tools. For unattended or regulated runs, the installer also ships **strict** agent variants that deny native mutation and route every write through the governed, journaled `team_apply_patch` tool:
 
 ```bash
-a4c install opencode   # writes a4c-strict.md and bob-strict.md
-a4c install copilot    # writes a4c-strict.agent.md and bob-strict.agent.md
+a4c install opencode   # writes a4c.md and a4c-strict.md
+a4c install copilot    # writes a4c.agent.md and a4c-strict.agent.md
 ```
 
-Select `a4c-strict` (or `bob-strict`) the same way you select `a4c` — `/agents` in OpenCode, `copilot --agent a4c-strict` in Copilot. Opting in is a choice of agent, not a flag.
+Select `a4c-strict` the same way you select `a4c` - `/agents` in OpenCode, `copilot --agent a4c-strict` in Copilot.
 
-| | Default (`a4c`) | Strict (`a4c-strict`) |
-| :--- | :--- | :--- |
-| **Write path** | Host-native `edit`/`write`/`patch` | `team_apply_patch` MCP tool |
-| **Granularity** | Per-activity snapshot | Per-write intent journal (persist → commit) |
-| **Whole-file?** | No — surgical diffs | Yes — `content` is the complete new file |
-| **Path containment** | Host's | A4C's (rejects absolute, `..`, symlink escapes) |
-| **Role boundary** | Host permission rules | Host rules **and** A4C, checked twice |
-| **Cost** | Low tokens | Whole-file rewrites inflate tokens on large files |
+## 5. CLI Automation & Administration
 
-`team_apply_patch` is registered for mutating specialists only — it is never exposed to reviewer or lead roles, and the service re-checks the mutating-role boundary regardless. Every write is journaled with a content hash before and after the file lands, so a crash mid-write is detectable and reconcilable.
-
-**Honest limitation:** `shell` stays enabled in strict mode so tests can run. A model determined to bypass governance can still create files with a shell redirect — strict mode makes the *primary* write path audited and journaled; it is not a security boundary against a hostile model. The default (native-tools) mode is the right choice for interactive work, where a human and the host's diff/undo are the recovery loop.
-
----
-
-## 5. Optional Headless Host Adapters
-
-A4C also supports CLI-driven automation across the same hosts. The matrix below describes those **headless adapters**, not the interactive agent entry points above:
-
-| Capability | GitHub Copilot CLI (`copilot`) | OpenCode (`opencode`) | Antigravity CLI (`antigravity` / `agy`) |
-| :--- | :--- | :--- | :--- |
-| **Execution Mode** | CLI automation SDK / stdio | API server (`opencode serve`) | Print non-interactive (`agy -p`) |
-| **Worktree Binding** | ✅ Native worktree binding | ✅ Session `location` scoping | ✅ Working directory flag |
-| **Context Injection** | ✅ Charter & Handoff prompt | ✅ Charter folded into session prompt | ✅ Handoff prompt injection |
-| **Telemetry & Tokens**| ✅ Prompt, completion, total | ✅ Input, output, reasoning | ✅ Input, output, thinking, cache |
-| **Review Isolation** | ✅ SDK tool definition filters | ✅ Session permission ruleset (`deny`) | ✅ Snapshot mutation check & rollback |
-| **Model Selection** | ✅ Custom model per activity | ✅ Custom provider/model per activity | ✅ Custom model per activity |
-| **Continuation** | ✅ Authoritative checkpoints | ✅ Authoritative checkpoints | ✅ Authoritative checkpoints |
-
-The OpenCode adapter speaks the v2 HTTP API and manages its HTTP Basic authentication automatically: managed servers pin a random password through `OPENCODE_SERVER_PASSWORD`, and external servers are attached with the same environment variable.
-
----
-
-## 6. CLI Automation & Administration
-
-The commands below are optional automation and administrative interfaces, not a prerequisite for chatting with the A4C agent. `a4c status doctor` reports environment readiness, including optional host adapters that may be unavailable when you are not using them.
+The commands below are optional automation and administrative interfaces, not a prerequisite for chatting with the A4C agent.
 
 ### Command Surface
 
-The root CLI is deliberately minimal — five commands. Everything else is a subcommand of `task` (work and its lifecycle) or `status` (read-only introspection):
+| Command | Purpose |
+|---|---|
+| `a4c init <dir>` | Initialize workspace + wire all hosts |
+| `a4c install <copilot\|opencode\|antigravity\|all>` | Install host agents/skills and MCP registration |
+| `a4c task <...>` | Task lifecycle (below) |
+| `a4c mcp` | Run the MCP server a host connects to |
+| `a4c status [doctor\|memory\|knowledge]` | Introspection |
 
-| Root | Owns |
-| :--- | :--- |
-| `init` | Create the `.a4c` workspace and wire host integrations |
-| `install` | Wire the repo into Copilot / OpenCode / Antigravity |
-| `task` | Submit, execute, review, accept, and integrate work |
-| `mcp` | Serve the MCP protocol over stdio |
-| `status` | Read-only introspection of environment and state |
+### Task Lifecycle Commands
 
-So `a4c status doctor|team|decisions|memory|knowledge` reports, while `a4c task … decide|worker|loop|mode` acts. The former root commands (`doctor`, `team`, `host`, `run`, `decisions`, `memory`, `knowledge`, `adopt`) were removed rather than aliased, so a displaced name fails loudly with the new invocation printed:
+| Command | Purpose |
+|---|---|
+| `a4c task submit <objective> [budget_tokens]` | Create a governed task (record only) |
+| `a4c task start <objective> [budget_tokens]` | Create a task and its isolated worktree |
+| `a4c task adopt <objective> [--notes ...] [--in-place]` | Register pre-existing external work as a governed task |
+| `a4c task resume [task-id] [--notes ...]` | Prepare continuation of an interrupted task |
+| `a4c task checkpoint [task-id]` | Capture an authoritative checkpoint |
+| `a4c task list / history / inspect / diff` | Read task state, audit trail, and changes |
+| `a4c task feedback <text>` | Send work back for revision |
+| `a4c task accept [task-id] [comments] [--integrate]` | **Human** approval against a validated snapshot |
+| `a4c task integrate [task-id]` | **Human** integration of accepted work |
+| `a4c task reject <reason>` | Reject the task |
 
-```console
-$ a4c doctor
-Unknown command "doctor".
-It moved: use a4c status doctor
-```
-
-Plain typos get a suggestion instead: `a4c stauts` reports `Did you mean "status"?`
-
-### Task IDs are optional
-
-`task-id` is optional on every task subcommand that takes one. Omit it and a4c targets the task that most needs attention in the relevant state — so recovering from an interruption is three commands with no copy-paste:
-
-```bash
-a4c task list                 # what's outstanding
-a4c task inspect              # what happened to the most recent task
-a4c task resume --run         # continue it
-```
-
-The chosen task is announced on stderr (`Using task task-… (interrupted): …`), so machine-readable stdout stays clean. Each subcommand prefers the states it acts on — `resume` prefers interrupted/running, `accept` prefers awaiting review — and an explicit ID always wins. When nothing is eligible you get the reason, not a usage message:
-
-```console
-$ a4c task accept
-a4c task accept: no task currently in state awaiting_human_review or awaiting_decision
-```
-
-### Direct Mode (Headless Automation)
-Execute a focused task through a host's automation adapter:
-```bash
-# Direct task on OpenCode
-a4c task start "Fix nil pointer dereference in cache.go" --runtime opencode --strategy direct
-
-# Direct task on GitHub Copilot
-a4c task start "Refactor options parser" --runtime copilot --strategy direct
-
-# Direct task on Antigravity
-a4c task start "Add table-driven unit tests" --runtime antigravity --strategy direct
-```
-
-### Reviewed Mode (Independent Quality Gate)
-Execute implementation with independent, non-mutating review:
-```bash
-a4c task start "Add distributed rate limiter" \
-  --strategy reviewed \
-  --runtime opencode \
-  --reviewer-runtime copilot
-```
-
-### Cross-Host Teams (Team Mode)
-Run a mixed-host engineering team where different specialists execute on different hosts:
-```bash
-a4c task start "Implement robust health check endpoints" \
-  --strategy team \
-  --runtime copilot \
-  --agent-runtimes coder=opencode,reviewer=copilot
-```
-
-### Cross-Host Continuation
-Pause an in-flight task on one host and continue on another:
-```bash
-# Capture authoritative checkpoint
-a4c task checkpoint task-1791671400473010000
-
-# Resume task on another host without context loss
-a4c task resume task-1791671400473010000 --runtime opencode --run
-```
+Task IDs are optional: the task that most needs attention is resolved for you.
 
 ### Human Review & Integration
-A4C maintains a strict human acceptance boundary. Acceptance **shows you what you are approving** — the file list and change counts travel with the approval — so inspecting is not a separate ritual step:
 
 ```bash
-# Approve: prints the diff summary, then records sign-off against a snapshot
-a4c task accept "Approved for production"
-
-# Approve and merge in one step
-a4c task accept --integrate
-
-# Send it back for revision (re-opens the task)
-a4c task feedback "Please add benchmarks for concurrent access"
-
-# Deeper inspection when you want the full patch or the audit trail
-a4c task diff            # full unified patch
-a4c task inspect         # audit trail and activity DAG
-
-# Merge an already-approved task later
-a4c task integrate
+a4c task diff                 # what you are approving
+a4c task accept               # approve against a validated snapshot
+a4c task accept --integrate   # approve and merge in one step
+a4c task feedback "..."       # send it back for revision
+a4c task inspect --json       # the full audit trail
+a4c task integrate            # merge an already-approved task later
 ```
 
-A task ID is optional throughout. Two invariants stay intact: `accept` refuses to let an AI approve its own work, and `integrate` refuses if the worktree changed since you approved — which is why the two remain separate steps when you want them to be.
+Integration requires human acceptance plus independently validated evidence; incomplete work, dirty base checkouts, and stale snapshots are refused.
 
----
+## 6. Verification & Regression Protection
 
-## 7. Verification & Regression Protection
-
-Run the hardened test suite:
 ```bash
-# Run production hardening tests (capabilities, evidence resolution, mutation rollback)
-go test -v -run TestProductionHardening ./pkg/a4c
-
-# Run universal host and mixed routing tests
-go test -v -run "TestHostContract|TestMixedHostRouting|TestCrossHostContinuation" ./pkg/a4c
+go build ./...
+go test -short ./...
+go test -race -short ./pkg/a4c/...
 ```
+
+All testing is deterministic and offline.
+
+## 7. Retired Capabilities
+
+Earlier releases offered execution strategies (`reviewed`, `team`) with A4C-managed reviewers, delegated worker activities, and a team coordinator. Three stages of controlled benchmarking found no demonstrated correctness or efficiency advantage for that orchestration, and it has been **retired** as a deliberate architectural reduction:
+
+- New tasks cannot select a strategy; requests naming `reviewed` or `team` fail explicitly.
+- No delegation, reviewer scheduling, or coordinator execution exists in the product.
+- Historical Team/Reviewed task records remain readable and immutable, and cannot bypass lifecycle validation.
+
+Agent orchestration belongs to the native execution host; A4C governs engineering outcomes.

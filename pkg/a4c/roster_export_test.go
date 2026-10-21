@@ -194,7 +194,7 @@ func TestExportAntigravity_WritesToDiscoveredPath(t *testing.T) {
 // select one. This regressed once for Antigravity, whose skill documented
 // roles, durable state, and knowledge but never mentioned the modes — so the
 // host had no idea they existed.
-func TestPrimaryPromptsDocumentExecutionModes(t *testing.T) {
+func TestPrimaryPromptsDoNotAdvertiseRetiredModes(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", filepath.Join(dir, "home")) // ExportCopilotAgents also merges global config
 
@@ -219,12 +219,18 @@ func TestPrimaryPromptsDocumentExecutionModes(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		body := strings.ToLower(string(data))
-		for _, mode := range []string{"direct", "reviewed", "team"} {
-			if !strings.Contains(body, mode) {
-				t.Errorf("%s does not document execution mode %q", path, mode)
+		// The retired execution strategies must not be advertised anywhere in
+		// newly generated instructions (Stage 3 removal regression).
+		for _, retired := range []string{"reviewed mode", "team mode", "execution modes", "task mode", "--strategy"} {
+			if strings.Contains(body, retired) {
+				t.Errorf("%s still advertises retired %q", path, retired)
 			}
 		}
-		// The operator must also learn the human acceptance boundary.
+		// The single execution model and the human acceptance boundary must
+		// remain documented.
+		if !strings.Contains(body, "team_begin_task") || !strings.Contains(body, "team_complete_activity") {
+			t.Errorf("%s does not document the begin/complete protocol", path)
+		}
 		if !strings.Contains(body, "task accept") {
 			t.Errorf("%s does not mention the human acceptance command", path)
 		}

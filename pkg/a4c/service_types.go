@@ -59,11 +59,18 @@ type HumanLifecycleRecord struct {
 	IntegratedAt           time.Time        `json:"integrated_at,omitempty"`
 	IntegratedBy           string           `json:"integrated_by,omitempty"`
 	IntegratedCommit       string           `json:"integrated_commit,omitempty"`
-	Rejected               bool             `json:"rejected"`
-	RejectedAt             time.Time        `json:"rejected_at,omitempty"`
-	RejectionReason        string           `json:"rejection_reason,omitempty"`
-	Revisions              []RevisionRecord `json:"revisions,omitempty"`
-	UpdatedAt              time.Time        `json:"updated_at"`
+	// VersionBump records the patch-level release rule attached to an
+	// acceptance: the version the workspace carried when the change was
+	// approved and the successor that integration must land. It is decided
+	// at acceptance (when the human signs off) and applied at integration,
+	// so a rejected or abandoned task never advances the release.
+	VersionBumpFrom string           `json:"version_bump_from,omitempty"`
+	VersionBumpTo   string           `json:"version_bump_to,omitempty"`
+	Rejected        bool             `json:"rejected"`
+	RejectedAt      time.Time        `json:"rejected_at,omitempty"`
+	RejectionReason string           `json:"rejection_reason,omitempty"`
+	Revisions       []RevisionRecord `json:"revisions,omitempty"`
+	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
 // SubmitTaskRequest parameters for task delegation.
@@ -174,7 +181,10 @@ type AcceptResult struct {
 	AcceptedAt          time.Time `json:"accepted_at"`
 	Comments            string    `json:"comments,omitempty"`
 	AuthorizationMethod string    `json:"authorization_method,omitempty"`
-	Warnings            []string  `json:"warnings,omitempty"`
+	// VersionBumpTo is the patch-level successor recorded with this
+	// approval; empty when the workspace carries no release version file.
+	VersionBumpTo string   `json:"version_bump_to,omitempty"`
+	Warnings      []string `json:"warnings,omitempty"`
 }
 
 // IntegrateTaskRequest applies an accepted task to the working tree.
@@ -190,6 +200,9 @@ type IntegrateResult struct {
 	IntegratedCommit string    `json:"integrated_commit"`
 	IntegratedAt     time.Time `json:"integrated_at"`
 	FilesChanged     int       `json:"files_changed"`
+	// Version is the release version the repository carries after
+	// integration; empty when the workspace has no release version file.
+	Version string `json:"version,omitempty"`
 }
 
 // RejectTaskRequest parameters for human rejection.

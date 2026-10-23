@@ -1,9 +1,12 @@
 package main
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/ormasoftchile/a4c/pkg/a4c"
 )
 
 // TestRootCommandSurface pins the root CLI surface to the intended minimal set.
@@ -113,6 +116,34 @@ func TestHostStartCommands(t *testing.T) {
 		}
 		if c.command != w.command || c.hint != w.hint {
 			t.Errorf("%s = {%q %q}, want {%q %q}", c.host, c.command, c.hint, w.command, w.hint)
+		}
+	}
+}
+
+// TestVersionLine pins the exact shape of `a4c --version` output: a single
+// "a4c <semver>" line that scripts can parse.
+func TestVersionLine(t *testing.T) {
+	got := versionLine()
+	if !strings.HasPrefix(got, "a4c ") {
+		t.Fatalf("versionLine() = %q, want prefix %q", got, "a4c ")
+	}
+	version := strings.TrimPrefix(got, "a4c ")
+	if _, err := a4c.BumpPatch(version); err != nil {
+		t.Fatalf("versionLine() reports %q, which is not a major.minor.patch version: %v", version, err)
+	}
+}
+
+// Every accepted spelling of the version request must print the same line and
+// never reach command dispatch, which would reject them as unknown commands.
+func TestVersionSpellingsHandledBeforeDispatch(t *testing.T) {
+	want := versionLine()
+	for _, arg := range []string{"--version", "-version", "version"} {
+		oldArgs := os.Args
+		os.Args = []string{"a4c", arg}
+		out, errOut := captureOutput(t, func() { main() })
+		os.Args = oldArgs
+		if strings.TrimSpace(out) != want {
+			t.Errorf("a4c %s printed %q (stderr %q), want %q", arg, out, errOut, want)
 		}
 	}
 }

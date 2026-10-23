@@ -1602,7 +1602,13 @@ func (s *TeamServiceImpl) GetTeamContext(ctx context.Context) (*TeamContextResul
 		}
 	}
 
-	kbDir, _ := ResolveKnowledgeDir(s.workspaceDir)
+	// Knowledge capture is a workspace-level choice: an opted-out workspace
+	// exposes no knowledge directory at all, so agents have nothing to record
+	// into and nothing to read.
+	var kbDir string
+	if KnowledgeEnabled(s.workspaceDir) {
+		kbDir, _ = ResolveKnowledgeDir(s.workspaceDir)
+	}
 
 	return &TeamContextResult{
 		WorkspaceRoot:  s.workspaceDir,
@@ -1896,6 +1902,14 @@ func metricsFromHostUsage(u *HostUsage) *ExecutionMetrics {
 // unverified claim as successful and never fails the engineering completion.
 func (s *TeamServiceImpl) processKnowledgeClaim(claim *KnowledgeClaim, actor, taskID string, taskLevel bool) *KnowledgeOutcome {
 	out := &KnowledgeOutcome{Significant: claim.Significant, Actor: actor, TaskLevel: taskLevel}
+	// Workspace opt-out wins over any claim: capture is refused with an
+	// explicit outcome so the agent is told why its document was not written,
+	// and no file ever lands in a workspace that said no.
+	if !KnowledgeEnabled(s.workspaceDir) {
+		out.Status = "disabled"
+		out.Reason = "knowledge capture is disabled for this workspace (a4c init --no-knowledge)"
+		return out
+	}
 	if !claim.Significant {
 		out.Status = "assessed"
 		out.Reason = claim.Reason
@@ -2000,6 +2014,12 @@ func (s *TeamServiceImpl) amendRootKnowledge(rec *ActivityRecord, req CompleteAc
 // deriveKnowledgeCoverage computes derived task-level knowledge accountability
 // state from recorded activity results. No separate store is maintained.
 func (s *TeamServiceImpl) deriveKnowledgeCoverage(rootID string) *TaskKnowledgeCoverage {
+	// Opted-out workspaces carry no knowledge obligation at all: reporting
+	// "assessment missing" for a workspace that said no would nag about a
+	// choice the operator already made.
+	if !KnowledgeEnabled(s.workspaceDir) {
+		return &TaskKnowledgeCoverage{Disabled: true}
+	}
 	cov := &TaskKnowledgeCoverage{AssessmentMissing: true}
 	if s.store == nil {
 		return cov
@@ -2071,7 +2091,7 @@ func mapToKnowledgeOutcome(m map[string]any, out *KnowledgeOutcome) error {
 // the acceptance boundary. Missing or pending assessments warn; they never
 // block acceptance.
 func knowledgeCoverageWarnings(cov *TaskKnowledgeCoverage) []string {
-	if cov == nil {
+	if cov == nil || cov.Disabled {
 		return nil
 	}
 	var w []string

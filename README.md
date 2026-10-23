@@ -91,6 +91,19 @@ Inside any host, ask the A4C agent:
 
 > Review what we know and challenge the previous conclusions.
 
+The knowledge base is already wired for you: the agent receives its path from `team_context` at the start of every task, so no setup or skill is needed — asking in chat is the whole interface. Outside a session, `a4c status knowledge` prints the directory for this repository, its document count, and the current capture state.
+
+### Opting out
+
+To keep a project out of knowledge capture entirely:
+
+```bash
+a4c init --no-knowledge    # opt this workspace out (durable, in .a4c/config.json)
+a4c init --knowledge       # re-enable (the default)
+```
+
+While opted out, capture is silent at every layer: generated agent instructions no longer mention knowledge, `team_context` exposes no knowledge directory, document claims are refused with an explicit `disabled` outcome, acceptance warns about no missing assessments, and the legacy export writes nothing. Existing documents stay on disk untouched, and `a4c status doctor` reports the opt-out as an intentional state. A plain re-run of `a4c init` never flips the setting back on.
+
 ## 3. Fundamental Architecture
 
 ### The Coding Host Owns

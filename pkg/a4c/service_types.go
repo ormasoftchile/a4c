@@ -259,6 +259,10 @@ type KnowledgeOutcome struct {
 
 // TaskKnowledgeCoverage is derived knowledge-accountability state for a task.
 type TaskKnowledgeCoverage struct {
+	// Disabled: knowledge capture is opted out for this workspace
+	// (.a4c/config.json), so no assessment is expected and no obligation
+	// warnings apply. Set server-side; agents cannot claim it.
+	Disabled bool `json:"disabled,omitempty"`
 	// AssessmentMissing: no completion on the task carried any knowledge claim.
 	AssessmentMissing bool `json:"assessment_missing"`
 	// AssessmentRecorded: the root (task-level) completion carries a claim.

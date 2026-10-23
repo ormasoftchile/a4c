@@ -54,6 +54,45 @@ func subMap(cfg map[string]any, key string) map[string]any {
 	return map[string]any{}
 }
 
+// knowledgeSectionHeading starts the optional knowledge block in generated
+// agent and skill instructions.
+const knowledgeSectionHeading = "### Engineering Knowledge (optional, never ceremonial)"
+
+// stripKnowledgeSection removes the knowledge block from a generated
+// instruction document, for workspaces that opted out of capture
+// (`a4c init --no-knowledge`). An agent must not be told to record findings
+// into a directory that no longer exists for it: instructions and runtime
+// behavior have to agree, or the agent just collects refusals.
+//
+// The section runs from its heading to the next same-level heading, or to the
+// end of the document. A document without the heading is returned unchanged.
+func stripKnowledgeSection(content string) string {
+	i := strings.Index(content, knowledgeSectionHeading)
+	if i < 0 {
+		return content
+	}
+	// Cut from the start of the heading's line so no dangling blank seam is left.
+	if i > 0 && content[i-1] != '\n' {
+		lineStart := strings.LastIndex(content[:i], "\n") + 1
+		i = lineStart
+	}
+	rest := content[i+len(knowledgeSectionHeading):]
+	if j := strings.Index(rest, "\n### "); j >= 0 {
+		// Keep the next heading; drop only the knowledge block before it.
+		return strings.TrimRight(content[:i]+rest[j+1:], "\n") + "\n"
+	}
+	return strings.TrimRight(content[:i], "\n") + "\n"
+}
+
+// maybeStripKnowledge applies the workspace's knowledge opt-out to generated
+// instructions. Enabled workspaces are returned byte-for-byte unchanged.
+func maybeStripKnowledge(rootDir, content string) string {
+	if KnowledgeEnabled(rootDir) {
+		return content
+	}
+	return stripKnowledgeSection(content)
+}
+
 // ExportCopilotAgents writes GitHub Copilot custom agent definitions and MCP configuration.
 func ExportCopilotAgents(rootDir string) error {
 	agentsDir := filepath.Join(rootDir, ".github", "agents")
@@ -107,6 +146,7 @@ Before calling 'team_begin_task', call 'team_list' and look for an unfinished ta
 - Record ONLY meaningful discoveries (failed approaches, surprising limitations, non-obvious observations) as NEW Markdown files under knowledge/findings/ or knowledge/experiments/. Never overwrite existing documents; corrections create a new document that references the earlier one. Do not document routine work.
 - On 'team_complete_activity', include a knowledge disposition: {"significant": false, "reason": "No significant reusable knowledge"} for routine work, or {"significant": true, "paths": ["findings/<file>.md"]} after writing a document. If your host cannot write outside the workspace, pass {"significant": true, "file_name": "findings/<file>.md", "content": "<full markdown>"} instead. Your records are observations and candidates, not final architectural conclusions. When the user asks to review accumulated knowledge, examine the knowledge base and available evidence, challenge previous conclusions, and write a reviewable assessment under knowledge/reviews/.
 `
+	aliceContent = maybeStripKnowledge(rootDir, aliceContent)
 
 
 
@@ -294,6 +334,7 @@ Before calling 'team_begin_task', call 'team_list' and look for an unfinished ta
 ### Tool invocation (OpenCode)
 A4C MCP tools live on the 'a4c' MCP server; call them through the code-execution tool exactly as: await tools.a4c.team_begin_task({...}), await tools.a4c.team_complete_activity({...}), await tools.a4c.team_list({...}), and likewise team_context, team_status, team_result, team_diff, team_feedback, team_checkpoint, team_resume, team_apply_patch. Call them directly - do not use tool search, do not run exploratory a4c CLI help commands, and never build your own MCP client.
 `
+	aliceContent = maybeStripKnowledge(rootDir, aliceContent)
 
 
 
@@ -390,6 +431,7 @@ Before beginning, call 'team_list' for an unfinished task with the same or simil
 - Record ONLY meaningful discoveries (failed approaches, surprising limitations, non-obvious observations) as NEW Markdown files under knowledge/findings/ or knowledge/experiments/. Never overwrite existing documents. Do not document routine work.
 - On 'team_complete_activity', include a knowledge disposition: {"significant": false, "reason": "No significant reusable knowledge"} for routine work, or {"significant": true, "paths": ["findings/<file>.md"]} after writing a document (use {"significant": true, "file_name": "findings/<file>.md", "content": "<full markdown>"} if your host cannot write outside the workspace). When the user asks to review accumulated knowledge, examine the knowledge base and available evidence, challenge previous conclusions, and write a reviewable assessment under knowledge/reviews/.
 `
+	skillContent = maybeStripKnowledge(rootDir, skillContent)
 
 	return os.WriteFile(filepath.Join(skillsDir, "SKILL.md"), []byte(skillContent), 0644)
 }
@@ -488,7 +530,9 @@ func RunDoctor(rootDir string) DoctorReport {
 	}
 
 	// 2b. Home-directory knowledge base (convention: ~/.a4c/<repo-name>/knowledge)
-	if kbDir, kerr := ResolveKnowledgeDir(absRoot); kerr == nil {
+	if !KnowledgeEnabled(absRoot) {
+		addCheck("Knowledge", "Knowledge Base", true, "capture disabled for this workspace (a4c init --knowledge to re-enable)")
+	} else if kbDir, kerr := ResolveKnowledgeDir(absRoot); kerr == nil {
 		detail := kbDir
 		if st, serr := os.Stat(kbDir); serr == nil && st.IsDir() {
 			detail += " (exists)"

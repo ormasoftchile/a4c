@@ -337,12 +337,33 @@ func getPaths(workDir string) (string, string, string, string, string) {
 func runInit(args []string) {
 	target := "."
 	installHosts := true
+	// nil = not asked (leave an existing opt-out untouched); explicit true
+	// or false only when the operator passed the flag.
+	var knowledgeEnabled *bool
 	for _, a := range args {
 		switch {
 		case a == "--no-install":
 			installHosts = false
+		case a == "--no-knowledge":
+			v := false
+			knowledgeEnabled = &v
+		case a == "--knowledge":
+			v := true
+			knowledgeEnabled = &v
+		case a == "--help" || a == "-h":
+			fmt.Print("Usage: a4c init [dir] [--no-install] [--no-knowledge|--knowledge]\n\n" +
+				"  --no-install    create workspace state only; do not wire hosts\n" +
+				"  --no-knowledge  opt this workspace out of knowledge capture\n" +
+				"  --knowledge     re-enable knowledge capture (the default)\n")
+			return
 		case !strings.HasPrefix(a, "-"):
 			target = a
+		default:
+			// Same contract as task subcommands: name the bad argument and
+			// stop before touching the workspace — a typo'd opt-out flag must
+			// never initialize as if it had succeeded.
+			fmt.Fprintf(os.Stderr, "a4c init: unsupported argument %q (see 'a4c init --help')\n", a)
+			return
 		}
 	}
 
@@ -362,6 +383,22 @@ func runInit(args []string) {
 	_, _ = a4c.NewDurableActivityStore(storeDir)
 	_, _ = a4c.NewDurableMemoryStore(memDir)
 	_, _ = a4c.NewDurableIntentJournal(journalDir)
+
+	// The knowledge opt-out is durable workspace state, written before host
+	// wiring so generated agent instructions already reflect the choice: an
+	// opted-out workspace must never be handed instructions that tell its
+	// agents to record knowledge.
+	if knowledgeEnabled != nil {
+		if err := a4c.SetKnowledgeEnabled(target, *knowledgeEnabled); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to save knowledge setting: %v\n", err)
+			os.Exit(1)
+		}
+		if *knowledgeEnabled {
+			fmt.Println("Knowledge capture: enabled (default).")
+		} else {
+			fmt.Println("Knowledge capture: disabled for this workspace. Agents will not be instructed to record knowledge, team_context exposes no knowledge directory, and capture attempts are refused.")
+		}
+	}
 
 	fmt.Printf("Initialized a4c workspace in %s\n", target)
 
@@ -1094,21 +1131,88 @@ func runMemory(args []string) {
 	}
 }
 
-// runKnowledge implements `a4c status knowledge`, the one-way migration of
-// legacy SQLite knowledge records into the per-repository home-directory
-// Markdown knowledge base. The legacy database is opened read-only and is
-// never modified or deleted.
 func runKnowledge(args []string) {
 	workDir := "."
+	isExport := false
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--dir" && i+1 < len(args) {
+		switch {
+		case args[i] == "--dir" && i+1 < len(args):
 			workDir = args[i+1]
 			i++
+		case args[i] == "export":
+			isExport = true
+		default:
+			// Anything unrecognized is an explicit error, not a silently
+			// ignored argument — a typo must never look like a successful
+			// report or a successful export.
+			fmt.Fprintf(os.Stderr, "a4c status knowledge: unsupported argument %q (usage: a4c status knowledge [export] [--dir path])\n", args[i])
+			return
 		}
 	}
-	if len(args) == 0 || args[0] != "export" {
-		fmt.Println("Usage: a4c status knowledge export [--dir path]")
-		fmt.Println("Exports legacy .a4c/knowledge.db records to the home-directory knowledge base.")
+	if isExport {
+		runKnowledgeExport(workDir)
+		return
+	}
+	// Plain 'a4c status knowledge' is read-only reporting: capture state and
+	// where knowledge lives, so opting out or consuming it never requires
+	// guessing at config file paths.
+	reportKnowledgeState(workDir)
+}
+
+// reportKnowledgeState prints the workspace's capture state and knowledge
+// directory. It reads and writes nothing.
+func reportKnowledgeState(workDir string) {
+	enabled := a4c.KnowledgeEnabled(workDir)
+	if !enabled {
+		fmt.Println("Knowledge capture: disabled for this workspace (.a4c/config.json)")
+		fmt.Println("Re-enable with: a4c init --knowledge")
+	} else {
+		fmt.Println("Knowledge capture: enabled")
+	}
+	if _, err := a4c.LoadWorkspaceConfig(workDir); err != nil {
+		// A corrupt settings file disables capture (fail toward the operator's
+		// last expressible intent); say so instead of hiding it.
+		fmt.Printf("Note: %v\n", err)
+	}
+	kbDir, err := a4c.ResolveKnowledgeDir(workDir)
+	if err != nil {
+		fmt.Printf("Knowledge directory: unavailable (%v)\n", err)
+		return
+	}
+	fmt.Printf("Knowledge directory: %s\n", kbDir)
+	if entries, err := os.ReadDir(kbDir); err == nil {
+		docs := 0
+		var walkErr error
+		_ = filepath.Walk(kbDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				walkErr = err
+				return nil
+			}
+			if !info.IsDir() && strings.HasSuffix(info.Name(), ".md") {
+				docs++
+			}
+			return nil
+		})
+		if walkErr != nil {
+			fmt.Printf("Documents: unreadable (%v)\n", walkErr)
+			return
+		}
+		fmt.Printf("Documents: %d markdown file(s) across %d top-level entries\n", docs, len(entries))
+	} else {
+		fmt.Println("Documents: none yet (created on first write; no setup required)")
+	}
+}
+
+// runKnowledgeExport performs the one-way migration of legacy SQLite knowledge
+// records into the per-repository home-directory Markdown knowledge base. The
+// legacy database is opened read-only and is never modified or deleted.
+func runKnowledgeExport(workDir string) {
+	// Export creates knowledge documents, so the workspace's opt-out governs
+	// it like any other capture path: no writes into a directory the
+	// workspace disowned.
+	if !a4c.KnowledgeEnabled(workDir) {
+		fmt.Println("Knowledge capture is disabled for this workspace; nothing to export.")
+		fmt.Println("Re-enable with: a4c init --knowledge")
 		return
 	}
 

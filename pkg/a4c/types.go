@@ -54,15 +54,6 @@ type BudgetRecord struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// ExecutionStrategy defines how a submitted task is scheduled and executed.
-type ExecutionStrategy string
-
-const (
-	StrategyDirect   ExecutionStrategy = "direct"   // Single programmer handles task directly
-	StrategyReviewed ExecutionStrategy = "reviewed" // Programmer implements + Independent Reviewer verifies
-	StrategyTeam     ExecutionStrategy = "team"     // Lead coordinates, delegates to Coder & Reviewer
-)
-
 // ExecutionMetrics tracks detailed per-activity model, tool, and latency measurements.
 type ExecutionMetrics struct {
 	WallClockDuration      time.Duration `json:"wall_clock_duration"`
@@ -127,7 +118,7 @@ type ActivityLimits struct {
 	MaxDiffLines        int `json:"max_diff_lines,omitempty"`
 	MaxValidationOutput int `json:"max_validation_output,omitempty"`
 	MaxRevisions        int `json:"max_revisions,omitempty"`
-	// MaxVerificationAttempts bounds how many times the coordinator will
+	// MaxVerificationAttempts bounds how many times verification will
 	// collect evidence and retry a review that ends verification_blocked.
 	// It is independent of MaxRevisions, which governs coding revisions only.
 	MaxVerificationAttempts int `json:"max_verification_attempts,omitempty"`
@@ -382,9 +373,6 @@ type TaskCheckpoint struct {
 
 type ResumeTaskRequest struct {
 	TaskID       string `json:"task_id"`
-	Runtime      string `json:"runtime,omitempty"`
-	Model        string `json:"model,omitempty"`
-	Specialist   string `json:"specialist,omitempty"`
 	Instructions string `json:"instructions,omitempty"`
 }
 

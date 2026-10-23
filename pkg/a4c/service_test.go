@@ -16,8 +16,6 @@ type serviceTestHarness struct {
 	repoDir        string
 	store          *a4c.DurableActivityStore
 	lifecycleStore *a4c.DurableLifecycleStore
-	coordinator    *a4c.TeamCoordinator
-	roster         *a4c.TeamRoster
 	memory         *a4c.DurableMemoryStore
 	journal        *a4c.DurableIntentJournal
 	wtMgr          *a4c.WorktreeManager
@@ -42,8 +40,7 @@ func setupServiceTestHarness(t *testing.T) *serviceTestHarness {
 
 	dotDir := filepath.Join(repoDir, ".a4c")
 	storeDir := filepath.Join(dotDir, "activities")
-	rosterDir := filepath.Join(dotDir, "roster")
-	memDir := filepath.Join(dotDir, "memory")
+		memDir := filepath.Join(dotDir, "memory")
 	journalDir := filepath.Join(dotDir, "journal")
 	lifecycleDir := filepath.Join(dotDir, "lifecycle")
 	wtDir := filepath.Join(dotDir, "worktrees")
@@ -55,10 +52,6 @@ func setupServiceTestHarness(t *testing.T) *serviceTestHarness {
 	lifecycleStore, err := a4c.NewDurableLifecycleStore(lifecycleDir)
 	if err != nil {
 		t.Fatalf("failed to create lifecycle store: %v", err)
-	}
-	roster, err := a4c.DefaultTeamRoster(rosterDir)
-	if err != nil {
-		t.Fatalf("failed to create roster: %v", err)
 	}
 	memory, err := a4c.NewDurableMemoryStore(memDir)
 	if err != nil {
@@ -74,20 +67,15 @@ func setupServiceTestHarness(t *testing.T) *serviceTestHarness {
 	}
 
 	gov := a4c.NewPolicyGovernor([]string{
-		"governed_read_file", "governed_apply_patch", "governed_propose_activity",
-		"governed_submit_review", "governed_request_human_decision", "governed_propose_memory",
+		"governed_read_file", "governed_apply_patch", "governed_propose_memory",
 	})
-	coord := a4c.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, &a4c.NativeGoTestRunner{}, nil)
-	coord.SetWorktreeManager(wtMgr)
 
-	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr)
+	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, gov, memory, journal, wtMgr)
 
 	return &serviceTestHarness{
 		repoDir:        repoDir,
 		store:          store,
 		lifecycleStore: lifecycleStore,
-		coordinator:    coord,
-		roster:         roster,
 		memory:         memory,
 		journal:        journal,
 		wtMgr:          wtMgr,
@@ -110,11 +98,23 @@ func TestTeamService_SubmitListAndInspect(t *testing.T) {
 	h := setupServiceTestHarness(t)
 	ctx := context.Background()
 
-	// 1. Submit task
+	// 0. Retired execution strategies fail explicitly and create nothing.
+	for _, retired := range []a4c.ExecutionStrategy{a4c.StrategyTeam, a4c.StrategyReviewed} {
+		if _, err := h.service.SubmitTask(ctx, a4c.SubmitTaskRequest{
+			Objective: "must not be created",
+			Strategy:  retired,
+		}); err == nil {
+			t.Fatalf("retired strategy %q was accepted", retired)
+		}
+	}
+	if all, err := h.service.ListTasks(ctx, a4c.TaskFilter{}); err != nil || len(all) != 0 {
+		t.Fatalf("retired submissions created state: %v %v", all, err)
+	}
+
+	// 1. Submit task (direct is implicit; no strategy selection)
 	ref, err := h.service.SubmitTask(ctx, a4c.SubmitTaskRequest{
 		Objective:    "Implement feature X",
 		BudgetTokens: 25000,
-		Strategy:     a4c.StrategyTeam,
 	})
 	if err != nil {
 		t.Fatalf("SubmitTask failed: %v", err)
@@ -163,8 +163,7 @@ func TestTeamService_AcceptTask_DoesNotModifyWorkingCheckout(t *testing.T) {
 
 	ref, err := h.service.SubmitTask(ctx, a4c.SubmitTaskRequest{
 		Objective: "Refactor core loop",
-		Strategy:  a4c.StrategyDirect,
-	})
+		})
 	if err != nil {
 		t.Fatalf("SubmitTask failed: %v", err)
 	}
@@ -238,12 +237,11 @@ func TestTeamService_IntegrateTask_SuccessAndGuards(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Submit and setup worktree with a branch modification
-	ref, err := h.service.SubmitTask(ctx, a4c.SubmitTaskRequest{
+	ref, err := h.service.BeginTask(ctx, a4c.BeginTaskRequest{
 		Objective: "Add helper utility",
-		Strategy:  a4c.StrategyReviewed,
 	})
 	if err != nil {
-		t.Fatalf("SubmitTask failed: %v", err)
+		t.Fatalf("BeginTask failed: %v", err)
 	}
 
 	// Acquire worktree for task
@@ -353,8 +351,7 @@ func TestTeamService_FeedbackAndRevision(t *testing.T) {
 
 	ref, err := h.service.SubmitTask(ctx, a4c.SubmitTaskRequest{
 		Objective: "Initial feature",
-		Strategy:  a4c.StrategyDirect,
-	})
+		})
 	if err != nil {
 		t.Fatalf("SubmitTask failed: %v", err)
 	}
@@ -416,8 +413,7 @@ func TestTeamService_RejectTask(t *testing.T) {
 
 	ref, err := h.service.SubmitTask(ctx, a4c.SubmitTaskRequest{
 		Objective: "Deprecated approach",
-		Strategy:  a4c.StrategyDirect,
-	})
+		})
 	if err != nil {
 		t.Fatalf("SubmitTask failed: %v", err)
 	}
@@ -455,12 +451,11 @@ func TestTeamService_GetTaskDiff(t *testing.T) {
 	h := setupServiceTestHarness(t)
 	ctx := context.Background()
 
-	ref, err := h.service.SubmitTask(ctx, a4c.SubmitTaskRequest{
+	ref, err := h.service.BeginTask(ctx, a4c.BeginTaskRequest{
 		Objective: "Test diff calculation",
-		Strategy:  a4c.StrategyReviewed,
 	})
 	if err != nil {
-		t.Fatalf("SubmitTask failed: %v", err)
+		t.Fatalf("BeginTask failed: %v", err)
 	}
 
 	wtRec, err := h.wtMgr.GetWorktree(ref.TaskID)

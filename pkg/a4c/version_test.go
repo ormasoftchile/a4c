@@ -150,12 +150,11 @@ func TestReleaseRule_AcceptRecordsBumpIntegrateAppliesIt(t *testing.T) {
 	runGitCmd(t, h.repoDir, "add", "pkg/a4c/VERSION")
 	runGitCmd(t, h.repoDir, "commit", "-m", "chore: add version file")
 
-	ref, err := h.service.SubmitTask(ctx, a4c.SubmitTaskRequest{
+	ref, err := h.service.BeginTask(ctx, a4c.BeginTaskRequest{
 		Objective: "Add helper utility",
-		Strategy:  a4c.StrategyReviewed,
 	})
 	if err != nil {
-		t.Fatalf("SubmitTask failed: %v", err)
+		t.Fatalf("BeginTask failed: %v", err)
 	}
 
 	wtRec, err := h.wtMgr.GetWorktree(ref.TaskID)
@@ -171,11 +170,6 @@ func TestReleaseRule_AcceptRecordsBumpIntegrateAppliesIt(t *testing.T) {
 	runGitCmd(t, wtRec.WorktreePath, "commit", "-m", "feat: add helper")
 
 	_ = h.store.Complete(ref.TaskID, a4c.ActivityResult{ID: ref.TaskID, Status: a4c.StatusCompleted})
-	reviewerID := ref.TaskID + "-rev"
-	_ = h.store.Complete(reviewerID, a4c.ActivityResult{
-		ID: reviewerID, Status: a4c.StatusCompleted,
-		Outputs: map[string]any{"approved": true, "review_comments": "LGTM"},
-	})
 
 	accRes, err := h.service.AcceptTask(ctx, a4c.AcceptTaskRequest{
 		TaskID: ref.TaskID, AcceptedBy: "human_cli", IsInteractive: true,
@@ -229,9 +223,9 @@ func TestReleaseRule_NoVersionFileIntegrationUnchanged(t *testing.T) {
 	h := setupServiceTestHarness(t)
 	ctx := context.Background()
 
-	ref, err := h.service.SubmitTask(ctx, a4c.SubmitTaskRequest{Objective: "noop", Strategy: a4c.StrategyDirect})
+	ref, err := h.service.BeginTask(ctx, a4c.BeginTaskRequest{Objective: "noop"})
 	if err != nil {
-		t.Fatalf("SubmitTask failed: %v", err)
+		t.Fatalf("BeginTask failed: %v", err)
 	}
 	wtRec, err := h.wtMgr.GetWorktree(ref.TaskID)
 	if err != nil {

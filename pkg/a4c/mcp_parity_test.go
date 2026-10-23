@@ -3,12 +3,10 @@ package a4c_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -67,16 +65,13 @@ func TestMilestone14_CLI_MCP_Parity(t *testing.T) {
 	dotDir := filepath.Join(repoDir, ".a4c")
 	store, _ := a4c.NewDurableActivityStore(filepath.Join(dotDir, "activities"))
 	lifecycleStore, _ := a4c.NewDurableLifecycleStore(filepath.Join(dotDir, "lifecycle"))
-	roster, _ := a4c.DefaultTeamRoster(filepath.Join(dotDir, "roster"))
 	memory, _ := a4c.NewDurableMemoryStore(filepath.Join(dotDir, "memory"))
 	journal, _ := a4c.NewDurableIntentJournal(filepath.Join(dotDir, "journal"))
 	wtMgr, _ := a4c.NewWorktreeManager(repoDir, filepath.Join(dotDir, "worktrees"))
 
 	gov := a4c.NewPolicyGovernor([]string{"governed_read_file", "governed_apply_patch", "governed_submit_review"})
-	coord := a4c.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, &a4c.NativeGoTestRunner{}, nil)
-	coord.SetWorktreeManager(wtMgr)
 
-	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, coord, roster, memory, journal, wtMgr)
+	svc := a4c.NewTeamService(repoDir, store, lifecycleStore, gov, memory, journal, wtMgr)
 	mcpServer := a4cmcp.NewServer(svc)
 
 	cli, err := client.NewInProcessClient(mcpServer.MCPServer())
@@ -186,86 +181,7 @@ func TestMilestone14_CLI_MCP_Parity(t *testing.T) {
 	}
 }
 
-func TestMilestone14_WorkerHost_ConcurrencyAndLocking(t *testing.T) {
-	repoDir := t.TempDir()
 
-	runGitCmd(t, repoDir, "init")
-	runGitCmd(t, repoDir, "config", "user.name", "Lock Tester")
-	runGitCmd(t, repoDir, "config", "user.email", "lock@example.com")
-	_ = os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("# Lock Test\n"), 0644)
-	runGitCmd(t, repoDir, "add", "README.md")
-	runGitCmd(t, repoDir, "commit", "-m", "init")
-
-	dotDir := filepath.Join(repoDir, ".a4c")
-	store, _ := a4c.NewDurableActivityStore(filepath.Join(dotDir, "activities"))
-	roster, _ := a4c.DefaultTeamRoster(filepath.Join(dotDir, "roster"))
-	memory, _ := a4c.NewDurableMemoryStore(filepath.Join(dotDir, "memory"))
-	journal, _ := a4c.NewDurableIntentJournal(filepath.Join(dotDir, "journal"))
-	gov := a4c.NewPolicyGovernor([]string{"governed_read_file", "governed_apply_patch"})
-
-	fake := a4c.NewFakeProvider()
-	fake.SetSessionResponseFunc(func(ctx context.Context, session *a4c.FakeSession, prompt string) (*a4c.AgentMessage, error) {
-		return &a4c.AgentMessage{Role: "assistant", Content: "Done"}, nil
-	})
-
-	coord := a4c.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, &workerMockTestRunner{}, fake)
-
-	cfg := a4c.WorkerHostConfig{
-		WorkspaceDir: repoDir,
-		PollInterval: 25 * time.Millisecond,
-		MaxSteps:     0, // Daemon mode
-	}
-	host := a4c.NewWorkerHost(cfg, coord, store, journal)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_ = host.Run(ctx)
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-
-	// Second worker host attempting to execute concurrently must be rejected
-	coord2 := a4c.NewTeamCoordinator(repoDir, store, roster, memory, gov, journal, &workerMockTestRunner{}, fake)
-	host2 := a4c.NewWorkerHost(cfg, coord2, store, journal)
-	err2 := host2.Run(context.Background())
-	if !errors.Is(err2, a4c.ErrWorkspaceLocked) {
-		t.Fatalf("expected ErrWorkspaceLocked for second host, got %v", err2)
-	}
-
-	// While host is running, enqueuing tasks into store must succeed
-	actReq := a4c.ActivityRequest{
-		ID:        "bg-task-1",
-		AgentID:   "coder",
-		Objective: "Background processed job",
-		Budget:    a4c.Budget{Allocated: 10000},
-		CreatedAt: time.Now(),
-	}
-	if err := store.Enqueue(actReq); err != nil {
-		t.Fatalf("enqueue while host running failed: %v", err)
-	}
-
-	// Wait for host to claim and complete activity
-	for i := 0; i < 20; i++ {
-		time.Sleep(50 * time.Millisecond)
-		rec, err := store.Get("bg-task-1")
-		if err == nil && rec.Status == a4c.StatusCompleted {
-			break
-		}
-	}
-
-	rec, _ := store.Get("bg-task-1")
-	if rec.Status != a4c.StatusCompleted {
-		t.Fatalf("expected activity completed by running host, got %s", rec.Status)
-	}
-
-	cancel()
-	wg.Wait()
-}
 
 func TestMilestone14_MCP_Stdio_Subprocess(t *testing.T) {
 	repoDir := t.TempDir()

@@ -73,15 +73,13 @@ type HumanLifecycleRecord struct {
 	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
-// SubmitTaskRequest parameters for task delegation.
+// SubmitTaskRequest creates a governed task. There is no execution strategy
+// to select: direct is the only execution model.
 type SubmitTaskRequest struct {
 	Objective    string            `json:"objective"`
 	BudgetTokens float64           `json:"budget_tokens,omitempty"`
-	Strategy     ExecutionStrategy `json:"strategy,omitempty"` // direct (default), reviewed, team
-	Specialist   string            `json:"specialist,omitempty"`
-	Runtime      string            `json:"runtime,omitempty"`  // copilot, opencode, fake
-	Model        string            `json:"model,omitempty"`
 	Inputs       map[string]any    `json:"inputs,omitempty"`
+	Strategy     ExecutionStrategy `json:"strategy,omitempty"` // legacy: only "direct" (or empty) accepted
 }
 
 // TaskRef is a lightweight identifier returned immediately on submission.
@@ -218,24 +216,14 @@ type RejectResult struct {
 	Reason     string    `json:"reason"`
 }
 
-// TeamMemberInfo summarizes a persistent team member.
-type TeamMemberInfo struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Role         string   `json:"role"`
-	Charter      string   `json:"charter"`
-	AllowedTools []string `json:"allowed_tools"`
-}
-
-// TeamContextResult provides environmental context for host-native coordinators.
+// TeamContextResult provides environmental context for host-native execution.
 type TeamContextResult struct {
-	WorkspaceRoot  string           `json:"workspace_root"`
-	CurrentBranch  string           `json:"current_branch"`
-	HeadCommit     string           `json:"head_commit"`
-	TeamMembers    []TeamMemberInfo `json:"team_members"`
-	ActiveTasks    []TaskSummary    `json:"active_tasks"`
-	RecentMemories []string         `json:"recent_memories"`
-	KnowledgeDir   string           `json:"knowledge_dir,omitempty"`
+	WorkspaceRoot  string        `json:"workspace_root"`
+	CurrentBranch  string        `json:"current_branch"`
+	HeadCommit     string        `json:"head_commit"`
+	ActiveTasks    []TaskSummary `json:"active_tasks"`
+	RecentMemories []string      `json:"recent_memories"`
+	KnowledgeDir   string        `json:"knowledge_dir,omitempty"`
 }
 
 // KnowledgeClaim is the knowledge disposition an agent reports with activity
@@ -287,47 +275,22 @@ type TaskKnowledgeCoverage struct {
 	Unverified []string `json:"unverified,omitempty"`
 }
 
-// BeginTaskRequest begins an engineering task without launching a standalone inference loop.
+// BeginTaskRequest creates a task and allocates its isolated worktree.
 type BeginTaskRequest struct {
 	Objective    string            `json:"objective"`
 	BudgetTokens float64           `json:"budget_tokens,omitempty"`
-	Strategy     ExecutionStrategy `json:"strategy,omitempty"`
-	Coordinator  string            `json:"coordinator,omitempty"` // default "alice"
-	Runtime      string            `json:"runtime,omitempty"`     // "copilot", "opencode", "antigravity"
+	Strategy     ExecutionStrategy `json:"strategy,omitempty"` // legacy: only "direct" (or empty) accepted
 }
 
-// BeginTaskResult returns details of the newly created task and its isolated worktree.
+// BeginTaskResult returns the new task and its isolated worktree.
 type BeginTaskResult struct {
-	TaskID         string             `json:"task_id"`
+	TaskID         string            `json:"task_id"`
 	State          TaskLifecycleState `json:"state"`
-	// Strategy is the EFFECTIVE mode after resolving any request value against
-	// the workspace default, so a caller can report what actually ran.
-	Strategy       ExecutionStrategy  `json:"strategy"`
-	Coordinator    string             `json:"coordinator"`
-	WorktreePath   string             `json:"worktree_path"`
-	WorktreeBranch string             `json:"worktree_branch"`
-	CreatedAt      time.Time          `json:"created_at"`
+	WorktreePath   string            `json:"worktree_path"`
+	WorktreeBranch string            `json:"worktree_branch"`
+	CreatedAt      time.Time         `json:"created_at"`
 }
 
-// AssignActivityRequest records that the coordinator dispatched work to a specialist.
-type AssignActivityRequest struct {
-	TaskID       string   `json:"task_id"`
-	Agent        string   `json:"agent"` // e.g. "bob"
-	Role         string   `json:"role"`  // e.g. "coder"
-	Objective    string   `json:"objective"`
-	Input        string   `json:"input,omitempty"`
-	AllowedTools []string `json:"allowed_tools,omitempty"`
-}
-
-// ActivityRef identifies an active specialist assignment.
-type ActivityRef struct {
-	ActivityID   string    `json:"activity_id"`
-	TaskID       string    `json:"task_id"`
-	Agent        string    `json:"agent"`
-	Role         string    `json:"role"`
-	WorktreePath string    `json:"worktree_path"`
-	AssignedAt   time.Time `json:"assigned_at"`
-}
 
 // CheckpointRequest records intermediate progress, discoveries, and state.
 type CheckpointRequest struct {
@@ -400,37 +363,13 @@ type HostActivityResult struct {
 	CompletedAt   time.Time          `json:"completed_at"`
 }
 
-// RecordReviewRequest records an independent reviewer verdict.
-type RecordReviewRequest struct {
-	TaskID      string   `json:"task_id"`
-	Reviewer    string   `json:"reviewer"` // e.g. "charlie"
-	Verdict     string   `json:"verdict"`  // "approved", "rejected", "revisions_requested"
-	Comments    string   `json:"comments"`
-	Findings    []string `json:"findings,omitempty"`
-	SnapshotSHA string   `json:"snapshot_sha,omitempty"`
-}
-
-// HostReviewResult confirms review verdict persistence.
-type HostReviewResult struct {
-	TaskID         string             `json:"task_id"`
-	Reviewer       string             `json:"reviewer"`
-	Verdict        string             `json:"verdict"`
-	ReviewedAt     time.Time          `json:"reviewed_at"`
-	LifecycleState TaskLifecycleState `json:"lifecycle_state"`
-	SnapshotSHA    string             `json:"snapshot_sha"`
-}
-
-// AdoptWorkRequest encapsulates parameters to adopt external ongoing development into A4C.
+// AdoptWorkRequest registers pre-existing external work as a governed task.
 type AdoptWorkRequest struct {
-	Objective    string            `json:"objective"`
-	HandoffNotes string            `json:"handoff_notes,omitempty"`
-	SourceHost   string            `json:"source_host,omitempty"` // e.g. "antigravity"
-	Runtime      string            `json:"runtime,omitempty"`     // Target host to continue with e.g. "copilot", "opencode"
-	Model        string            `json:"model,omitempty"`
-	Specialist   string            `json:"specialist,omitempty"`
-	Strategy     ExecutionStrategy `json:"strategy,omitempty"`
-	BudgetTokens float64           `json:"budget_tokens,omitempty"`
-	InPlace      bool              `json:"in_place,omitempty"` // If true, binds current workspace without creating separate worktree
+	Objective    string `json:"objective"`
+	HandoffNotes string `json:"handoff_notes,omitempty"`
+	SourceHost   string `json:"source_host,omitempty"` // recorded provenance only
+	Strategy     ExecutionStrategy `json:"strategy,omitempty"` // legacy: only "direct" (or empty) accepted
+	InPlace      bool  `json:"in_place,omitempty"`
 }
 
 // AdoptWorkResult returns details of the newly adopted A4C task.

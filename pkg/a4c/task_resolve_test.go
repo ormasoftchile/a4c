@@ -19,10 +19,6 @@ func resolvingService(t *testing.T, n int) (*a4c.TeamServiceImpl, []string) {
 	if err != nil {
 		t.Fatalf("activity store: %v", err)
 	}
-	roster, err := a4c.DefaultTeamRoster(filepath.Join(dir, ".a4c", "roster"))
-	if err != nil {
-		t.Fatalf("roster: %v", err)
-	}
 	memory, err := a4c.NewDurableMemoryStore(filepath.Join(dir, ".a4c", "memory"))
 	if err != nil {
 		t.Fatalf("memory store: %v", err)
@@ -35,7 +31,8 @@ func resolvingService(t *testing.T, n int) (*a4c.TeamServiceImpl, []string) {
 	if err != nil {
 		t.Fatalf("lifecycle store: %v", err)
 	}
-	svc := a4c.NewTeamService(dir, store, lifecycle, nil, roster, memory, journal, nil)
+	gov := a4c.NewPolicyGovernor([]string{"governed_read_file", "governed_apply_patch", "governed_propose_memory"})
+	svc := a4c.NewTeamService(dir, store, lifecycle, gov, memory, journal, nil)
 
 	var ids []string
 	for i := 0; i < n; i++ {
@@ -117,7 +114,8 @@ func TestResolveTask_EmptyWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lifecycle store: %v", err)
 	}
-	svc := a4c.NewTeamService(dir, store, lifecycle, nil, nil, nil, nil, nil)
+	gov := a4c.NewPolicyGovernor([]string{"governed_read_file", "governed_apply_patch", "governed_propose_memory"})
+	svc := a4c.NewTeamService(dir, store, lifecycle, gov, nil, nil, nil)
 	if _, err := svc.ResolveTask("", nil); err == nil {
 		t.Fatalf("expected an error for an empty workspace")
 	}

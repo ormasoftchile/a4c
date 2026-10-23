@@ -27,18 +27,13 @@ type TeamService interface {
 	ResumeTask(ctx context.Context, taskID string) error
 	ResumeTaskOnHost(ctx context.Context, req ResumeTaskRequest) (*TaskCheckpoint, error)
 	CaptureCheckpoint(ctx context.Context, taskID string) (*TaskCheckpoint, error)
-	DiscoverAlternativeHosts(ctx context.Context, currentHostID string) ([]HostCapabilities, error)
 	AdoptExistingWork(ctx context.Context, req AdoptWorkRequest) (*AdoptWorkResult, error)
-	EscalateTask(ctx context.Context, req EscalateTaskRequest) (*TaskRef, error)
-	ExecuteTask(ctx context.Context, taskID string, maxSteps int) ([]*ActivityResult, error)
 
-	// Host-Native Coordination Interface (Mode A)
+	// Host-Native Execution Interface: the host executes, A4C governs.
 	GetTeamContext(ctx context.Context) (*TeamContextResult, error)
 	BeginTask(ctx context.Context, req BeginTaskRequest) (*BeginTaskResult, error)
-	AssignActivity(ctx context.Context, req AssignActivityRequest) (*ActivityRef, error)
 	RecordCheckpoint(ctx context.Context, req CheckpointRequest) (*CheckpointResult, error)
 	CompleteActivity(ctx context.Context, req CompleteActivityRequest) (*HostActivityResult, error)
-	RecordReview(ctx context.Context, req RecordReviewRequest) (*HostReviewResult, error)
 	GetWorktreePath(taskID string) (string, error)
 	WorkspaceDir() string
 
@@ -58,8 +53,7 @@ type TeamServiceImpl struct {
 	workspaceDir   string
 	store          *DurableActivityStore
 	lifecycleStore *DurableLifecycleStore
-	coordinator    *TeamCoordinator
-	roster         *TeamRoster
+	governor       *PolicyGovernor
 	memory         *DurableMemoryStore
 	journal        *DurableIntentJournal
 	wtMgr          *WorktreeManager
@@ -70,8 +64,7 @@ func NewTeamService(
 	workspaceDir string,
 	store *DurableActivityStore,
 	lifecycleStore *DurableLifecycleStore,
-	coordinator *TeamCoordinator,
-	roster *TeamRoster,
+	governor *PolicyGovernor,
 	memory *DurableMemoryStore,
 	journal *DurableIntentJournal,
 	wtMgr *WorktreeManager,
@@ -83,16 +76,15 @@ func NewTeamService(
 		workspaceDir:   workspaceDir,
 		store:          store,
 		lifecycleStore: lifecycleStore,
-		coordinator:    coordinator,
-		roster:         roster,
+		governor:       governor,
 		memory:         memory,
 		journal:        journal,
 		wtMgr:          wtMgr,
 	}
 }
 
-func (s *TeamServiceImpl) Coordinator() *TeamCoordinator {
-	return s.coordinator
+func (s *TeamServiceImpl) Governor() *PolicyGovernor {
+	return s.governor
 }
 
 func (s *TeamServiceImpl) Store() *DurableActivityStore {
@@ -133,15 +125,15 @@ func (s *TeamServiceImpl) GetWorktreePath(taskID string) (string, error) {
 	return s.absPath(rec.WorktreePath), nil
 }
 
-// SubmitTask enqueues a new assignment under the configured execution strategy.
+// SubmitTask creates a new governed task. Direct is the only execution model;
+// no strategy selection exists.
 func (s *TeamServiceImpl) SubmitTask(ctx context.Context, req SubmitTaskRequest) (*TaskRef, error) {
 	if strings.TrimSpace(req.Objective) == "" {
 		return nil, fmt.Errorf("service: objective cannot be empty")
 	}
-
-	// An explicit strategy wins; otherwise the workspace default applies; the
-	// final fallback is direct.
-	strategy := EffectiveStrategy(req.Strategy, s.workspaceDir)
+	if err := rejectRetiredStrategy(req.Strategy); err != nil {
+		return nil, err
+	}
 
 	budgetTokens := req.BudgetTokens
 	if budgetTokens <= 0 {
@@ -154,22 +146,8 @@ func (s *TeamServiceImpl) SubmitTask(ctx context.Context, req SubmitTaskRequest)
 			inputs[k] = v
 		}
 	}
-	if req.Specialist != "" {
-		inputs["specialist"] = req.Specialist
-	}
-	if req.Runtime != "" {
-		inputs["runtime"] = req.Runtime
-	}
-	if req.Model != "" {
-		inputs["model"] = req.Model
-	}
 
-	actReq, err := s.coordinator.SubmitTaskWithStrategy(
-		req.Objective,
-		Budget{Allocated: budgetTokens},
-		inputs,
-		strategy,
-	)
+	actReq, err := s.createRootActivity(req.Objective, Budget{Allocated: budgetTokens}, inputs)
 	if err != nil {
 		return nil, fmt.Errorf("service: submit task: %w", err)
 	}
@@ -180,6 +158,41 @@ func (s *TeamServiceImpl) SubmitTask(ctx context.Context, req SubmitTaskRequest)
 		CreatedAt: actReq.CreatedAt,
 	}
 	return taskRef, nil
+}
+
+// rejectRetiredStrategy fails explicitly when a caller asks for a retired
+// execution strategy. Legacy Team/Reviewed records remain readable, but no new
+// work can be created under them.
+func rejectRetiredStrategy(s ExecutionStrategy) error {
+	switch s {
+	case "", StrategyDirect:
+		return nil
+	case StrategyReviewed, StrategyTeam:
+		return fmt.Errorf("strategy %q is retired: A4C no longer manages teams or AI reviewers; run the task in direct mode", string(s))
+	default:
+		return fmt.Errorf("unknown strategy %q: the only execution model is direct", string(s))
+	}
+}
+
+// createRootActivity allocates the task's single root activity in the durable
+// store. One A4C task corresponds to one governed engineering outcome; child
+// activity scheduling no longer exists.
+func (s *TeamServiceImpl) createRootActivity(objective string, budget Budget, inputs map[string]any) (*ActivityRequest, error) {
+	actReq := &ActivityRequest{
+		ID:        fmt.Sprintf("task-%d", time.Now().UnixNano()),
+		AgentID:   "host",
+		Objective: objective,
+		Inputs:    inputs,
+		Budget:    budget,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := s.store.Enqueue(*actReq); err != nil {
+		return nil, err
+	}
+	if s.governor != nil {
+		s.governor.SetBudget(actReq.ID, budget)
+	}
+	return actReq, nil
 }
 
 // GetTask reconstructs the full task audit trail and derives its authoritative lifecycle state.
@@ -561,14 +574,6 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 		})
 		return nil, snapErr
 	}
-	if reviewed := s.reviewedSnapshot(req.TaskID); reviewed != "" && snapshotID != reviewed {
-		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
-			"op": "accept", "task_id": req.TaskID, "outcome": "denied",
-			"reason": "stale_or_unreviewed_snapshot", "reviewed_snapshot": reviewed, "current_snapshot": snapshotID,
-		})
-		return nil, fmt.Errorf("%w: current worktree snapshot %s does not match reviewed snapshot %s", ErrSnapshotMismatch, snapshotID, reviewed)
-	}
-
 	lifecycle.Accepted = true
 	lifecycle.AcceptedAt = time.Now()
 	lifecycle.AcceptedBy = req.AcceptedBy
@@ -1041,28 +1046,16 @@ func (s *TeamServiceImpl) ResumeTaskOnHost(ctx context.Context, req ResumeTaskRe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Verify that the requested target runtime is registered and available
-	if req.Runtime != "" && s.coordinator != nil && !s.coordinator.IsHostAvailable(req.Runtime) {
-		return nil, fmt.Errorf("%w: runtime %q is not registered or unavailable", ErrHostUnavailable, req.Runtime)
-	}
-
-	// Update checkpoint with target runtime info
-	if req.Runtime != "" {
-		chk.TargetRuntime = req.Runtime
-	}
-	if req.Model != "" {
-		chk.Model = req.Model
-	}
-	if req.Specialist != "" {
-		chk.SpecialistID = req.Specialist
-	}
+	// Continuation is host-driven: A4C records the checkpoint and the
+	// continuation instructions, and the host resumes execution. No runtime is
+	// selected or launched here.
 	if req.Instructions != "" {
 		chk.ContinuationInstructions = req.Instructions
 	}
 
-	// Reconcile uncommitted intents if reconciler available
-	if s.journal != nil && s.coordinator != nil && s.coordinator.Reconciler != nil {
-		_, _ = s.journal.ReconcileUnfinished(ctx, s.coordinator.Reconciler)
+	// Reconcile uncommitted local intents.
+	if s.journal != nil {
+		_, _ = s.journal.ReconcileUnfinished(ctx, &LocalEffectReconciler{WorkspaceDir: s.workspaceDir})
 	}
 
 	// Find the activity to resume
@@ -1076,15 +1069,6 @@ func (s *TeamServiceImpl) ResumeTaskOnHost(ctx context.Context, req ResumeTaskRe
 		// If activity was claimed, interrupted, or failed (e.g. host crashed mid-session), reset to pending so new host claims it
 		if actRec.Status == StatusClaimed || actRec.Status == StatusFailed || actRec.Status == StatusIndeterminate || actRec.Status == StatusInterrupted {
 			actRec.Status = StatusPending
-		}
-		if req.Runtime != "" {
-			actRec.Request.Runtime = req.Runtime
-		}
-		if req.Model != "" {
-			actRec.Request.Model = req.Model
-		}
-		if req.Specialist != "" {
-			actRec.Request.AgentID = req.Specialist
 		}
 		if actRec.Request.Inputs == nil {
 			actRec.Request.Inputs = make(map[string]any)
@@ -1102,7 +1086,7 @@ func (s *TeamServiceImpl) ResumeTaskOnHost(ctx context.Context, req ResumeTaskRe
 			IntentID:   fmt.Sprintf("intent-%s-resume-%d", req.TaskID, time.Now().UnixNano()),
 			ActivityID: targetActID,
 			Action:     "resume_task",
-			Target:     req.Runtime,
+			Target:     "host",
 			Status:     IntentCommitted,
 		})
 	}
@@ -1117,133 +1101,7 @@ func (s *TeamServiceImpl) ResumeTask(ctx context.Context, taskID string) error {
 	return err
 }
 
-// EscalateTask transitions a task to reviewed or team collaboration without losing progress.
-func (s *TeamServiceImpl) EscalateTask(ctx context.Context, req EscalateTaskRequest) (*TaskRef, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	if req.TaskID == "" {
-		return nil, fmt.Errorf("service: task_id is required")
-	}
-
-	rootRec, err := s.store.Get(req.TaskID)
-	if err != nil {
-		return nil, ErrTaskNotFound
-	}
-
-	if req.NewStrategy != StrategyReviewed && req.NewStrategy != StrategyTeam {
-		return nil, fmt.Errorf("service: invalid escalation strategy %q (must be reviewed or team)", req.NewStrategy)
-	}
-
-	rootRec.Request.Strategy = req.NewStrategy
-	_ = s.store.Update(*rootRec)
-
-	switch req.NewStrategy {
-	case StrategyReviewed:
-		// If not already present, enqueue independent reviewer
-		revID := fmt.Sprintf("%s-rev", req.TaskID)
-		if _, exists := s.store.Get(revID); exists != nil {
-			revAgent := req.Reviewer
-			if revAgent == "" {
-				revAgent = "reviewer"
-			}
-			revBudget := rootRec.Request.Budget.Allocated * 0.5
-			if revBudget < 30000 {
-				revBudget = 30000.0
-			}
-			revReq := ActivityRequest{
-				ID:        revID,
-				ParentID:  req.TaskID,
-				AgentID:   revAgent,
-				Objective: fmt.Sprintf("Review implementation of: %s", rootRec.Request.Objective),
-				Budget:    Budget{Allocated: revBudget},
-				DependsOn: []string{req.TaskID},
-				Strategy:  StrategyReviewed,
-				Runtime:   rootRec.Request.Runtime,
-				Model:     rootRec.Request.Model,
-				CreatedAt: time.Now(),
-			}
-			_ = s.store.Enqueue(revReq)
-		}
-
-	case StrategyTeam:
-		// Enqueue lead activity or team activities if needed
-		teamActID := fmt.Sprintf("%s-team-lead", req.TaskID)
-		if _, exists := s.store.Get(teamActID); exists != nil {
-			leadReq := ActivityRequest{
-				ID:        teamActID,
-				ParentID:  req.TaskID,
-				AgentID:   "lead",
-				Objective: fmt.Sprintf("Coordinate and complete: %s", rootRec.Request.Objective),
-				Budget:    Budget{Allocated: rootRec.Request.Budget.Allocated * 0.5},
-				Strategy:  StrategyTeam,
-				Runtime:   rootRec.Request.Runtime,
-				Model:     rootRec.Request.Model,
-				CreatedAt: time.Now(),
-			}
-			_ = s.store.Enqueue(leadReq)
-		}
-	}
-
-	if s.journal != nil {
-		_ = s.journal.RecordIntent(IntentRecord{
-			IntentID:   fmt.Sprintf("intent-%s-escalate-%d", req.TaskID, time.Now().UnixNano()),
-			ActivityID: req.TaskID,
-			Action:     "escalate_task",
-			Target:     string(req.NewStrategy),
-			Status:     IntentCommitted,
-		})
-	}
-
-	state, _, _ := s.deriveTaskState(req.TaskID)
-	return &TaskRef{
-		TaskID:    req.TaskID,
-		State:     state,
-		CreatedAt: rootRec.Request.CreatedAt,
-	}, nil
-}
-
-// ExecuteTask executes up to maxSteps for activities under this task tree.
-func (s *TeamServiceImpl) ExecuteTask(ctx context.Context, taskID string, maxSteps int) ([]*ActivityResult, error) {
-	_, err := s.store.Get(taskID)
-	if err != nil {
-		return nil, ErrTaskNotFound
-	}
-
-	if maxSteps <= 0 {
-		maxSteps = 10
-	}
-
-	var results []*ActivityResult
-	for i := 0; i < maxSteps; i++ {
-		if !s.store.HasClaimable() {
-			break
-		}
-		res, err := s.coordinator.Step(ctx)
-		if err != nil {
-			if pErr, ok := AsProviderFailure(err); ok {
-				chk, _ := s.CaptureCheckpoint(ctx, taskID)
-				if chk != nil {
-					chk.FailureReason = string(pErr.Kind)
-					chk.InterruptionKind = pErr.Kind
-					chk.InterruptionMessage = pErr.Message
-					_ = s.saveCheckpoint(chk)
-				}
-				if res != nil {
-					results = append(results, res)
-				}
-				return results, pErr
-			}
-			return results, err
-		}
-		if res == nil {
-			break
-		}
-		results = append(results, res)
-	}
-
-	return results, nil
-}
 
 // saveCheckpoint persists a TaskCheckpoint into the .a4c/checkpoints directory.
 func (s *TeamServiceImpl) saveCheckpoint(chk *TaskCheckpoint) error {
@@ -1261,30 +1119,6 @@ func (s *TeamServiceImpl) saveCheckpoint(chk *TaskCheckpoint) error {
 	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s.json", chk.TaskID)), data, 0644)
 }
 
-// DiscoverAlternativeHosts reports available execution providers other than currentHostOrTaskID.
-func (s *TeamServiceImpl) DiscoverAlternativeHosts(ctx context.Context, currentHostOrTaskID string) ([]HostCapabilities, error) {
-	if s.coordinator == nil {
-		return nil, nil
-	}
-
-	excludeHostID := currentHostOrTaskID
-	if s.store != nil {
-		if rec, err := s.store.Get(currentHostOrTaskID); err == nil && rec != nil {
-			if rec.Request.Runtime != "" {
-				excludeHostID = rec.Request.Runtime
-			}
-		}
-	}
-
-	allCaps := s.coordinator.ListHostCapabilities()
-	var available []HostCapabilities
-	for _, c := range allCaps {
-		if c.Available && c.HostID != excludeHostID {
-			available = append(available, c)
-		}
-	}
-	return available, nil
-}
 
 // AdoptExistingWork inspects ongoing external development in the working directory,
 // preserves existing changes without overwriting, and creates an A4C task for continuation.
@@ -1358,21 +1192,17 @@ func (s *TeamServiceImpl) AdoptExistingWork(ctx context.Context, req AdoptWorkRe
 		}
 	}
 
-	// An explicit strategy wins; otherwise the workspace default applies.
-	strategy := EffectiveStrategy(req.Strategy, s.workspaceDir)
-
-	budget := req.BudgetTokens
-	if budget <= 0 {
-		budget = 50000.0
+	if err := rejectRetiredStrategy(req.Strategy); err != nil {
+		return nil, err
 	}
+
+	budget := 50000.0
 
 	// 3. Create initial TaskCheckpoint with explicit Already Done / Still Needed data
 	chk := &TaskCheckpoint{
 		TaskID:                   taskID,
 		Objective:                req.Objective,
 		ActiveActivityID:         taskID,
-		SpecialistID:             "coder",
-		SpecialistRole:           "Software Engineer",
 		WorktreePath:             targetWorkspace,
 		WorktreeBranch:           branchName,
 		CurrentSnapshotSHA:       currentSnap,
@@ -1382,10 +1212,7 @@ func (s *TeamServiceImpl) AdoptExistingWork(ctx context.Context, req AdoptWorkRe
 		CompletedWork:            []string{fmt.Sprintf("Adopted %d modified and %d new files from native workspace", len(modifiedFiles), len(newFiles))},
 		RemainingObligations:     []string{req.Objective},
 		ContinuationInstructions: req.HandoffNotes,
-		Strategy:                 strategy,
 		SourceRuntime:            req.SourceHost,
-		TargetRuntime:            req.Runtime,
-		Model:                    req.Model,
 		UpdatedAt:                time.Now(),
 	}
 
@@ -1397,17 +1224,8 @@ func (s *TeamServiceImpl) AdoptExistingWork(ctx context.Context, req AdoptWorkRe
 		"new_files":                 newFiles,
 		"continuation_instructions": req.HandoffNotes,
 	}
-	if req.Runtime != "" {
-		inputs["runtime"] = req.Runtime
-	}
-	if req.Model != "" {
-		inputs["model"] = req.Model
-	}
-	if req.Specialist != "" {
-		inputs["specialist"] = req.Specialist
-	}
 
-	actReq, err := s.coordinator.SubmitTaskWithStrategy(req.Objective, Budget{Allocated: budget}, inputs, strategy)
+	actReq, err := s.createRootActivity(req.Objective, Budget{Allocated: budget}, inputs)
 	if err != nil {
 		return nil, fmt.Errorf("service: failed to submit adopted task: %w", err)
 	}
@@ -1440,19 +1258,7 @@ func activitySucceeded(rec *ActivityRecord) bool {
 	return rec.Result == nil || rec.Result.Status != StatusFailed
 }
 
-// isReviewRecord reports whether an activity carries review semantics.
-func isReviewRecord(rec *ActivityRecord) bool {
-	if rec == nil {
-		return false
-	}
-	agent := strings.ToLower(rec.Request.AgentID)
-	return agent == "reviewer" || agent == "charlie" || strings.Contains(rec.Request.ID, "review")
-}
 
-// strategyRequiresReview reports whether the strategy mandates independent review.
-func strategyRequiresReview(strategy ExecutionStrategy) bool {
-	return strategy == StrategyReviewed || strategy == StrategyTeam
-}
 
 // GraphViolation describes one reason a task cannot be accepted or integrated.
 type GraphViolation struct {
@@ -1462,9 +1268,8 @@ type GraphViolation struct {
 }
 
 // ValidateTaskGraph reports every reason the task cannot be finalized: any
-// required activity that is not in a successful terminal state, and a missing
-// approved review where the strategy requires one. It is read-only: historical
-// records are reported, never rewritten.
+// activity in the tree that is not in a successful terminal state. It is
+// read-only: historical records are reported, never rewritten.
 func (s *TeamServiceImpl) ValidateTaskGraph(taskID string) ([]GraphViolation, error) {
 	rootRec, err := s.store.Get(taskID)
 	if err != nil {
@@ -1487,14 +1292,19 @@ func (s *TeamServiceImpl) ValidateTaskGraph(taskID string) ([]GraphViolation, er
 			add(rec.Request.ID, string(rec.Status), "activity did not complete successfully")
 		}
 	}
-	if strategyRequiresReview(rootRec.Request.Strategy) && !s.hasApprovedReviewRecord(taskID) {
-		add(taskID, "", fmt.Sprintf("strategy %q requires an approved review before acceptance", rootRec.Request.Strategy))
+	// Historical compatibility: a legacy Reviewed task kept its recorded
+	// contract (an approved review before acceptance). New tasks carry no
+	// strategy and are never subject to this rule; historical records are read,
+	// not reinterpreted as direct.
+	if rootRec.Request.Strategy == StrategyReviewed && !s.hasApprovedReviewRecord(taskID) {
+		add(taskID, "", "legacy reviewed task has no approved review record")
 	}
 	return violations, nil
 }
 
 // hasApprovedReviewRecord reports whether the task graph contains an approved
-// review recorded by a completed review activity.
+// review record. It exists to read historical Reviewed tasks; nothing creates
+// review records any more.
 func (s *TeamServiceImpl) hasApprovedReviewRecord(taskID string) bool {
 	for _, rec := range s.store.GetTaskTree(taskID) {
 		if !activitySucceeded(rec) || !isReviewRecord(rec) || rec.Result == nil {
@@ -1506,6 +1316,16 @@ func (s *TeamServiceImpl) hasApprovedReviewRecord(taskID string) bool {
 	}
 	return false
 }
+
+// isReviewRecord identifies historical review activities in legacy task graphs.
+func isReviewRecord(rec *ActivityRecord) bool {
+	if rec == nil {
+		return false
+	}
+	agent := strings.ToLower(rec.Request.AgentID)
+	return agent == "charlie" || agent == "reviewer" || strings.Contains(rec.Request.ID, "review")
+}
+
 
 func formatViolations(vs []GraphViolation) string {
 	parts := make([]string, 0, len(vs))
@@ -1604,7 +1424,7 @@ func (s *TeamServiceImpl) deriveTaskState(rootID string) (TaskLifecycleState, *H
 		}
 	}
 
-	// An approved review is necessary where the strategy requires it, but it
+	// A recorded completion is necessary, but it
 	// can never substitute for completed engineering work: an incomplete
 	// activity graph is not review-ready.
 	if hasNonTerminal {
@@ -1675,51 +1495,7 @@ func (s *TeamServiceImpl) snapshotStrict(taskID string) (string, error) {
 	return id, nil
 }
 
-// coderCompletionSnapshot returns the snapshot recorded by the most recent completed
-// non-reviewer activity of the task, or "" if none was recorded.
-func (s *TeamServiceImpl) coderCompletionSnapshot(taskID string) string {
-	var best string
-	var bestAt time.Time
-	for _, rec := range s.store.GetTaskTree(taskID) {
-		if rec.Result == nil || rec.Status != StatusCompleted {
-			continue
-		}
-		agent := strings.ToLower(rec.Request.AgentID)
-		if agent == "charlie" || agent == "reviewer" || strings.Contains(rec.Request.ID, "review") {
-			continue
-		}
-		snap, _ := rec.Result.Outputs["snapshot_id"].(string)
-		if snap == "" {
-			continue
-		}
-		if best == "" || rec.Request.CreatedAt.After(bestAt) {
-			best, bestAt = snap, rec.Request.CreatedAt
-		}
-	}
-	return best
-}
 
-// reviewedSnapshot returns the snapshot of the latest approved review, or "".
-func (s *TeamServiceImpl) reviewedSnapshot(taskID string) string {
-	var best string
-	var bestAt time.Time
-	for _, rec := range s.store.GetTaskTree(taskID) {
-		if rec.Result == nil || rec.Status != StatusCompleted {
-			continue
-		}
-		if approved, _ := rec.Result.Outputs["approved"].(bool); !approved {
-			continue
-		}
-		snap, _ := rec.Result.Outputs["snapshot_sha"].(string)
-		if snap == "" {
-			continue
-		}
-		if best == "" || rec.Request.CreatedAt.After(bestAt) {
-			best, bestAt = snap, rec.Request.CreatedAt
-		}
-	}
-	return best
-}
 
 func parseGitDiff(raw string) ([]FileDiff, int, int) {
 	if strings.TrimSpace(raw) == "" {
@@ -1777,7 +1553,7 @@ func parseGitDiff(raw string) ([]FileDiff, int, int) {
 	return files, totalAdds, totalDels
 }
 
-// GetTeamContext returns environmental context for host-native coordinators.
+// GetTeamContext returns environmental context for host-native execution.
 func (s *TeamServiceImpl) GetTeamContext(ctx context.Context) (*TeamContextResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1793,19 +1569,6 @@ func (s *TeamServiceImpl) GetTeamContext(ctx context.Context) (*TeamContextResul
 	cmd.Dir = s.workspaceDir
 	if out, err := cmd.Output(); err == nil {
 		commit = strings.TrimSpace(string(out))
-	}
-
-	var members []TeamMemberInfo
-	if s.roster != nil {
-		for _, m := range s.roster.ListMembers() {
-			members = append(members, TeamMemberInfo{
-				ID:           m.ID,
-				Name:         m.Name,
-				Role:         m.Role,
-				Charter:      m.Charter,
-				AllowedTools: m.AllowedTools,
-			})
-		}
 	}
 
 	var activeTasks []TaskSummary
@@ -1845,7 +1608,6 @@ func (s *TeamServiceImpl) GetTeamContext(ctx context.Context) (*TeamContextResul
 		WorkspaceRoot:  s.workspaceDir,
 		CurrentBranch:  branch,
 		HeadCommit:     commit,
-		TeamMembers:    members,
 		ActiveTasks:    activeTasks,
 		RecentMemories: memories,
 		KnowledgeDir:   kbDir,
@@ -1866,22 +1628,14 @@ func (s *TeamServiceImpl) BeginTask(ctx context.Context, req BeginTaskRequest) (
 	if req.BudgetTokens <= 0 {
 		req.BudgetTokens = 50000.0
 	}
-	// An explicit strategy wins; otherwise the workspace default applies; the
-	// final fallback is direct. Resolving here rather than in each host's prompt
-	// means a task gets the intended mode even when the host never names one.
-	req.Strategy = EffectiveStrategy(req.Strategy, s.workspaceDir)
-	if req.Coordinator == "" {
-		if req.Strategy == StrategyDirect {
-			req.Coordinator = "coder"
-		} else {
-			req.Coordinator = "alice"
-		}
+	if err := rejectRetiredStrategy(req.Strategy); err != nil {
+		return nil, err
 	}
 
 	branchName := fmt.Sprintf("a4c/%s", taskID)
 	wtPath := s.workspaceDir
 	if s.wtMgr != nil {
-		rec, err := s.wtMgr.AcquireWorktree(ctx, taskID, req.Coordinator)
+		rec, err := s.wtMgr.AcquireWorktree(ctx, taskID, "host")
 		if err == nil && rec != nil {
 			wtPath = rec.WorktreePath
 			branchName = rec.Branch
@@ -1890,15 +1644,12 @@ func (s *TeamServiceImpl) BeginTask(ctx context.Context, req BeginTaskRequest) (
 
 	actReq := ActivityRequest{
 		ID:        taskID,
-		AgentID:   req.Coordinator,
+		AgentID:   "host",
 		Objective: req.Objective,
 		Budget:    Budget{Allocated: req.BudgetTokens},
-		Strategy:  req.Strategy,
-		Runtime:   req.Runtime,
 		Inputs: map[string]any{
 			"worktree_path": wtPath,
 			"branch":        branchName,
-			"coordinator":   req.Coordinator,
 		},
 		CreatedAt: time.Now(),
 	}
@@ -1929,109 +1680,12 @@ func (s *TeamServiceImpl) BeginTask(ctx context.Context, req BeginTaskRequest) (
 	return &BeginTaskResult{
 		TaskID:         taskID,
 		State:          TaskStateRunning,
-		Strategy:       req.Strategy,
-		Coordinator:    req.Coordinator,
 		WorktreePath:   wtPath,
 		WorktreeBranch: branchName,
 		CreatedAt:      actReq.CreatedAt,
 	}, nil
 }
 
-// AssignActivity records that the coordinator dispatched work to a specialist (Bob or Charlie).
-func (s *TeamServiceImpl) AssignActivity(ctx context.Context, req AssignActivityRequest) (*ActivityRef, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if strings.TrimSpace(req.TaskID) == "" {
-		return nil, fmt.Errorf("service: task_id is required")
-	}
-	if strings.TrimSpace(req.Agent) == "" {
-		return nil, fmt.Errorf("service: agent is required")
-	}
-
-	// Lifecycle gates at the service boundary: Direct mode does not delegate
-	// (its contract is a single programmer working in the root activity), and
-	// a finalized task's graph can no longer be extended without invalidating
-	// the accepted result. Native host subagents are unaffected: they never
-	// create A4C activities.
-	rootRec, err := s.store.Get(req.TaskID)
-	if err != nil {
-		return nil, ErrTaskNotFound
-	}
-	if rootRec.Request.Strategy == StrategyDirect {
-		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
-			"op": "assign_activity", "task_id": req.TaskID, "outcome": "denied",
-			"reason": "direct_mode_no_delegation", "agent": req.Agent,
-		})
-		return nil, ErrDelegationNotPermitted
-	}
-	if lifecycle, _ := s.lifecycleStore.Get(req.TaskID); lifecycle != nil &&
-		(lifecycle.Accepted || lifecycle.Integrated || lifecycle.Rejected) {
-		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
-			"op": "assign_activity", "task_id": req.TaskID, "outcome": "denied",
-			"reason": "task_finalized", "agent": req.Agent,
-		})
-		return nil, ErrTaskFinalized
-	}
-
-	wtPath := s.workspaceDir
-	if s.wtMgr != nil {
-		if rec, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && rec != nil {
-			wtPath = rec.WorktreePath
-		}
-	}
-
-	role := req.Role
-	if role == "" {
-		if strings.EqualFold(req.Agent, "bob") || strings.Contains(strings.ToLower(req.Agent), "coder") {
-			role = "coder"
-		} else if strings.EqualFold(req.Agent, "charlie") || strings.Contains(strings.ToLower(req.Agent), "review") {
-			role = "reviewer"
-		} else {
-			role = "specialist"
-		}
-	}
-
-	actID := fmt.Sprintf("%s-%s-%d", req.TaskID, req.Agent, time.Now().UnixNano()%1000000)
-	actReq := ActivityRequest{
-		ID:        actID,
-		ParentID:  req.TaskID,
-		AgentID:   req.Agent,
-		Objective: req.Objective,
-		Inputs: map[string]any{
-			"role":          role,
-			"input":         req.Input,
-			"allowed_tools": req.AllowedTools,
-			"worktree_path": wtPath,
-		},
-		CreatedAt: time.Now(),
-	}
-
-	if s.store != nil {
-		if err := s.store.Enqueue(actReq); err != nil {
-			return nil, fmt.Errorf("service: failed to enqueue specialist activity: %w", err)
-		}
-	}
-
-	if s.journal != nil {
-		_ = s.journal.RecordIntent(IntentRecord{
-			IntentID:   fmt.Sprintf("intent-%s-assign", actID),
-			ActivityID: actID,
-			Action:     "assign_activity",
-			Target:     req.Agent,
-			Status:     IntentCommitted,
-		})
-	}
-
-	return &ActivityRef{
-		ActivityID:   actID,
-		TaskID:       req.TaskID,
-		Agent:        req.Agent,
-		Role:         role,
-		WorktreePath: wtPath,
-		AssignedAt:   actReq.CreatedAt,
-	}, nil
-}
 
 // RecordCheckpoint records intermediate progress and findings durably.
 func (s *TeamServiceImpl) RecordCheckpoint(ctx context.Context, req CheckpointRequest) (*CheckpointResult, error) {
@@ -2306,8 +1960,14 @@ func (s *TeamServiceImpl) amendRootKnowledge(rec *ActivityRecord, req CompleteAc
 		return nil, fmt.Errorf("service: knowledge amendment is only supported on the root task activity")
 	}
 	actor := strings.ToLower(strings.TrimSpace(req.Actor))
-	if actor != strings.ToLower(rec.Request.AgentID) && actor != "lead" && actor != "alice" {
-		return nil, fmt.Errorf("service: only the root activity agent or the lead may amend the task-level knowledge assessment")
+	rootActor := strings.ToLower(rec.Request.AgentID)
+	completionActor := ""
+	if rec.Result != nil {
+		completionActor, _ = rec.Result.Outputs["actor"].(string)
+		completionActor = strings.ToLower(completionActor)
+	}
+	if actor != rootActor && actor != completionActor && actor != "human_cli" {
+		return nil, fmt.Errorf("service: only the root activity's actor or the human operator may amend the task-level knowledge assessment")
 	}
 
 	outcome := s.processKnowledgeClaim(req.Knowledge, req.Actor, rec.Request.ID, true)
@@ -2435,149 +2095,3 @@ func knowledgeCoverageWarnings(cov *TaskKnowledgeCoverage) []string {
 	return w
 }
 
-// RecordReview records an independent reviewer verdict and validates non-mutating reviewer boundaries.
-func (s *TeamServiceImpl) RecordReview(ctx context.Context, req RecordReviewRequest) (*HostReviewResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if strings.TrimSpace(req.TaskID) == "" {
-		return nil, fmt.Errorf("service: task_id is required")
-	}
-	if strings.TrimSpace(req.Reviewer) == "" {
-		req.Reviewer = "charlie"
-	}
-
-	current := s.resolveCurrentSnapshot(req.TaskID)
-
-	// A review is bound to the exact content snapshot the reviewer examined.
-	// Allow "HEAD" or worktree git commit SHA to resolve to the current snapshot identity.
-	if strings.EqualFold(req.SnapshotSHA, "head") {
-		req.SnapshotSHA = current
-	} else if req.SnapshotSHA != "" && current != "" && req.SnapshotSHA != current {
-		wtPath := s.absPath(s.workspaceDir)
-		if s.wtMgr != nil {
-			if rec, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && rec != nil {
-				wtPath = s.absPath(rec.WorktreePath)
-			}
-		}
-		cmdRev := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
-		cmdRev.Dir = wtPath
-		if out, err := cmdRev.CombinedOutput(); err == nil {
-			gitHead := strings.TrimSpace(string(out))
-			if strings.HasPrefix(gitHead, req.SnapshotSHA) || strings.HasPrefix(req.SnapshotSHA, gitHead) {
-				req.SnapshotSHA = current
-			}
-		}
-	}
-
-	if req.SnapshotSHA != "" && current != "" && req.SnapshotSHA != current {
-		_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
-			"op": "review", "task_id": req.TaskID, "outcome": "denied",
-			"reason": "stale_review_snapshot", "reviewer": req.Reviewer,
-			"claimed_snapshot": req.SnapshotSHA, "current_snapshot": current,
-		})
-		return nil, fmt.Errorf("%w: review references %s but worktree is at %s", ErrSnapshotMismatch, req.SnapshotSHA, current)
-	}
-
-	// Non-Mutating Reviewer Boundary Invariant (DETECTED, not prevented, at this layer):
-	// the worktree content must be identical to what it was when the coder completed.
-	// This replaces the earlier "worktree is dirty" test, which misclassified the coder's
-	// own uncommitted work as a reviewer mutation.
-	if baseline := s.coderCompletionSnapshot(req.TaskID); baseline != "" {
-		if current != "" && baseline != current {
-			_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
-				"op": "review", "task_id": req.TaskID, "outcome": "denied",
-				"reason": "reviewer_invariant", "reviewer": req.Reviewer,
-				"baseline_snapshot": baseline, "current_snapshot": current,
-			})
-			return nil, fmt.Errorf("governance: non-mutating reviewer invariant violated: reviewer %s observed workspace changes since coder completion (snapshot %s -> %s)", req.Reviewer, baseline, current)
-		}
-	} else {
-		// No coder completion recorded yet: fall back to requiring a clean worktree.
-		wtPath := s.absPath(s.workspaceDir)
-		if s.wtMgr != nil {
-			if rec, err := s.wtMgr.GetWorktree(req.TaskID); err == nil && rec != nil {
-				wtPath = s.absPath(rec.WorktreePath)
-			}
-		}
-		cmdStat := exec.CommandContext(ctx, "git", "status", "--porcelain")
-		cmdStat.Dir = wtPath
-		if out, err := cmdStat.CombinedOutput(); err == nil {
-			if dirty := strings.TrimSpace(string(out)); len(dirty) > 0 {
-				return nil, fmt.Errorf("governance: non-mutating reviewer invariant violated: reviewer %s produced workspace modifications (%s)", req.Reviewer, dirty)
-			}
-		}
-	}
-
-	commit := current
-	if commit == "" {
-		commit = req.SnapshotSHA
-	}
-
-	revActID := fmt.Sprintf("%s-review-%d", req.TaskID, time.Now().UnixNano()%1000000)
-	isApproved := strings.EqualFold(req.Verdict, "approved")
-	revResult := ActivityResult{
-		ID:          revActID,
-		Status:      StatusCompleted,
-		EvidenceIDs: req.Findings,
-		Outputs: map[string]any{
-			"reviewer":     req.Reviewer,
-			"approved":     isApproved,
-			"comments":     req.Comments,
-			"verdict":      req.Verdict,
-			"snapshot_sha": commit,
-		},
-	}
-
-	if s.store != nil {
-		if err := s.store.Enqueue(ActivityRequest{
-			ID:        revActID,
-			ParentID:  req.TaskID,
-			AgentID:   req.Reviewer,
-			Objective: fmt.Sprintf("Independent code review of snapshot %s", commit),
-			CreatedAt: time.Now(),
-		}); err != nil {
-			return nil, fmt.Errorf("service: record review activity: %w", err)
-		}
-		if err := s.store.Complete(revActID, revResult); err != nil {
-			return nil, fmt.Errorf("service: persist review outcome: %w", err)
-		}
-	}
-
-	targetState := TaskStateAwaitingHumanReview
-	if strings.EqualFold(req.Verdict, "rejected") {
-		targetState = TaskStateAwaitingDecision
-	} else if strings.EqualFold(req.Verdict, "revisions_requested") {
-		targetState = TaskStateRevisionRequested
-	}
-
-	if s.lifecycleStore != nil {
-		rec, _ := s.lifecycleStore.Get(req.TaskID)
-		if rec == nil {
-			rec = &HumanLifecycleRecord{
-				TaskID: req.TaskID,
-			}
-		}
-		rec.UpdatedAt = time.Now()
-		_ = s.lifecycleStore.Save(rec)
-	}
-
-	if s.journal != nil {
-		_ = s.journal.RecordIntent(IntentRecord{
-			IntentID:   fmt.Sprintf("intent-%s-review", revActID),
-			ActivityID: req.TaskID,
-			Action:     "record_review",
-			Target:     req.Verdict,
-			Status:     IntentCommitted,
-		})
-	}
-
-	return &HostReviewResult{
-		TaskID:         req.TaskID,
-		Reviewer:       req.Reviewer,
-		Verdict:        req.Verdict,
-		ReviewedAt:     time.Now(),
-		LifecycleState: targetState,
-		SnapshotSHA:    commit,
-	}, nil
-}

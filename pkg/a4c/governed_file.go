@@ -58,13 +58,6 @@ func (s *TeamServiceImpl) ApplyWorkspaceFile(ctx context.Context, req ApplyWorks
 		return nil, fmt.Errorf("service: refusing to write empty content")
 	}
 
-	// Non-mutating roles (lead, reviewer) may never write through this path.
-	// This mirrors the reviewer boundary the headless adapters enforce, and is
-	// belt-and-braces with the role-filtered MCP registration.
-	if !isMutatingSpecialist(req.AgentID) {
-		return nil, fmt.Errorf("service: agent %q is non-mutating and may not apply workspace files", req.AgentID)
-	}
-
 	// Resolve the isolated worktree. GetWorktreePath takes the service lock
 	// internally, so it must be called before any lock is held here.
 	worktree, err := s.GetWorktreePath(taskID)
@@ -84,8 +77,8 @@ func (s *TeamServiceImpl) ApplyWorkspaceFile(ctx context.Context, req ApplyWorks
 	}
 
 	// Policy authorization, same gate the headless governed tool uses.
-	if s.coordinator != nil && s.coordinator.Governor != nil {
-		if err := s.coordinator.Governor.AuthorizeToolInvocation(req.AgentID, "governed_apply_patch"); err != nil {
+	if s.governor != nil {
+		if err := s.governor.AuthorizeToolInvocation(req.AgentID, "governed_apply_patch"); err != nil {
 			return nil, fmt.Errorf("service: policy denied governed write for %s: %w", req.AgentID, err)
 		}
 	}

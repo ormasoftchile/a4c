@@ -193,12 +193,29 @@ go test -race -short ./pkg/a4c/...
 
 All testing is deterministic and offline.
 
-## 7. Retired Capabilities
+## 7. Product Guarantees
 
-Earlier releases offered execution strategies (`reviewed`, `team`) with A4C-managed reviewers, delegated worker activities, and a team coordinator. Three stages of controlled benchmarking found no demonstrated correctness or efficiency advantage for that orchestration, and it has been **retired** as a deliberate architectural reduction:
+A4C tells you why it refused, re-checks what it is about to change, and keeps a record that cannot be quietly edited. Four guarantees cover every command you run:
 
-- New tasks cannot select a strategy; requests naming `reviewed` or `team` fail explicitly.
-- No delegation, reviewer scheduling, or coordinator execution exists in the product.
-- Historical Team/Reviewed task records remain readable and immutable, and cannot bypass lifecycle validation.
+**Every refusal is explicit.** Nothing is silently ignored or guessed at. Unknown commands name their replacement, close typos get a suggestion, and unsupported options fail with the reason:
+
+```console
+$ a4c doctor
+Unknown command "doctor".
+It moved: use a4c status doctor
+
+$ a4c stauts
+Unknown command "stauts".
+Did you mean "status"?
+
+$ a4c task submit "migrate the cache" --bogus
+unsupported argument "--bogus" (see 'a4c task submit --help')
+```
+
+**Every approval is a human act.** `a4c task accept` refuses agent callers outright, and an unattended invocation must present an explicit token (`--token` or `A4C_HUMAN_AUTH_TOKEN`) — otherwise it demands an interactive terminal. Self-approval is not a configuration option.
+
+**Every integration is re-validated.** Integration does not trust the approval it follows; it re-runs the gates. An incomplete activity graph, a dirty base checkout, or a snapshot that moved since acceptance each aborts the merge with the reason.
+
+**Every record is tamper-evident.** Approvals, denials, and integrations append to a hash-chained audit stream: each entry carries the hash of the entry before it, so editing history is detectable rather than merely discouraged. Task records stay readable and durable, and the workspace survives switching hosts.
 
 Agent orchestration belongs to the native execution host; A4C governs engineering outcomes.

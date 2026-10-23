@@ -120,6 +120,27 @@ func TestHostStartCommands(t *testing.T) {
 	}
 }
 
+// TestBannerLegend pins the three legend lines beside the wordmark: line 1 is
+// the product name, line 3 is the release version, so the banner always tells
+// the operator which binary they are running.
+func TestBannerLegend(t *testing.T) {
+	if bannerLegend[0] != "Agent for Coding" {
+		t.Errorf("banner line 1 = %q, want %q", bannerLegend[0], "Agent for Coding")
+	}
+	if bannerLegend[1] != "Knowledge Building" {
+		t.Errorf("banner line 2 = %q, want %q", bannerLegend[1], "Knowledge Building")
+	}
+	if want := "v. " + a4c.Version; bannerLegend[2] != want {
+		t.Errorf("banner line 3 = %q, want %q", bannerLegend[2], want)
+	}
+
+	// The rendered banner must carry the version on the third line.
+	out := banner()
+	if !strings.Contains(out, "v. "+a4c.Version) {
+		t.Errorf("rendered banner does not print the version:\n%s", out)
+	}
+}
+
 // TestVersionLine pins the exact shape of `a4c --version` output: a single
 // "a4c <semver>" line that scripts can parse.
 func TestVersionLine(t *testing.T) {

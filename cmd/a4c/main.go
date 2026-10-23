@@ -28,15 +28,14 @@ const (
 	ansiGray  = "\x1b[0;37m"
 )
 
-// bannerLegend is the expanded name, split across the three wordmark rows so
-// the legend sits beside the logo instead of on its own line below. The
-// em-dash separator of the single-line form is implied by the row break; the
-// three lines read as one phrase: Agents for Coding — Knowledge Building
-// Engineering Team.
+// bannerLegend is the line of text set beside each wordmark row. The first
+// two rows spell the product line — Agent for Coding — Knowledge Building —
+// and the third carries the release version, so the banner self-describes the
+// binary the operator is actually running.
 var bannerLegend = [3]string{
-	"Agents for Coding",
+	"Agent for Coding",
 	"Knowledge Building",
-	"Engineering Team",
+	"v. " + a4c.Version,
 }
 
 // bannerLegendGap separates the wordmark canvas from the legend text.

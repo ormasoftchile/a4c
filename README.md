@@ -204,13 +204,15 @@ partial completion and retains the in-memory record for recovery.
 
 ## 4. Execution Strategies
 
-A4C supports three distinct execution strategies tailored to task complexity:
+A4C supports three distinct execution strategies. A task's strategy resolves in this order: the mode named in the request ("fix this in reviewed mode"), then the workspace default, then **direct**.
 
-| Strategy | Flag | Execution Flow | Overhead | Ideal Use Case |
+| Strategy | Flag | Execution Flow | Acceptance Gate | Ideal Use Case |
 | :--- | :--- | :--- | :--- | :--- |
-| **Direct Mode** | `--strategy direct` (Default) | Single specialist turn with worktree isolation and test evidence collection. Zero coordinators, zero automatic reviewers. | < 0.2s | Bugfixes, focused features, rapid iterations requiring native host speed. |
-| **Reviewed Mode** | `--strategy reviewed` | Specialist implementer turn, followed by an independent read-only reviewer turn gating approval on passing test evidence. | Specialist + Reviewer | Security-sensitive changes, public API modifications, production code. |
-| **Team Mode** | `--strategy team` | Lead engineer breaks down objective into delegated subtasks for specialists, followed by quality review. | Multi-turn | Complex multi-step architectural features requiring decomposition. |
+| **Direct Mode** | `--strategy direct` (fallback default) | One specialist activity works in an isolated worktree — no coordinator session, no automatic reviewer. The service **refuses delegation** in this mode (`ErrDelegationNotPermitted`), so a direct task stays a single-programmer task. | Completed work plus a matching snapshot. **No review record is required.** | Bugfixes, focused features, rapid iterations requiring native host speed. |
+| **Reviewed Mode** | `--strategy reviewed` | Two activities: the specialist implements (70% of the budget, floor 35k), then a strictly read-only reviewer activity (50%, floor 30k) runs against the finished snapshot, depending on the specialist's completion. Reviewer runtime and model can differ from the implementer's. | Completed activity graph **and** an approved review record — `a4c task accept` refuses with a graph violation until a reviewer has approved that exact snapshot. | Security-sensitive changes, public API modifications, production code. |
+| **Team Mode** | `--strategy team` | A lead activity decomposes the objective and delegates subtasks to specialists, followed by quality review. | Completed activity graph **and** an approved review record. | Complex multi-step architectural features requiring decomposition. |
+
+The gate is an *approved review record*, not merely passing tests: an approved review can never substitute for completed engineering work either — any activity that is pending, failed, or interrupted blocks acceptance on its own, whatever the strategy.
 
 ### Setting a workspace default mode
 

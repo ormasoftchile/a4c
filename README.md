@@ -296,6 +296,17 @@ It moved: use a4c status doctor
 
 Plain typos get a suggestion instead: `a4c stauts` reports `Did you mean "status"?`
 
+### Version
+
+`a4c --version` (also `-version` or `version`) prints the release as a single parseable line:
+
+```console
+$ a4c --version
+a4c 0.1.0
+```
+
+Approving a change carries a release rule: `a4c task accept` records a patch-level bump of the workspace version (`pkg/a4c/VERSION`) with the approval, and `a4c task integrate` lands it as its own `chore(release): bump version to X.Y.Z` commit alongside the approved change. A rejected or abandoned task never bumps the version, and a workspace without a version file is left alone.
+
 ### Task IDs are optional
 
 `task-id` is optional on every task subcommand that takes one. Omit it and a4c targets the task that most needs attention in the relevant state — so recovering from an interruption is three commands with no copy-paste:

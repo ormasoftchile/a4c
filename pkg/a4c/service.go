@@ -579,6 +579,17 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 	lifecycle.AcceptComments = req.Comments
 	lifecycle.Rejected = false
 
+	// Release rule: approving a change advances the project version at the
+	// patch level. The decision is recorded with the approval and applied at
+	// integration, so an abandoned or rejected task never bumps the version
+	// and the checkout stays untouched by acceptance itself.
+	versionBumpTo := ""
+	if from, to, ok := PendingVersionBump(s.workspaceDir); ok {
+		lifecycle.VersionBumpFrom = from
+		lifecycle.VersionBumpTo = to
+		versionBumpTo = to
+	}
+
 	if err := s.lifecycleStore.Save(lifecycle); err != nil {
 		return nil, fmt.Errorf("service: save acceptance: %w", err)
 	}
@@ -586,6 +597,7 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 	_ = AppendAudit(s.workspaceDir, "approvals", map[string]any{
 		"op": "accept", "task_id": req.TaskID, "outcome": "approved",
 		"snapshot": snapshotID, "actor": lifecycle.AcceptedBy, "auth_method": authMethod, "comments": req.Comments,
+		"version_bump": versionBumpTo,
 	})
 
 	res := &AcceptResult{
@@ -594,6 +606,7 @@ func (s *TeamServiceImpl) AcceptTask(ctx context.Context, req AcceptTaskRequest)
 		AcceptedAt:          lifecycle.AcceptedAt,
 		Comments:            req.Comments,
 		AuthorizationMethod: authMethod,
+		VersionBumpTo:       versionBumpTo,
 	}
 	// Knowledge accountability surfaces as warnings only; acceptance of the
 	// engineering work is never blocked by a missing or pending assessment.
@@ -684,6 +697,7 @@ func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRe
 	// 3. Apply changes from worktree to workspaceDir
 	filesChanged := 0
 	commitSHA := currentSnapshot
+	version := ""
 
 	// If a git worktree branch exists, commit working changes in worktree and perform merge into main workspace
 	if s.wtMgr != nil {
@@ -738,6 +752,32 @@ func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRe
 					return nil, fmt.Errorf("service: worktree is not clean after staging approved content; integration aborted: %s (err %v)",
 						strings.TrimSpace(string(out)), err)
 				}
+
+				// Release rule: an accepted change carries a patch-level
+				// version bump. It lands here — after the approved content
+				// has been committed and re-verified, as its own commit on
+				// the task branch — so the merged tree ships the approved
+				// change and the new version together while the approved
+				// snapshot itself is never mutated.
+				if from, _, ok := PendingVersionBump(wt.WorktreePath); ok {
+					if target, apply := NextRelease(from, lifecycle.VersionBumpFrom, lifecycle.VersionBumpTo); apply {
+						if err := os.WriteFile(filepath.Join(wt.WorktreePath, filepath.FromSlash(VersionFilePath)), []byte(target+"\n"), 0644); err != nil {
+							return nil, fmt.Errorf("service: write version bump: %w", err)
+						}
+						cmdBumpAdd := exec.CommandContext(ctx, "git", "add", filepath.FromSlash(VersionFilePath))
+						cmdBumpAdd.Dir = wt.WorktreePath
+						if out, err := cmdBumpAdd.CombinedOutput(); err != nil {
+							return nil, fmt.Errorf("service: git add version bump failed: %s (%w)", strings.TrimSpace(string(out)), err)
+						}
+						cmdBumpCommit := exec.CommandContext(ctx, "git", "commit", "-m", fmt.Sprintf("chore(release): bump version to %s", target))
+						cmdBumpCommit.Dir = wt.WorktreePath
+						if out, err := cmdBumpCommit.CombinedOutput(); err != nil {
+							return nil, fmt.Errorf("service: git commit version bump failed: %s (%w)", strings.TrimSpace(string(out)), err)
+						}
+						lifecycle.VersionBumpTo = target
+						version = target
+					}
+				}
 			}
 
 			if wt.Branch != "" {
@@ -780,6 +820,20 @@ func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRe
 		})
 	}
 
+	// Release rule, non-worktree mode: the accepted change still carries its
+	// patch-level version bump, written straight into the workspace.
+	if version == "" {
+		if from, _, ok := PendingVersionBump(s.workspaceDir); ok {
+			if target, apply := NextRelease(from, lifecycle.VersionBumpFrom, lifecycle.VersionBumpTo); apply {
+				if err := os.WriteFile(WorkspaceVersionFile(s.workspaceDir), []byte(target+"\n"), 0644); err != nil {
+					return nil, fmt.Errorf("service: write version bump: %w", err)
+				}
+				lifecycle.VersionBumpTo = target
+				version = target
+			}
+		}
+	}
+
 	lifecycle.Integrated = true
 	lifecycle.IntegratedAt = time.Now()
 	lifecycle.IntegratedCommit = commitSHA
@@ -793,6 +847,7 @@ func (s *TeamServiceImpl) IntegrateTask(ctx context.Context, req IntegrateTaskRe
 		IntegratedCommit: commitSHA,
 		IntegratedAt:     lifecycle.IntegratedAt,
 		FilesChanged:     filesChanged,
+		Version:          version,
 	}, nil
 }
 

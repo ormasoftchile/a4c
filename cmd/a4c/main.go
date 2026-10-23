@@ -91,6 +91,19 @@ func banner() string {
 	return b.String()
 }
 
+// versionLine is the single-line report of the running binary's release.
+func versionLine() string {
+	return "a4c " + a4c.Version
+}
+
+// printVersionBump reports the release version an integration landed, or
+// nothing at all when the workspace carries no version file.
+func printVersionBump(version string) {
+	if version != "" {
+		fmt.Printf("Version: %s\n", version)
+	}
+}
+
 func printUsage() {
 	fmt.Print(banner())
 	fmt.Print("Usage: a4c <command> [options]\n\nCommands:\n")
@@ -98,6 +111,9 @@ func printUsage() {
 		fmt.Printf("  %-9s %s\n", c.name, c.summary)
 	}
 	fmt.Print(`
+Global options:
+  --version             Print the a4c release version
+
 Subcommands:
   init, install, and mcp are self-contained.
   task    submit start run resume adopt escalate checkpoint list history
@@ -207,6 +223,14 @@ func main() {
 
 	if cmd == "help" || cmd == "-h" || cmd == "--help" {
 		printUsage()
+		return
+	}
+
+	// Version is a global flag, not a root command: it takes no arguments and
+	// belongs to every invocation, so it is answered before dispatch instead
+	// of occupying a slot in the root surface.
+	if cmd == "version" || cmd == "--version" || cmd == "-version" {
+		fmt.Println(versionLine())
 		return
 	}
 
@@ -1475,6 +1499,9 @@ func runTask(args []string) {
 			os.Exit(1)
 		}
 		fmt.Printf("Accepted %s at snapshot %s (auth: %s).\n", res.TaskID, res.AcceptedSnapshot, res.AuthorizationMethod)
+		if res.VersionBumpTo != "" {
+			fmt.Printf("Release rule: version will be bumped to %s when you run 'a4c task integrate'.\n", res.VersionBumpTo)
+		}
 
 		if !doIntegrate {
 			fmt.Println("Working checkout untouched. Run 'a4c task integrate' to apply the changes.")
@@ -1488,6 +1515,7 @@ func runTask(args []string) {
 		}
 		fmt.Printf("Integrated %s. Commit: %s | Files modified: %d\n",
 			ires.TaskID, ires.IntegratedCommit, ires.FilesChanged)
+		printVersionBump(ires.Version)
 
 	case "integrate":
 		if len(args) < 2 {
@@ -1502,6 +1530,7 @@ func runTask(args []string) {
 		}
 		fmt.Printf("Task %s integrated successfully.\nCommit: %s | Files modified: %d\n",
 			res.TaskID, res.IntegratedCommit, res.FilesChanged)
+		printVersionBump(res.Version)
 
 	case "reject":
 		if len(args) < 3 {

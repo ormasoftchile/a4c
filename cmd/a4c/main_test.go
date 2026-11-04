@@ -14,7 +14,7 @@ import (
 // of task or status) or the dispatch table was changed without updating the
 // documented surface.
 func TestRootCommandSurface(t *testing.T) {
-	want := []string{"init", "install", "task", "mcp", "status"}
+	want := []string{"init", "install", "task", "initiative", "mcp", "status"}
 	got := make([]string, 0, len(rootCommands))
 	for _, c := range rootCommands {
 		if c.name == "" {

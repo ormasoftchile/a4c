@@ -623,7 +623,56 @@ func RunDoctor(rootDir string) DoctorReport {
 		addCheck("Antigravity", "A4C Skill", false, ".agents/skills/a4c/SKILL.md not found. Run 'a4c install antigravity'.")
 	}
 
-	// 6. Host availability (binary presence only; hosts own their execution)
+	// 6. Squad CLI & Custom Roles (Initiative Orchestration)
+	squadBin, err := exec.LookPath("squad")
+	if err == nil {
+		cmd := exec.Command(squadBin, "--version")
+		verOut, _ := cmd.Output()
+		verStr := strings.TrimSpace(string(verOut))
+		if verStr == "" {
+			verStr = "installed"
+		}
+		addCheck("Squad", "CLI Binary", true, fmt.Sprintf("%s (%s)", squadBin, verStr))
+
+		squadDir := filepath.Join(absRoot, ".squad")
+		if stat, err := os.Stat(squadDir); err == nil && stat.IsDir() {
+			addCheck("Squad", "Roles & Decisions (.squad)", true, ".squad/ present")
+		} else {
+			addCheck("Squad", "Roles & Decisions (.squad)", false, ".squad/ not found. Run 'squad init --roles'.")
+		}
+
+		squadAgent := filepath.Join(absRoot, ".github", "agents", "squad.agent.md")
+		if _, err := os.Stat(squadAgent); err == nil {
+			addCheck("Squad", "Agent Definition", true, ".github/agents/squad.agent.md present")
+		} else {
+			addCheck("Squad", "Agent Definition", false, ".github/agents/squad.agent.md not found. Run 'squad init --roles'.")
+		}
+	} else {
+		addCheck("Squad", "CLI Binary", false, "squad binary not found in PATH. Install with: npm install -g @bradygaster/squad-cli")
+	}
+
+	// 7. Spec-Kit CLI & Templates (Initiative Orchestration)
+	specifyBin, err := exec.LookPath("specify")
+	if err == nil {
+		cmd := exec.Command(specifyBin, "--version")
+		verOut, _ := cmd.Output()
+		verStr := strings.TrimSpace(string(verOut))
+		if verStr == "" {
+			verStr = "installed"
+		}
+		addCheck("Spec-Kit", "CLI Binary", true, fmt.Sprintf("%s (%s)", specifyBin, verStr))
+
+		specifyDir := filepath.Join(absRoot, ".specify")
+		if stat, err := os.Stat(specifyDir); err == nil && stat.IsDir() {
+			addCheck("Spec-Kit", "Templates (.specify)", true, ".specify/ present")
+		} else {
+			addCheck("Spec-Kit", "Templates (.specify)", false, ".specify/ not found. Run 'specify init --here --force --non-interactive --integration copilot'.")
+		}
+	} else {
+		addCheck("Spec-Kit", "CLI Binary", false, "specify binary not found in PATH. Install with: brew install specify (or: uv tool install specify-cli)")
+	}
+
+	// 8. Host availability (binary presence only; hosts own their execution)
 	hosts := probeHosts()
 
 	return DoctorReport{

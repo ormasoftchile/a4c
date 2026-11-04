@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -112,6 +113,7 @@ Global options:
 
 Subcommands:
   init, install, and mcp are self-contained.
+  initiative start status stage
   task    submit start run resume adopt escalate checkpoint list history
           inspect diff feedback accept integrate reject decide worker loop
   status  doctor team decisions memory knowledge
@@ -136,6 +138,7 @@ var rootCommands = []rootCommand{
 	{name: "init", summary: "Initialize an a4c workspace and wire host integrations", run: runInit},
 	{name: "install", summary: "Install host-native agent definitions (copilot|opencode|antigravity|all)", run: runInstall},
 	{name: "task", summary: "Submit, execute, review, and integrate work", run: runTask},
+	{name: "initiative", summary: "Orchestrate multi-stage projects with Squad, Spec-Kit, and DAG governance", run: runInitiative},
 	{name: "mcp", summary: "Run the Model Context Protocol (MCP) server over stdio", run: runMCP},
 	{name: "status", summary: "Inspect environment, team, and workspace state", run: runStatus},
 }
@@ -322,11 +325,61 @@ func runDoctor(args []string) {
 	}
 }
 
+func resolveDotDir(workDir string) string {
+	absWork, err := filepath.Abs(workDir)
+	if err != nil {
+		absWork = workDir
+	}
+
+	// In a git repository or git worktree, the authoritative repository root
+	// is the parent of git-common-dir. This ensures child worktrees attach to
+	// the main repository's .a4c rather than accidentally creating or reading
+	// isolated, phantom .a4c directories inside the worktree.
+	cmd := exec.Command("git", "-C", absWork, "rev-parse", "--git-common-dir")
+	if out, err := cmd.Output(); err == nil {
+		commonDir := strings.TrimSpace(string(out))
+		if commonDir != "" {
+			if !filepath.IsAbs(commonDir) {
+				commonDir = filepath.Clean(filepath.Join(absWork, commonDir))
+			} else {
+				commonDir = filepath.Clean(commonDir)
+			}
+			repoRoot := filepath.Dir(commonDir)
+			candidate := filepath.Join(repoRoot, ".a4c")
+			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+				return candidate
+			}
+		}
+	}
+
+	// 1. Direct check
+	candidate := filepath.Join(absWork, ".a4c")
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		return candidate
+	}
+
+	// 2. Check parent directories
+	curr := absWork
+	for {
+		parent := filepath.Dir(curr)
+		if parent == curr {
+			break
+		}
+		candidate := filepath.Join(parent, ".a4c")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+		curr = parent
+	}
+
+	return filepath.Join(workDir, ".a4c")
+}
+
 func getPaths(workDir string) (string, string, string, string, string) {
 	if workDir == "" {
 		workDir = "."
 	}
-	dotDir := filepath.Join(workDir, ".a4c")
+	dotDir := resolveDotDir(workDir)
 	storeDir := filepath.Join(dotDir, "activities")
 	rosterDir := filepath.Join(dotDir, "roster")
 	memDir := filepath.Join(dotDir, "memory")
@@ -453,6 +506,7 @@ func buildService(workDir string) (*a4c.TeamServiceImpl, error) {
 	dotDir, storeDir, _, memDir, journalDir := getPaths(workDir)
 	lifecycleDir := filepath.Join(dotDir, "lifecycle")
 	wtDir := filepath.Join(dotDir, "worktrees")
+	repoRoot := filepath.Dir(dotDir)
 
 	store, err := a4c.NewDurableActivityStore(storeDir)
 	if err != nil {
@@ -470,7 +524,7 @@ func buildService(workDir string) (*a4c.TeamServiceImpl, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open journal: %w", err)
 	}
-	wtMgr, err := a4c.NewWorktreeManager(workDir, wtDir)
+	wtMgr, err := a4c.NewWorktreeManager(repoRoot, wtDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open worktree manager: %w", err)
 	}
@@ -478,7 +532,7 @@ func buildService(workDir string) (*a4c.TeamServiceImpl, error) {
 	gov := a4c.NewPolicyGovernor([]string{
 		"governed_read_file", "governed_apply_patch", "governed_propose_memory",
 	})
-	return a4c.NewTeamService(workDir, store, lifecycleStore, gov, memStore, journal, wtMgr), nil
+	return a4c.NewTeamService(repoRoot, store, lifecycleStore, gov, memStore, journal, wtMgr), nil
 }
 
 
